@@ -5,5 +5,12 @@ edition = "2024"
 
 [dependencies]
 agent = { path = "../agent" }
-llm = { workspace = true }
 providers = { path = "../providers" }
+llm = { workspace = true }
+ratatui = { version = "0.30.2", default-features = false, features = ["crossterm_0_28"] }
+anyhow = "1"
+tokio = { workspace = true }
+
+[[bin]]
+name = "alan"
+path = "src/main.rs"
