@@ -1,11 +1,10 @@
-use crate::{
-    AssistantMessage, ContentBlock, LlmError, LlmRequest, Message, Role, StopReason, ToolCall,
-};
+use crate::{LlmError, LlmEvent, LlmRequest, Message, Role, StopReason, Usage};
 use serde::{Deserialize, Serialize};
 
 #[derive(Serialize)]
 struct Request<'a> {
     model: &'a str,
+    stream: bool,
     messages: Vec<WireMessage>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     tools: Vec<WireTool>,
@@ -54,22 +53,35 @@ struct WireDefinition {
 }
 
 #[derive(Deserialize)]
-struct Response {
+struct StreamResponse {
     model: Option<String>,
-    choices: Vec<Choice>,
+    choices: Vec<StreamChoice>,
     usage: Option<WireUsage>,
 }
 
 #[derive(Deserialize)]
-struct Choice {
-    message: ResponseMessage,
+struct StreamChoice {
+    delta: Option<StreamDelta>,
     finish_reason: Option<String>,
 }
 
 #[derive(Deserialize)]
-struct ResponseMessage {
+struct StreamDelta {
     content: Option<String>,
-    tool_calls: Option<Vec<ResponseToolCall>>,
+    tool_calls: Option<Vec<StreamToolCallWire>>,
+}
+
+#[derive(Deserialize)]
+struct StreamToolCallWire {
+    index: Option<usize>,
+    id: Option<String>,
+    function: Option<StreamFunctionWire>,
+}
+
+#[derive(Deserialize)]
+struct StreamFunctionWire {
+    name: Option<String>,
+    arguments: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -78,16 +90,21 @@ struct WireUsage {
     completion_tokens: u64,
 }
 
-#[derive(Deserialize)]
-struct ResponseToolCall {
-    id: String,
-    function: ResponseFunction,
+#[derive(Debug)]
+pub(crate) struct StreamChunk {
+    pub(crate) model: Option<String>,
+    pub(crate) text: Option<String>,
+    pub(crate) tool_calls: Vec<StreamToolCall>,
+    pub(crate) finish_reason: Option<String>,
+    pub(crate) usage: Option<Usage>,
 }
 
-#[derive(Deserialize)]
-struct ResponseFunction {
-    name: String,
-    arguments: String,
+#[derive(Debug)]
+pub(crate) struct StreamToolCall {
+    pub(crate) index: usize,
+    pub(crate) id: Option<String>,
+    pub(crate) name: Option<String>,
+    pub(crate) arguments: String,
 }
 
 pub(crate) fn serialize_request(request: &LlmRequest<'_>) -> Result<String, LlmError> {
@@ -95,6 +112,7 @@ pub(crate) fn serialize_request(request: &LlmRequest<'_>) -> Result<String, LlmE
     let tools = request.tools.iter().map(wire_tool).collect();
     serde_json::to_string(&Request {
         model: request.model_id,
+        stream: true,
         messages,
         tools,
         temperature: request.options.temperature,
@@ -103,52 +121,71 @@ pub(crate) fn serialize_request(request: &LlmRequest<'_>) -> Result<String, LlmE
     .map_err(LlmError::Serialization)
 }
 
-pub(crate) fn deserialize_response(body: &str) -> Result<AssistantMessage, LlmError> {
-    let response: Response = serde_json::from_str(body).map_err(LlmError::Serialization)?;
-    let choice = response
-        .choices
-        .first()
-        .ok_or_else(|| LlmError::InvalidResponse("response contains no choices".into()))?;
-    let message = &choice.message;
-    let calls = message
-        .tool_calls
-        .as_ref()
+pub(crate) fn deserialize_stream_chunk(body: &str) -> Result<StreamChunk, LlmError> {
+    let response: StreamResponse = serde_json::from_str(body).map_err(LlmError::Serialization)?;
+    let choice = response.choices.first();
+    let delta = choice.and_then(|choice| choice.delta.as_ref());
+    let text = delta
+        .and_then(|delta| delta.content.clone())
+        .filter(|text| !text.is_empty());
+    let tool_calls = delta
+        .and_then(|delta| delta.tool_calls.as_ref())
         .into_iter()
         .flatten()
-        .map(|call| ToolCall {
+        .map(|call| StreamToolCall {
+            index: call.index.unwrap_or_default(),
             id: call.id.clone(),
-            name: call.function.name.clone(),
-            arguments: call.function.arguments.clone(),
+            name: call
+                .function
+                .as_ref()
+                .and_then(|function| function.name.clone()),
+            arguments: call
+                .function
+                .as_ref()
+                .and_then(|function| function.arguments.clone())
+                .unwrap_or_default(),
         })
-        .collect::<Vec<_>>();
+        .collect();
 
-    let mut content = Vec::new();
-    if let Some(text) = message.content.clone().filter(|text| !text.is_empty()) {
-        content.push(ContentBlock::Text(text));
-    }
-    content.extend(calls.into_iter().map(ContentBlock::ToolCall));
-    let has_content = !content.is_empty();
-
-    Ok(AssistantMessage {
-        content,
-        stop_reason: stop_reason(choice.finish_reason.as_deref(), has_content),
-        usage: response.usage.map(|usage| crate::Usage {
+    Ok(StreamChunk {
+        model: response.model,
+        text,
+        tool_calls,
+        finish_reason: choice.and_then(|choice| choice.finish_reason.clone()),
+        usage: response.usage.map(|usage| Usage {
             input_tokens: usage.prompt_tokens,
             output_tokens: usage.completion_tokens,
         }),
-        model: response.model,
     })
 }
 
-fn stop_reason(finish_reason: Option<&str>, has_content: bool) -> StopReason {
-    match finish_reason {
-        Some("tool_calls") | Some("function_call") => StopReason::ToolUse,
-        Some("length") => StopReason::Length,
-        Some("content_filter") => StopReason::ContentFilter,
-        Some("stop") => StopReason::Stop,
-        _ if has_content => StopReason::Stop,
-        _ => StopReason::Error,
+pub(crate) fn stream_events(chunk: StreamChunk) -> Vec<LlmEvent> {
+    let mut events = Vec::new();
+    if let Some(text) = chunk.text {
+        events.push(LlmEvent::TextDelta { text });
     }
+    events.extend(
+        chunk
+            .tool_calls
+            .into_iter()
+            .map(|call| LlmEvent::ToolCallDelta {
+                index: call.index,
+                id: call.id,
+                name: call.name,
+                arguments: call.arguments,
+            }),
+    );
+    events
+}
+
+pub(crate) fn stop_reason_for_finish_reason(reason: Option<&str>) -> Option<StopReason> {
+    reason.map(|reason| match reason {
+        "tool_calls" | "function_call" => StopReason::ToolUse,
+        "length" => StopReason::Length,
+        "content_filter" => StopReason::ContentFilter,
+        "stop" => StopReason::Stop,
+        _ => StopReason::Error,
+    })
 }
 
 fn wire_message(message: &Message) -> WireMessage {
@@ -213,7 +250,7 @@ mod tests {
     }
 
     #[test]
-    fn serializes_model_id_options_messages_and_tools() {
+    fn serializes_stream_request_with_options_messages_and_tools() {
         let messages = [Message::system("system"), Message::user("hello")];
         let tools = [ToolDefinition {
             name: "weather".into(),
@@ -228,6 +265,7 @@ mod tests {
         let json: serde_json::Value = serde_json::from_str(&body).unwrap();
 
         assert_eq!(json["model"], "model-a");
+        assert_eq!(json["stream"], true);
         assert_eq!(json["temperature"], 0.2);
         assert_eq!(json["max_tokens"], 128);
         assert_eq!(json["messages"][1]["content"], "hello");
@@ -247,47 +285,51 @@ mod tests {
     }
 
     #[test]
-    fn deserializes_model_usage_finish_reason_and_tool_calls() {
+    fn decodes_text_tool_calls_finish_reason_and_usage() {
         let body = r#"{
             "model": "served-model",
             "choices": [{
                 "finish_reason": "tool_calls",
-                "message": {
+                "delta": {
                     "content": "Checking",
                     "tool_calls": [{
+                        "index": 0,
                         "id": "call-1",
-                        "type": "function",
-                        "function": {"name": "weather", "arguments": "{\"city\":\"NYC\"}"}
+                        "function": {"name": "weather", "arguments": "{\"city\":"}
                     }]
                 }
             }],
             "usage": {"prompt_tokens": 11, "completion_tokens": 7}
         }"#;
 
-        let response = deserialize_response(body).unwrap();
-        assert_eq!(response.model.as_deref(), Some("served-model"));
-        assert_eq!(response.stop_reason, StopReason::ToolUse);
-        assert_eq!(response.usage.as_ref().unwrap().input_tokens, 11);
-        assert_eq!(response.tool_calls().next().unwrap().name, "weather");
+        let chunk = deserialize_stream_chunk(body).unwrap();
+        assert_eq!(chunk.model.as_deref(), Some("served-model"));
+        assert_eq!(chunk.text.as_deref(), Some("Checking"));
+        assert_eq!(chunk.tool_calls[0].name.as_deref(), Some("weather"));
+        assert_eq!(chunk.tool_calls[0].arguments, "{\"city\":");
+        assert_eq!(chunk.finish_reason.as_deref(), Some("tool_calls"));
+        assert_eq!(chunk.usage.unwrap().output_tokens, 7);
+    }
+
+    #[test]
+    fn accepts_usage_only_chunk() {
+        let chunk = deserialize_stream_chunk(
+            r#"{"choices":[],"usage":{"prompt_tokens":2,"completion_tokens":3}}"#,
+        )
+        .unwrap();
+        assert!(chunk.text.is_none());
+        assert_eq!(chunk.usage.unwrap().input_tokens, 2);
     }
 
     #[test]
     fn maps_finish_reasons() {
-        for (finish_reason, expected) in [
+        for (reason, expected) in [
             ("stop", StopReason::Stop),
             ("length", StopReason::Length),
             ("content_filter", StopReason::ContentFilter),
+            ("tool_calls", StopReason::ToolUse),
         ] {
-            let body = format!(
-                r#"{{"choices":[{{"finish_reason":"{finish_reason}","message":{{"content":"done"}}}}]}}"#
-            );
-            assert_eq!(deserialize_response(&body).unwrap().stop_reason, expected);
+            assert_eq!(stop_reason_for_finish_reason(Some(reason)), Some(expected));
         }
-    }
-
-    #[test]
-    fn rejects_response_without_choices() {
-        let error = deserialize_response(r#"{"choices":[]}"#).unwrap_err();
-        assert!(matches!(error, LlmError::InvalidResponse(_)));
     }
 }

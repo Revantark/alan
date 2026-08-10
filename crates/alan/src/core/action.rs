@@ -1,12 +1,15 @@
 //! UI-independent actions produced by frontend input adapters.
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Action {
-    Quit,
+    Interrupt,
+    Resize,
     Submit,
     ClearInput,
     Backspace,
     Insert(char),
     ScrollUp,
     ScrollDown,
+    MouseScrollUp,
+    MouseScrollDown,
 }

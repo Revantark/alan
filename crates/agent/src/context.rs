@@ -1,9 +1,9 @@
-use llm::{AssistantMessage, Message, ToolCall};
+use llm::{LlmResponse, Message, ToolCall};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum AgentMessage {
     User(String),
-    Assistant(AssistantMessage),
+    Assistant(LlmResponse),
     ToolResult {
         tool_call_id: String,
         content: String,
@@ -42,7 +42,7 @@ mod tests {
 
     #[test]
     fn plain_assistant_message_omits_empty_tool_calls() {
-        let assistant = AssistantMessage {
+        let assistant = LlmResponse {
             content: vec![ContentBlock::Text("hello".into())],
             stop_reason: StopReason::Stop,
             usage: None,

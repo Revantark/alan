@@ -15,7 +15,7 @@ mod tests {
     use super::*;
     use async_trait::async_trait;
     use llm::{
-        AssistantMessage, CompletionInput, ContentBlock, LlmError, RequestOptions, StopReason,
+        CompletionInput, ContentBlock, LlmError, LlmEvent, LlmResponse, RequestOptions, StopReason,
     };
     use std::sync::Arc;
 
@@ -23,21 +23,28 @@ mod tests {
 
     #[async_trait]
     impl llm::LlmApi for FakeApi {
-        async fn complete(
-            &self,
-            request: llm::LlmRequest<'_>,
-        ) -> Result<AssistantMessage, LlmError> {
+        async fn stream(&self, request: llm::LlmRequest<'_>) -> Result<llm::LlmStream, LlmError> {
             let content = request
                 .messages
                 .last()
                 .and_then(|message| message.content.clone())
                 .unwrap_or_default();
-            Ok(AssistantMessage {
+            let response = LlmResponse {
                 content: vec![ContentBlock::Text(format!("echo: {content}"))],
                 stop_reason: StopReason::Stop,
                 usage: None,
                 model: Some(request.model_id.to_owned()),
-            })
+            };
+            let text = response.text();
+            let model = response.model.clone();
+            Ok(Box::pin(futures_util::stream::iter([
+                Ok(LlmEvent::TextDelta { text }),
+                Ok(LlmEvent::Done {
+                    stop_reason: StopReason::Stop,
+                    usage: None,
+                    model,
+                }),
+            ])))
         }
     }
 

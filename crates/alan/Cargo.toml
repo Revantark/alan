@@ -6,10 +6,15 @@ edition = "2024"
 [dependencies]
 agent = { path = "../agent" }
 providers = { path = "../providers" }
-llm = { workspace = true }
 ratatui = { version = "0.30.2", default-features = false, features = ["crossterm_0_28"] }
+crossterm = { version = "0.28", features = ["event-stream"] }
 anyhow = "1"
 tokio = { workspace = true }
+futures-util = { workspace = true }
+
+[dev-dependencies]
+llm = { workspace = true }
+async-trait = { workspace = true }
 
 [[bin]]
 name = "alan"

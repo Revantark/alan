@@ -1,7 +1,10 @@
 mod codec;
+mod sse;
 
-use crate::{AssistantMessage, HttpClient, LlmApi, LlmError, LlmRequest};
+use crate::{HttpClient, LlmApi, LlmError, LlmEvent, LlmRequest, LlmStream, StopReason};
 use async_trait::async_trait;
+use futures_util::{StreamExt, stream};
+use std::collections::VecDeque;
 use std::sync::Arc;
 
 const ENDPOINT: &str = "/chat/completions";
@@ -22,19 +25,111 @@ impl ChatCompletionsApi {
 
 #[async_trait]
 impl LlmApi for ChatCompletionsApi {
-    async fn complete(&self, request: LlmRequest<'_>) -> Result<AssistantMessage, LlmError> {
+    async fn stream(&self, request: LlmRequest<'_>) -> Result<LlmStream, LlmError> {
         let body = codec::serialize_request(&request)?;
         let url = format!("{}{}", self.base_url.trim_end_matches('/'), ENDPOINT);
         let response = self.http.post(&url, &body, request.credential).await?;
         let status = response.status();
-        let body = response.text().await.map_err(LlmError::Transport)?;
         if !status.is_success() {
+            let body = response.text().await.map_err(LlmError::Transport)?;
             return Err(LlmError::Http {
                 status: status.as_u16(),
                 body,
             });
         }
-        codec::deserialize_response(&body)
+
+        let state = StreamState::new(response.bytes_stream());
+        let output = stream::try_unfold(state, |mut state| async move {
+            let event = state.next_event().await?;
+            Ok::<_, LlmError>(event.map(|event| (event, state)))
+        });
+
+        Ok(Box::pin(output))
+    }
+}
+
+struct StreamState<S> {
+    input: S,
+    decoder: sse::SseDecoder,
+    pending: VecDeque<LlmEvent>,
+    model: Option<String>,
+    stop_reason: Option<StopReason>,
+    usage: Option<crate::Usage>,
+    done: bool,
+}
+
+impl<S> StreamState<S>
+where
+    S: futures_util::Stream<Item = Result<bytes::Bytes, reqwest::Error>> + Unpin,
+{
+    fn new(input: S) -> Self {
+        Self {
+            input,
+            decoder: sse::SseDecoder::default(),
+            pending: VecDeque::new(),
+            model: None,
+            stop_reason: None,
+            usage: None,
+            done: false,
+        }
+    }
+
+    async fn next_event(&mut self) -> Result<Option<LlmEvent>, LlmError> {
+        loop {
+            if let Some(event) = self.pending.pop_front() {
+                return Ok(Some(event));
+            }
+
+            if self.done {
+                return Ok(None);
+            }
+
+            match self.input.next().await {
+                Some(Ok(bytes)) => {
+                    let payloads = self.decoder.push(&bytes)?;
+                    self.add_payloads(payloads)?;
+                }
+                Some(Err(error)) => return Err(LlmError::Transport(error)),
+                None => {
+                    let payloads = self.decoder.finish()?;
+                    self.add_payloads(payloads)?;
+                    if !self.done {
+                        return Err(LlmError::InvalidResponse(
+                            "stream ended without [DONE]".into(),
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
+    fn add_payloads(&mut self, payloads: Vec<String>) -> Result<(), LlmError> {
+        for payload in payloads {
+            if payload == "[DONE]" {
+                self.done = true;
+                self.pending.push_back(LlmEvent::Done {
+                    stop_reason: self.stop_reason.unwrap_or(StopReason::Stop),
+                    usage: self.usage.clone(),
+                    model: self.model.clone(),
+                });
+                continue;
+            }
+
+            let chunk = codec::deserialize_stream_chunk(&payload)?;
+            if let Some(model) = chunk.model.clone() {
+                self.model = Some(model);
+            }
+            if let Some(usage) = chunk.usage.clone() {
+                self.usage = Some(usage);
+            }
+            if let Some(stop_reason) =
+                codec::stop_reason_for_finish_reason(chunk.finish_reason.as_deref())
+            {
+                self.stop_reason = Some(stop_reason);
+            }
+            self.pending.extend(codec::stream_events(chunk));
+        }
+        Ok(())
     }
 }
 
@@ -42,6 +137,7 @@ impl LlmApi for ChatCompletionsApi {
 mod tests {
     use super::*;
     use crate::{Message, RequestOptions, ToolDefinition};
+    use futures_util::StreamExt;
     use std::sync::Arc;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
@@ -62,43 +158,27 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sends_chat_completion_request() {
+    async fn streams_chat_completion_events() {
         let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
         let address = listener.local_addr().unwrap();
         let server = tokio::spawn(async move {
             let (mut socket, _) = listener.accept().await.unwrap();
             let mut request = Vec::new();
             let mut buffer = [0; 4096];
-            let mut content_length = None;
             loop {
                 let read = socket.read(&mut buffer).await.unwrap();
                 assert!(read > 0);
                 request.extend_from_slice(&buffer[..read]);
-                if content_length.is_none() {
-                    if let Some(headers_end) =
-                        request.windows(4).position(|window| window == b"\r\n\r\n")
-                    {
-                        let headers = String::from_utf8_lossy(&request[..headers_end]);
-                        content_length = headers.lines().find_map(|line| {
-                            line.strip_prefix("content-length:")
-                                .or_else(|| line.strip_prefix("Content-Length:"))
-                                .and_then(|value| value.trim().parse::<usize>().ok())
-                        });
+                if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    let body = String::from_utf8_lossy(&request);
+                    if body.contains("\"stream\":true") {
+                        break;
                     }
-                }
-                let body_start = request
-                    .windows(4)
-                    .position(|window| window == b"\r\n\r\n")
-                    .map(|position| position + 4);
-                if let (Some(body_start), Some(content_length)) = (body_start, content_length)
-                    && request.len() >= body_start + content_length
-                {
-                    break;
                 }
             }
             socket
                 .write_all(
-                    b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\nconnection: close\r\n\r\n{\"choices\":[{\"message\":{\"content\":\"pong\"}}]}",
+                    b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\nconnection: close\r\n\r\ndata: {\"model\":\"served\",\"choices\":[{\"delta\":{\"content\":\"hel\"}}]}\n\ndata: {\"choices\":[{\"delta\":{\"content\":\"lo\"}}]}\n\ndata: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":2,\"completion_tokens\":3}}\n\ndata: [DONE]\n\n",
                 )
                 .await
                 .unwrap();
@@ -109,16 +189,19 @@ mod tests {
             ChatCompletionsApi::new(format!("http://{address}/v1/"), Arc::new(HttpClient::new()));
         let messages = [Message::user("ping")];
         let options = RequestOptions::default();
-        let response = api
-            .complete(request("model", &messages, &[], &options))
+        let mut events = api
+            .stream(request("model", &messages, &[], &options))
             .await
             .unwrap();
-        assert_eq!(response.text(), "pong");
-
-        let raw_request = server.await.unwrap();
-        assert!(raw_request.starts_with("POST /v1/chat/completions HTTP/1.1"));
-        let body = raw_request.split("\r\n\r\n").nth(1).unwrap();
-        let body: serde_json::Value = serde_json::from_str(body).unwrap();
-        assert_eq!(body["model"], "model");
+        let mut builder = crate::LlmResponseBuilder::new();
+        while let Some(event) = events.next().await {
+            let event = event.unwrap();
+            builder.apply(&event).unwrap();
+        }
+        let response = builder.finish().unwrap();
+        assert_eq!(response.text(), "hello");
+        assert_eq!(response.model.as_deref(), Some("served"));
+        assert_eq!(response.usage.unwrap().output_tokens, 3);
+        assert!(server.await.unwrap().contains("\"stream\":true"));
     }
 }

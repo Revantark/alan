@@ -10,6 +10,10 @@ pub enum AgentError {
     ToolNotFound(String),
     #[error("maximum tool rounds exceeded")]
     MaxToolRounds,
+    #[error("agent request aborted")]
+    Aborted,
+    #[error("agent event stream closed")]
+    EventStreamClosed,
     #[error(transparent)]
     Tool(#[from] ToolError),
 }

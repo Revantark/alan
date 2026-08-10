@@ -96,7 +96,7 @@ fn default_model(id: &str) -> ModelInfo {
         name: id.into(),
         api: ApiId::ChatCompletions,
         capabilities: ModelCapabilities {
-            streaming: false,
+            streaming: true,
             tools: true,
             vision: false,
             reasoning: false,

@@ -1,6 +1,6 @@
 use crate::auth::{AuthError, AuthResolver};
 use crate::catalog::ModelInfo;
-use llm::{AssistantMessage, CompletionInput, LlmApi, LlmError, LlmRequest};
+use llm::{CompletionInput, LlmApi, LlmError, LlmRequest, LlmResponse, LlmStream};
 use std::sync::Arc;
 use thiserror::Error;
 
@@ -28,10 +28,7 @@ impl Model {
         &self.info
     }
 
-    pub async fn complete(
-        &self,
-        input: CompletionInput<'_>,
-    ) -> Result<AssistantMessage, ModelError> {
+    pub async fn complete(&self, input: CompletionInput<'_>) -> Result<LlmResponse, ModelError> {
         let credential = self.auth.resolve().await?;
         let request = LlmRequest {
             model_id: &self.info.id,
@@ -41,5 +38,17 @@ impl Model {
             credential: Some(&credential),
         };
         Ok(self.api.complete(request).await?)
+    }
+
+    pub async fn stream(&self, input: CompletionInput<'_>) -> Result<LlmStream, ModelError> {
+        let credential = self.auth.resolve().await?;
+        let request = LlmRequest {
+            model_id: &self.info.id,
+            messages: input.messages,
+            tools: input.tools,
+            options: input.options,
+            credential: Some(&credential),
+        };
+        Ok(self.api.stream(request).await?)
     }
 }
