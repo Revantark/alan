@@ -9,7 +9,7 @@ mod theme;
 
 use crate::core::{Action, Command, Controller, Overlay, Poll};
 use components::{Chat, Footer, Header, LoginOverlay};
-use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers, MouseEventKind};
+use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEventKind};
 use edtui::{EditorEventHandler, EditorMode, EditorState, Lines};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Position};
@@ -114,6 +114,14 @@ impl UiState {
             {
                 self.apply(Action::Interrupt, false)
             }
+            Event::Key(key) if is_multiline_enter(key) => {
+                if self.editor.mode != EditorMode::Insert {
+                    self.editor.mode = EditorMode::Insert;
+                }
+                self.editor.execute(edtui::actions::LineBreak(1));
+                self.dirty = true;
+                None
+            }
             Event::Key(key) if key.code == KeyCode::Enter => self.submit_editor_or_accept(),
             Event::Key(key) if key.code == KeyCode::Esc => {
                 self.editor_events.on_event(event, &mut self.editor);
@@ -159,9 +167,7 @@ impl UiState {
     }
 
     fn new_editor() -> EditorState {
-        let mut editor = EditorState::new(Lines::from(""));
-        editor.set_single_line(true);
-        editor
+        EditorState::new(Lines::from(""))
     }
 
     fn editor_text(&self) -> String {
@@ -246,6 +252,13 @@ impl UiState {
         self.editor.mode
     }
 
+    pub(super) fn editor_line_count(&self) -> u16 {
+        self.editor
+            .lines
+            .len()
+            .clamp(1, usize::from(theme::EDITOR_VISIBLE_LINES)) as u16
+    }
+
     pub(super) fn cursor_screen_position(&self) -> Option<Position> {
         self.editor.cursor_screen_position()
     }
@@ -264,6 +277,16 @@ impl Default for UiState {
     fn default() -> Self {
         Self::new()
     }
+}
+
+fn is_multiline_enter(key: KeyEvent) -> bool {
+    matches!(key.code, KeyCode::Char('\n' | '\r'))
+        || (matches!(key.code, KeyCode::Char('j' | 'm'))
+            && key.modifiers.contains(KeyModifiers::CONTROL))
+        || (key.code == KeyCode::Enter
+            && (key.modifiers.contains(KeyModifiers::SHIFT)
+                || key.modifiers.contains(KeyModifiers::CONTROL)
+                || key.modifiers.contains(KeyModifiers::ALT)))
 }
 
 #[derive(Debug, Default)]
@@ -291,7 +314,7 @@ impl AppView {
         let [header_area, chat_area, footer_area] = Layout::vertical([
             Constraint::Length(1),
             Constraint::Min(1),
-            Constraint::Length(5),
+            Constraint::Length(4 + state.editor_line_count()),
         ])
         .areas(frame.area());
 
@@ -385,6 +408,120 @@ mod tests {
 
         assert_eq!(state.editor_text(), "x");
         assert_eq!(state.editor_mode(), EditorMode::Normal);
+    }
+
+    #[test]
+    fn shift_enter_inserts_newline_without_submitting() {
+        let mut state = UiState::new();
+        state.handle_editor_event(crossterm::event::Event::Key(
+            crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Char('i'),
+                crossterm::event::KeyModifiers::NONE,
+            ),
+        ));
+        state.handle_editor_event(crossterm::event::Event::Key(
+            crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Char('a'),
+                crossterm::event::KeyModifiers::NONE,
+            ),
+        ));
+
+        let command = state.handle_editor_event(crossterm::event::Event::Key(
+            crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Enter,
+                crossterm::event::KeyModifiers::SHIFT,
+            ),
+        ));
+
+        assert_eq!(command, None);
+        assert_eq!(state.editor_text(), "a\n");
+    }
+
+    #[test]
+    fn zed_shift_enter_aliases_insert_newline() {
+        let mut state = UiState::new();
+        state.handle_editor_event(crossterm::event::Event::Key(
+            crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Char('i'),
+                crossterm::event::KeyModifiers::NONE,
+            ),
+        ));
+        state.handle_editor_event(crossterm::event::Event::Key(
+            crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Char('a'),
+                crossterm::event::KeyModifiers::NONE,
+            ),
+        ));
+
+        let command = state.handle_editor_event(crossterm::event::Event::Key(
+            crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Enter,
+                crossterm::event::KeyModifiers::ALT,
+            ),
+        ));
+
+        assert_eq!(command, None);
+        assert_eq!(state.editor_text(), "a\n");
+    }
+
+    #[test]
+    fn ctrl_j_inserts_newline() {
+        let mut state = UiState::new();
+        state.handle_editor_event(crossterm::event::Event::Key(
+            crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Char('i'),
+                crossterm::event::KeyModifiers::NONE,
+            ),
+        ));
+        let command = state.handle_editor_event(crossterm::event::Event::Key(
+            crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Char('j'),
+                crossterm::event::KeyModifiers::CONTROL,
+            ),
+        ));
+
+        assert_eq!(command, None);
+        assert_eq!(state.editor_text(), "\n");
+    }
+
+    #[test]
+    fn ctrl_m_inserts_newline() {
+        let mut state = UiState::new();
+        state.handle_editor_event(crossterm::event::Event::Key(
+            crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Char('i'),
+                crossterm::event::KeyModifiers::NONE,
+            ),
+        ));
+        let command = state.handle_editor_event(crossterm::event::Event::Key(
+            crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Char('m'),
+                crossterm::event::KeyModifiers::CONTROL,
+            ),
+        ));
+
+        assert_eq!(command, None);
+        assert_eq!(state.editor_text(), "\n");
+    }
+
+    #[test]
+    fn control_enter_inserts_newline() {
+        let mut state = UiState::new();
+        state.handle_editor_event(crossterm::event::Event::Key(
+            crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Char('i'),
+                crossterm::event::KeyModifiers::NONE,
+            ),
+        ));
+        let command = state.handle_editor_event(crossterm::event::Event::Key(
+            crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Enter,
+                crossterm::event::KeyModifiers::CONTROL,
+            ),
+        ));
+
+        assert_eq!(command, None);
+        assert_eq!(state.editor_text(), "\n");
     }
 
     #[test]

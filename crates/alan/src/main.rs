@@ -5,7 +5,8 @@ use core::{Action, Controller, Overlay};
 use crossterm::cursor::SetCursorStyle;
 use crossterm::event::{
     DisableMouseCapture, EnableMouseCapture, Event, EventStream, KeyCode, KeyEventKind,
-    KeyModifiers, MouseEventKind,
+    KeyModifiers, KeyboardEnhancementFlags, MouseEventKind, PopKeyboardEnhancementFlags,
+    PushKeyboardEnhancementFlags,
 };
 use crossterm::execute;
 use std::io::stdout;
@@ -41,7 +42,18 @@ fn auth_path() -> anyhow::Result<PathBuf> {
 
 async fn event_loop(app: &mut Controller) -> anyhow::Result<()> {
     let mut terminal = ratatui::init();
+    let keyboard_enhancement =
+        crossterm::terminal::supports_keyboard_enhancement().unwrap_or(false);
     execute!(stdout(), EnableMouseCapture)?;
+    if keyboard_enhancement {
+        execute!(
+            stdout(),
+            PushKeyboardEnhancementFlags(
+                KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+                    | KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES,
+            ),
+        )?;
+    }
     let result = async {
         terminal.clear()?;
         let mut ui = views::UiState::new();
@@ -89,6 +101,9 @@ async fn event_loop(app: &mut Controller) -> anyhow::Result<()> {
         Ok::<(), anyhow::Error>(())
     }
     .await;
+    if keyboard_enhancement {
+        execute!(stdout(), PopKeyboardEnhancementFlags)?;
+    }
     execute!(stdout(), DisableMouseCapture)?;
     ratatui::restore();
     result

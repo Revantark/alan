@@ -25,10 +25,17 @@ impl Component for Footer {
         let background = Paragraph::new("").style(Style::default().bg(theme::EDITOR_BG));
         frame.render_widget(background, area);
 
-        let [_top_padding, status_area, _status_editor_gap, editor_area] = Layout::vertical([
+        let [
+            _top_padding,
+            status_area,
+            _status_editor_gap,
+            editor_area,
+            _bottom_padding,
+        ] = Layout::vertical([
             Constraint::Length(1),
             Constraint::Length(1),
             Constraint::Length(1),
+            Constraint::Min(1),
             Constraint::Length(1),
         ])
         .areas(area);
@@ -40,7 +47,7 @@ impl Component for Footer {
                     Style::default().italic().fg(ratatui::style::Color::Yellow),
                 ),
                 Span::styled(
-                    "  Esc clear · Ctrl-C stop",
+                    "  Shift+Enter/Ctrl+J newline · Esc normal mode · Ctrl-C stop",
                     Style::default().fg(theme::MUTED_FG),
                 ),
             ])
@@ -51,7 +58,7 @@ impl Component for Footer {
                     Style::default().fg(ratatui::style::Color::Green),
                 ),
                 Span::styled(
-                    "  Enter send · PageUp/PageDown scroll · Ctrl-C quit",
+                    "  Enter send · Shift+Enter/Ctrl+J newline · Ctrl-C quit",
                     Style::default().fg(theme::MUTED_FG),
                 ),
             ])
@@ -96,7 +103,7 @@ impl Component for Footer {
             prompt_area,
         );
         EditorView::new(state.editor())
-            .single_line(true)
+            .wrap(false)
             .theme(
                 EditorTheme::default()
                     .base(Style::default().fg(theme::EDITOR_FG).bg(theme::EDITOR_BG))
