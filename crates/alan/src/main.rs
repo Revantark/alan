@@ -44,6 +44,7 @@ async fn event_loop(app: &mut Controller) -> anyhow::Result<()> {
     let result = async {
         terminal.clear()?;
         let mut ui = views::UiState::new();
+        let mut view = views::AppView::new();
         let mut events = EventStream::new();
         let mut render_tick = tokio::time::interval(Duration::from_millis(16));
         render_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -54,7 +55,7 @@ async fn event_loop(app: &mut Controller) -> anyhow::Result<()> {
             ui.tick();
 
             if ui.take_dirty() {
-                terminal.draw(|frame| views::draw(frame, app, &mut ui))?;
+                terminal.draw(|frame| view.render(frame, app, &mut ui))?;
             }
 
             tokio::select! {
