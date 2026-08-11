@@ -11,6 +11,7 @@ crossterm = { version = "0.28", features = ["event-stream"] }
 anyhow = "1"
 tokio = { workspace = true }
 futures-util = { workspace = true }
+async-trait = { workspace = true }
 
 [dev-dependencies]
 llm = { workspace = true }

@@ -13,3 +13,12 @@ pub enum Action {
     MouseScrollUp,
     MouseScrollDown,
 }
+
+/// Semantic commands emitted by frontend state and handled by application core.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Command {
+    Interrupt,
+    Cancel,
+    Submit(String),
+    MoveLoginSelection(isize),
+}

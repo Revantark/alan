@@ -1182,7 +1182,9 @@ dependencies = [
  "async-trait",
  "futures-util",
  "llm",
+ "reqwest",
  "serde",
+ "serde_json",
  "thiserror",
  "tokio",
 ]

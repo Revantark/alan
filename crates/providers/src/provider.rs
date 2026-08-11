@@ -1,5 +1,5 @@
 use crate::Model;
-use crate::auth::AuthResolver;
+use crate::auth::{AuthResolver, ProviderAuth};
 use crate::catalog::{ApiId, ModelInfo, ProviderId};
 use llm::LlmApi;
 use std::collections::HashMap;
@@ -12,12 +12,39 @@ pub enum ProviderError {
     ModelNotFound(String),
     #[error("API is not configured for model {model}")]
     MissingApi { model: String },
+    #[error("authentication is not configured")]
+    MissingAuth,
 }
 
 pub trait Provider: Send + Sync {
     fn id(&self) -> &ProviderId;
     fn models(&self) -> &[ModelInfo];
     fn bind(&self, model_id: &str) -> Result<Model, ProviderError>;
+    fn auth(&self) -> &dyn ProviderAuth;
+}
+
+#[derive(Default)]
+pub struct ProviderRegistry {
+    providers: Vec<Arc<dyn Provider>>,
+}
+
+impl ProviderRegistry {
+    pub fn new(providers: impl IntoIterator<Item = Arc<dyn Provider>>) -> Self {
+        Self {
+            providers: providers.into_iter().collect(),
+        }
+    }
+
+    pub fn providers(&self) -> &[Arc<dyn Provider>] {
+        &self.providers
+    }
+
+    pub fn get(&self, id: &ProviderId) -> Option<Arc<dyn Provider>> {
+        self.providers
+            .iter()
+            .find(|provider| provider.id() == id)
+            .cloned()
+    }
 }
 
 pub(crate) fn bind_model(

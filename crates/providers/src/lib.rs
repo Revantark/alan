@@ -1,14 +1,22 @@
 mod auth;
 mod catalog;
+mod credentials;
 mod model;
 mod openrouter;
 mod provider;
 
-pub use auth::{ApiKeyAuth, AuthError, AuthResolver};
+pub use auth::{
+    ApiKeyAuth, AuthError, AuthEvent, AuthInteraction, AuthOption, AuthPrompt, AuthResolver,
+    CredentialAuth, InteractionError, ProviderAuth,
+};
 pub use catalog::{ApiId, ModelCapabilities, ModelInfo, ModelPricing, ProviderId};
+pub use credentials::{
+    Credential, CredentialError, CredentialInfo, CredentialKind, CredentialStore,
+    FileCredentialStore, InMemoryCredentialStore, SharedCredentialStore,
+};
 pub use model::{Model, ModelError};
-pub use openrouter::{OpenRouterBuilder, OpenRouterProvider};
-pub use provider::{Provider, ProviderError};
+pub use openrouter::{OpenRouterAuth, OpenRouterBuilder, OpenRouterProvider};
+pub use provider::{Provider, ProviderError, ProviderRegistry};
 
 #[cfg(test)]
 mod tests {

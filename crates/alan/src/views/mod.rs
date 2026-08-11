@@ -3,7 +3,8 @@
 //! Core state stays UI-agnostic. This module owns ratatui-facing editor and
 //! scroll state so another frontend can map its own events to [`Action`].
 
-use crate::core::{Action, Controller, Entry, Poll};
+use crate::core::{Action, Command, Controller, Entry, LoginState, Overlay, Poll};
+use providers::AuthPrompt;
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -50,63 +51,57 @@ impl UiState {
         }
     }
 
-    pub fn apply(&mut self, action: Action, controller: &mut Controller) -> bool {
-        match action {
+    pub fn apply(&mut self, action: Action, login_selection_active: bool) -> Option<Command> {
+        let command = match action {
             Action::Interrupt => {
-                if controller.is_busy() {
-                    controller.abort();
-                    self.dirty = true;
-                    false
-                } else {
-                    true
-                }
+                self.input.clear();
+                Some(Command::Interrupt)
             }
-            Action::Resize => {
-                self.dirty = true;
-                false
-            }
+            Action::Resize => None,
             Action::Submit => {
-                if !controller.is_busy() {
-                    let text = std::mem::take(&mut self.input);
-                    controller.submit(text);
-                    self.follow_output = true;
-                    self.scroll_target = self.max_scroll;
-                    self.dirty = true;
-                }
-                false
+                self.follow_output = true;
+                self.scroll_target = self.max_scroll;
+                Some(Command::Submit(std::mem::take(&mut self.input)))
             }
             Action::ClearInput => {
                 self.input.clear();
-                self.dirty = true;
-                false
+                Some(Command::Cancel)
             }
             Action::Backspace => {
                 self.input.pop();
-                self.dirty = true;
-                false
+                None
             }
-            Action::Insert(c) => {
-                self.input.push(c);
-                self.dirty = true;
-                false
+            Action::Insert(character) => {
+                self.input.push(character);
+                None
             }
             Action::ScrollUp => {
-                self.scroll_by(-(self.viewport_height.max(1) as isize));
-                false
+                if login_selection_active {
+                    Some(Command::MoveLoginSelection(-1))
+                } else {
+                    self.scroll_by(-(self.viewport_height.max(1) as isize));
+                    None
+                }
             }
             Action::ScrollDown => {
-                self.scroll_by(self.viewport_height.max(1) as isize);
-                false
+                if login_selection_active {
+                    Some(Command::MoveLoginSelection(1))
+                } else {
+                    self.scroll_by(self.viewport_height.max(1) as isize);
+                    None
+                }
             }
             Action::MouseScrollUp => {
                 self.scroll_by(-3);
-                false
+                None
             }
             Action::MouseScrollDown => {
                 self.scroll_by(3);
-                false
+                None
             }
-        }
+        };
+        self.dirty = true;
+        command
     }
 
     /// Consume a poll outcome. Manual scroll position survives streamed text.
@@ -188,6 +183,14 @@ impl Default for UiState {
 }
 
 pub fn draw(frame: &mut Frame, controller: &Controller, state: &mut UiState) {
+    if controller.overlay() == Overlay::Login {
+        // Login owns entire visible interaction surface. Skip normal editor
+        // rendering so its cursor cannot leak into the modal.
+        frame.render_widget(ratatui::widgets::Clear, frame.area());
+        draw_login(frame, controller, state);
+        return;
+    }
+
     let [header_area, chat_area, footer_area] = Layout::vertical([
         Constraint::Length(1),
         Constraint::Min(1),
@@ -237,6 +240,131 @@ fn draw_chat(frame: &mut Frame, area: Rect, controller: &Controller, state: &mut
     }
 }
 
+fn draw_login(frame: &mut Frame, controller: &Controller, ui: &UiState) {
+    let state = controller.login_state();
+    if !state.is_open() {
+        return;
+    }
+
+    let area = centered_rect(70, 60, frame.area());
+    frame.render_widget(ratatui::widgets::Clear, area);
+    frame.render_widget(
+        Paragraph::new("").style(Style::default().bg(EDITOR_BG)),
+        area,
+    );
+
+    let [content_area, shortcuts_area] =
+        Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(area.inner(
+            ratatui::layout::Margin {
+                horizontal: 2,
+                vertical: 1,
+            },
+        ));
+
+    match state {
+        LoginState::Selecting {
+            providers,
+            selected,
+        } => {
+            let items = providers
+                .iter()
+                .enumerate()
+                .map(|(index, provider)| {
+                    let marker = if index == *selected { "› " } else { "  " };
+                    Line::from(vec![
+                        Span::styled(marker, Style::default().fg(PROMPT_FG)),
+                        Span::styled(provider.name.clone(), Style::default().fg(EDITOR_FG)),
+                    ])
+                })
+                .collect::<Vec<_>>();
+            frame.render_widget(Paragraph::new(Text::from(items)), content_area);
+            draw_shortcuts(
+                frame,
+                shortcuts_area,
+                "↑↓ select · Enter confirm · Esc cancel",
+            );
+        }
+        LoginState::Prompting { prompt, .. } => {
+            let secret = matches!(prompt, AuthPrompt::Secret { .. });
+            let value = if secret {
+                "•".repeat(ui.input.chars().count())
+            } else {
+                ui.input.clone()
+            };
+            let prompt_line = Line::from(prompt_message(prompt));
+            let input_line = Line::from(vec![
+                Span::styled("› ", Style::default().fg(PROMPT_FG)),
+                Span::styled(value.clone(), Style::default().fg(EDITOR_FG)),
+            ]);
+            let content = Text::from(vec![prompt_line, Line::default(), input_line]);
+            frame.render_widget(Paragraph::new(content), content_area);
+            draw_shortcuts(frame, shortcuts_area, "Enter submit · Esc cancel");
+
+            let input_width = Line::from(value.as_str()).width() as u16;
+            let cursor_x = content_area
+                .x
+                .saturating_add(2)
+                .saturating_add(input_width)
+                .min(content_area.right().saturating_sub(1));
+            frame.set_cursor_position((cursor_x, content_area.y + 2));
+        }
+        LoginState::Validating { message, .. } => {
+            frame.render_widget(Paragraph::new(message.as_str()), content_area);
+            draw_shortcuts(frame, shortcuts_area, "Esc cancel");
+        }
+        LoginState::Success { provider } => {
+            frame.render_widget(
+                Paragraph::new(format!("Logged in to {}", provider.0)),
+                content_area,
+            );
+            draw_shortcuts(frame, shortcuts_area, "Esc close");
+        }
+        LoginState::Error(message) => {
+            frame.render_widget(
+                Paragraph::new(message.as_str()).style(Style::default().fg(Color::Red)),
+                content_area,
+            );
+            draw_shortcuts(frame, shortcuts_area, "Esc close");
+        }
+        LoginState::Closed => {}
+    }
+}
+
+fn draw_shortcuts(frame: &mut Frame, area: Rect, text: &str) {
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            text,
+            Style::default().fg(MUTED_FG),
+        ))),
+        area,
+    );
+}
+
+fn prompt_message(prompt: &AuthPrompt) -> String {
+    match prompt {
+        AuthPrompt::Secret { message }
+        | AuthPrompt::Text { message }
+        | AuthPrompt::ManualCode { message } => message.clone(),
+        AuthPrompt::Select { message, .. } => message.clone(),
+    }
+}
+
+fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
+    let horizontal: [Rect; 3] = Layout::horizontal([
+        Constraint::Percentage((100 - percent_x) / 2),
+        Constraint::Percentage(percent_x),
+        Constraint::Percentage((100 - percent_x) / 2),
+    ])
+    .areas(area);
+    let vertical: [Rect; 3] = Layout::vertical([
+        Constraint::Percentage((100 - percent_y) / 2),
+        Constraint::Percentage(percent_y),
+        Constraint::Percentage((100 - percent_y) / 2),
+    ])
+    .areas(horizontal[1]);
+    vertical[1]
+}
+
 fn draw_footer(frame: &mut Frame, area: Rect, controller: &Controller, state: &UiState) {
     let background = Paragraph::new("").style(Style::default().bg(EDITOR_BG));
     frame.render_widget(background, area);
@@ -272,7 +400,19 @@ fn draw_footer(frame: &mut Frame, area: Rect, controller: &Controller, state: &U
     // available width so cursor remains at insertion point.
     let prompt_width = Line::from("  › ").width() as usize;
     let available_width = usize::from(editor_area.width).saturating_sub(prompt_width);
-    let visible_input = visible_suffix(&state.input, available_width);
+    let secret_input = matches!(
+        controller.login_state(),
+        LoginState::Prompting {
+            prompt: AuthPrompt::Secret { .. },
+            ..
+        }
+    );
+    let editor_input = if secret_input {
+        "•".repeat(state.input.chars().count())
+    } else {
+        state.input.clone()
+    };
+    let visible_input = visible_suffix(&editor_input, available_width);
     let input_line = Line::from(vec![
         Span::styled("  › ", Style::default().fg(PROMPT_FG)),
         Span::styled(visible_input.clone(), Style::default().fg(EDITOR_FG)),

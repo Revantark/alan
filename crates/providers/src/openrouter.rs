@@ -1,9 +1,12 @@
 use crate::provider::bind_model;
 use crate::{
-    ApiId, ApiKeyAuth, AuthResolver, Model, ModelCapabilities, ModelInfo, ModelPricing, Provider,
+    ApiId, ApiKeyAuth, AuthError, AuthEvent, AuthInteraction, AuthPrompt, AuthResolver, Credential,
+    CredentialAuth, Model, ModelCapabilities, ModelInfo, ModelPricing, Provider, ProviderAuth,
     ProviderError, ProviderId,
 };
+use async_trait::async_trait;
 use llm::{ChatCompletionsApi, HttpClient, LlmApi};
+use reqwest::StatusCode;
 use std::{collections::HashMap, sync::Arc};
 
 const BASE_URL: &str = "https://openrouter.ai/api/v1";
@@ -13,6 +16,7 @@ pub struct OpenRouterProvider {
     models: Vec<ModelInfo>,
     apis: HashMap<ApiId, Arc<dyn LlmApi>>,
     auth: Arc<dyn AuthResolver>,
+    login: OpenRouterAuth,
 }
 
 impl OpenRouterProvider {
@@ -24,6 +28,55 @@ impl OpenRouterProvider {
             auth: None,
         }
     }
+
+    pub fn from_store(store: Arc<dyn crate::CredentialStore>) -> OpenRouterBuilder {
+        OpenRouterBuilder::from_auth(Arc::new(CredentialAuth::new(
+            ProviderId::new("openrouter"),
+            store,
+            Some("OPENROUTER_API_KEY"),
+        )))
+    }
+}
+
+pub struct OpenRouterAuth;
+
+#[async_trait]
+impl ProviderAuth for OpenRouterAuth {
+    async fn login(&self, interaction: &mut dyn AuthInteraction) -> Result<Credential, AuthError> {
+        let value = interaction
+            .prompt(AuthPrompt::Secret {
+                message: "OpenRouter API key".into(),
+            })
+            .await?;
+        let key = value.trim();
+        if key.is_empty() {
+            return Err(AuthError::Validation("API key cannot be empty".into()));
+        }
+
+        interaction.notify(AuthEvent::Progress("Validating OpenRouter API key".into()));
+        validate_api_key(key).await?;
+        Ok(Credential::ApiKey { key: key.into() })
+    }
+}
+
+async fn validate_api_key(key: &str) -> Result<(), AuthError> {
+    let response = reqwest::Client::new()
+        .get("https://openrouter.ai/api/v1/key")
+        .bearer_auth(key)
+        .send()
+        .await
+        .map_err(|error| AuthError::Validation(format!("request failed: {error}")))?;
+
+    if response.status() == StatusCode::UNAUTHORIZED {
+        return Err(AuthError::Validation("API key was rejected".into()));
+    }
+    if !response.status().is_success() {
+        return Err(AuthError::Validation(format!(
+            "OpenRouter returned HTTP {}",
+            response.status()
+        )));
+    }
+    Ok(())
 }
 
 impl Provider for OpenRouterProvider {
@@ -36,6 +89,10 @@ impl Provider for OpenRouterProvider {
     fn bind(&self, model_id: &str) -> Result<Model, ProviderError> {
         bind_model(&self.models, &self.apis, self.auth.clone(), model_id)
     }
+
+    fn auth(&self) -> &dyn ProviderAuth {
+        &self.login
+    }
 }
 
 pub struct OpenRouterBuilder {
@@ -46,6 +103,15 @@ pub struct OpenRouterBuilder {
 }
 
 impl OpenRouterBuilder {
+    fn from_auth(auth: Arc<dyn AuthResolver>) -> Self {
+        Self {
+            api_key: String::new(),
+            models: Vec::new(),
+            api: None,
+            auth: Some(auth),
+        }
+    }
+
     pub fn with_model(mut self, model_id: impl Into<String>) -> Self {
         let id = model_id.into();
         self.models.push(default_model(&id));
@@ -85,6 +151,7 @@ impl OpenRouterBuilder {
             models: self.models,
             apis: HashMap::from([(ApiId::ChatCompletions, api)]),
             auth,
+            login: OpenRouterAuth,
         })
     }
 }

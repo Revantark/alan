@@ -12,22 +12,30 @@ use std::time::Duration;
 
 use agent::Agent;
 use futures_util::StreamExt;
-use providers::{OpenRouterProvider, Provider};
+use providers::{FileCredentialStore, OpenRouterProvider, Provider, ProviderRegistry};
+use std::path::PathBuf;
+use std::sync::Arc;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let api_key = std::env::var("OPENROUTER_API_KEY")
-        .map_err(|_| anyhow::anyhow!("OPENROUTER_API_KEY not set"))?;
     let model_id = std::env::var("ALAN_MODEL").unwrap_or_else(|_| "openai/gpt-4o-mini".into());
-
-    let provider = OpenRouterProvider::builder(api_key)
+    let credential_store = Arc::new(FileCredentialStore::new(auth_path()?));
+    let provider = OpenRouterProvider::from_store(credential_store.clone())
         .with_model(&model_id)
         .build()?;
     let model = provider.bind(&model_id)?;
+    let registry = ProviderRegistry::new([Arc::new(provider) as Arc<dyn Provider>]);
     let agent = Agent::builder(model).build();
 
-    let mut app = Controller::new(agent);
+    let mut app = Controller::with_runtime(agent, registry, credential_store);
     event_loop(&mut app).await
+}
+
+fn auth_path() -> anyhow::Result<PathBuf> {
+    let home = std::env::var_os("ALAN_HOME")
+        .or_else(|| std::env::var_os("HOME"))
+        .ok_or_else(|| anyhow::anyhow!("cannot determine Alan home directory"))?;
+    Ok(PathBuf::from(home).join(".alan").join("auth.json"))
 }
 
 async fn event_loop(app: &mut Controller) -> anyhow::Result<()> {
@@ -55,10 +63,13 @@ async fn event_loop(app: &mut Controller) -> anyhow::Result<()> {
                         break;
                     };
                     let event = result?;
-                    if let Some(action) = action_from_event(&event)
-                        && ui.apply(action, app)
-                    {
-                        break;
+                    if let Some(action) = action_from_event(&event) {
+                        let login_selection_active = app.login_selection_active();
+                        if let Some(command) = ui.apply(action, login_selection_active)
+                            && app.handle(command)
+                        {
+                            break;
+                        }
                     }
                 }
                 _ = render_tick.tick() => {}
@@ -86,8 +97,8 @@ fn action_from_event(event: &Event) -> Option<Action> {
                 KeyCode::Esc => Action::ClearInput,
                 KeyCode::Backspace => Action::Backspace,
                 KeyCode::Char(c) => Action::Insert(c),
-                KeyCode::PageUp => Action::ScrollUp,
-                KeyCode::PageDown => Action::ScrollDown,
+                KeyCode::PageUp | KeyCode::Up => Action::ScrollUp,
+                KeyCode::PageDown | KeyCode::Down => Action::ScrollDown,
                 _ => return None,
             })
         }
@@ -125,5 +136,19 @@ mod tests {
             action_from_event(&Event::Resize(120, 40)),
             Some(Action::Resize)
         );
+    }
+
+    #[test]
+    fn arrow_keys_scroll_or_navigate() {
+        let up = Event::Key(crossterm::event::KeyEvent::new(
+            KeyCode::Up,
+            KeyModifiers::NONE,
+        ));
+        let down = Event::Key(crossterm::event::KeyEvent::new(
+            KeyCode::Down,
+            KeyModifiers::NONE,
+        ));
+        assert_eq!(action_from_event(&up), Some(Action::ScrollUp));
+        assert_eq!(action_from_event(&down), Some(Action::ScrollDown));
     }
 }
