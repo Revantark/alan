@@ -9,12 +9,16 @@ mod theme;
 
 use crate::core::{Action, Command, Controller, Overlay, Poll};
 use components::{Chat, Footer, Header, LoginOverlay};
+use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers, MouseEventKind};
+use edtui::{EditorEventHandler, EditorMode, EditorState, Lines};
 use ratatui::Frame;
-use ratatui::layout::{Constraint, Layout};
+use ratatui::layout::{Constraint, Layout, Position};
 
-#[derive(Debug)]
 pub struct UiState {
+    /// Login prompt input. Main editor uses [`EditorState`].
     input: String,
+    editor: EditorState,
+    editor_events: EditorEventHandler,
     /// Current rendered top line.
     scroll_offset: usize,
     /// Desired top line. Scroll input changes this immediately; animation
@@ -32,8 +36,12 @@ pub struct UiState {
 
 impl UiState {
     pub fn new() -> Self {
+        let editor = Self::new_editor();
+
         Self {
             input: String::new(),
+            editor,
+            editor_events: EditorEventHandler::vim_mode(),
             scroll_offset: 0,
             scroll_target: 0,
             follow_output: true,
@@ -94,6 +102,70 @@ impl UiState {
         };
         self.dirty = true;
         command
+    }
+
+    /// Handle primary editor events and app-level shortcuts.
+    pub fn handle_editor_event(&mut self, event: Event) -> Option<Command> {
+        let command = match event {
+            Event::Key(key) if key.kind != KeyEventKind::Press => None,
+            Event::Key(key)
+                if key.modifiers.contains(KeyModifiers::CONTROL)
+                    && key.code == KeyCode::Char('c') =>
+            {
+                self.apply(Action::Interrupt, false)
+            }
+            Event::Key(key) if key.code == KeyCode::Enter => self.submit_editor_or_accept(),
+            Event::Key(key) if key.code == KeyCode::Esc => {
+                self.editor_events.on_event(event, &mut self.editor);
+                self.dirty = true;
+                None
+            }
+            Event::Key(key)
+                if key.code == KeyCode::Char('/')
+                    && key.modifiers == KeyModifiers::NONE
+                    && self.editor.mode == EditorMode::Normal =>
+            {
+                self.editor.mode = EditorMode::Insert;
+                self.editor_events.on_event(event, &mut self.editor);
+                self.dirty = true;
+                None
+            }
+            Event::Key(key) if key.code == KeyCode::PageUp => self.apply(Action::ScrollUp, false),
+            Event::Key(key) if key.code == KeyCode::PageDown => {
+                self.apply(Action::ScrollDown, false)
+            }
+            Event::Mouse(mouse) if mouse.kind == MouseEventKind::ScrollUp => {
+                self.apply(Action::MouseScrollUp, false)
+            }
+            Event::Mouse(mouse) if mouse.kind == MouseEventKind::ScrollDown => {
+                self.apply(Action::MouseScrollDown, false)
+            }
+            event => {
+                self.editor_events.on_event(event, &mut self.editor);
+                self.dirty = true;
+                None
+            }
+        };
+        command
+    }
+
+    fn submit_editor_or_accept(&mut self) -> Option<Command> {
+        self.follow_output = true;
+        self.scroll_target = self.max_scroll;
+        let text = self.editor_text();
+        self.editor = Self::new_editor();
+        self.dirty = true;
+        Some(Command::Submit(text))
+    }
+
+    fn new_editor() -> EditorState {
+        let mut editor = EditorState::new(Lines::from(""));
+        editor.set_single_line(true);
+        editor
+    }
+
+    fn editor_text(&self) -> String {
+        self.editor.lines.to_string()
     }
 
     /// Consume a poll outcome. Manual scroll position survives streamed text.
@@ -164,6 +236,18 @@ impl UiState {
 
     pub(super) fn input(&self) -> &str {
         &self.input
+    }
+
+    pub(super) fn editor(&mut self) -> &mut EditorState {
+        &mut self.editor
+    }
+
+    pub(super) fn editor_mode(&self) -> EditorMode {
+        self.editor.mode
+    }
+
+    pub(super) fn cursor_screen_position(&self) -> Option<Position> {
+        self.editor.cursor_screen_position()
     }
 
     pub(super) fn max_scroll(&self) -> usize {
@@ -275,5 +359,62 @@ mod tests {
         assert_eq!(state.scroll_offset, 70);
         assert_eq!(state.scroll_target, 70);
         assert!(!state.follow_output);
+    }
+
+    #[test]
+    fn vim_escape_returns_to_normal_without_clearing_text() {
+        let mut state = UiState::new();
+        state.handle_editor_event(crossterm::event::Event::Key(
+            crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Char('i'),
+                crossterm::event::KeyModifiers::NONE,
+            ),
+        ));
+        state.handle_editor_event(crossterm::event::Event::Key(
+            crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Char('x'),
+                crossterm::event::KeyModifiers::NONE,
+            ),
+        ));
+        state.handle_editor_event(crossterm::event::Event::Key(
+            crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Esc,
+                crossterm::event::KeyModifiers::NONE,
+            ),
+        ));
+
+        assert_eq!(state.editor_text(), "x");
+        assert_eq!(state.editor_mode(), EditorMode::Normal);
+    }
+
+    #[test]
+    fn submit_marks_ui_dirty_before_agent_response() {
+        let mut state = UiState::new();
+        assert!(state.take_dirty());
+
+        state.handle_editor_event(crossterm::event::Event::Key(
+            crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Char('i'),
+                crossterm::event::KeyModifiers::NONE,
+            ),
+        ));
+        state.handle_editor_event(crossterm::event::Event::Key(
+            crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Char('h'),
+                crossterm::event::KeyModifiers::NONE,
+            ),
+        ));
+        assert!(state.take_dirty());
+        assert!(!state.take_dirty());
+
+        let command = state.handle_editor_event(crossterm::event::Event::Key(
+            crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Enter,
+                crossterm::event::KeyModifiers::NONE,
+            ),
+        ));
+
+        assert_eq!(command, Some(Command::Submit("h".into())));
+        assert!(state.take_dirty());
     }
 }

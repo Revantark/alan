@@ -1,7 +1,8 @@
 mod core;
 mod views;
 
-use core::{Action, Controller};
+use core::{Action, Controller, Overlay};
+use crossterm::cursor::SetCursorStyle;
 use crossterm::event::{
     DisableMouseCapture, EnableMouseCapture, Event, EventStream, KeyCode, KeyEventKind,
     KeyModifiers, MouseEventKind,
@@ -45,6 +46,7 @@ async fn event_loop(app: &mut Controller) -> anyhow::Result<()> {
         terminal.clear()?;
         let mut ui = views::UiState::new();
         let mut view = views::AppView::new();
+        sync_cursor_style(&ui)?;
         let mut events = EventStream::new();
         let mut render_tick = tokio::time::interval(Duration::from_millis(16));
         render_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -56,6 +58,7 @@ async fn event_loop(app: &mut Controller) -> anyhow::Result<()> {
 
             if ui.take_dirty() {
                 terminal.draw(|frame| view.render(frame, app, &mut ui))?;
+                sync_cursor_style(&ui)?;
             }
 
             tokio::select! {
@@ -64,13 +67,20 @@ async fn event_loop(app: &mut Controller) -> anyhow::Result<()> {
                         break;
                     };
                     let event = result?;
-                    if let Some(action) = action_from_event(&event) {
-                        let login_selection_active = app.login_selection_active();
-                        if let Some(command) = ui.apply(action, login_selection_active)
-                            && app.handle(command)
-                        {
-                            break;
-                        }
+                    let command = if app.overlay() == Overlay::Login {
+                        action_from_event(&event).and_then(|action| {
+                            ui.apply(action, app.login_selection_active())
+                        })
+                    } else {
+                        ui.handle_editor_event(event)
+                    };
+                    let should_quit = command.is_some_and(|command| app.handle(command));
+                    if ui.take_dirty() {
+                        terminal.draw(|frame| view.render(frame, app, &mut ui))?;
+                        sync_cursor_style(&ui)?;
+                    }
+                    if should_quit {
+                        break;
                     }
                 }
                 _ = render_tick.tick() => {}
@@ -82,6 +92,15 @@ async fn event_loop(app: &mut Controller) -> anyhow::Result<()> {
     execute!(stdout(), DisableMouseCapture)?;
     ratatui::restore();
     result
+}
+
+fn sync_cursor_style(ui: &views::UiState) -> anyhow::Result<()> {
+    let style = match ui.editor_mode() {
+        edtui::EditorMode::Insert => SetCursorStyle::SteadyBar,
+        _ => SetCursorStyle::SteadyBlock,
+    };
+    execute!(stdout(), style)?;
+    Ok(())
 }
 
 fn action_from_event(event: &Event) -> Option<Action> {
