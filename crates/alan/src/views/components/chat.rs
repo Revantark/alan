@@ -7,9 +7,80 @@ use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState};
+use unicode_width::UnicodeWidthChar;
 
 #[derive(Debug, Default)]
-pub struct Chat;
+pub struct Chat {
+    layout: TranscriptLayout,
+}
+
+#[derive(Debug, Default)]
+struct TranscriptLayout {
+    width: u16,
+    revision: u64,
+    entries: Vec<Entry>,
+    line_offsets: Vec<usize>,
+    lines: Vec<Line<'static>>,
+}
+
+impl TranscriptLayout {
+    fn sync(&mut self, entries: &[Entry], revision: u64, width: u16) {
+        if self.width == width && self.revision == revision {
+            return;
+        }
+        if self.width != width {
+            self.rebuild(entries, revision, width);
+            return;
+        }
+
+        let unchanged = self
+            .entries
+            .iter()
+            .zip(entries)
+            .take_while(|(cached, entry)| cached == entry)
+            .count();
+        if unchanged == self.entries.len() && unchanged == entries.len() {
+            self.revision = revision;
+            return;
+        }
+
+        let line_start = self.line_offsets[unchanged];
+        self.entries.truncate(unchanged);
+        self.line_offsets.truncate(unchanged + 1);
+        self.lines.truncate(line_start);
+        self.append(&entries[unchanged..], width);
+        self.revision = revision;
+    }
+
+    fn rebuild(&mut self, entries: &[Entry], revision: u64, width: u16) {
+        self.width = width;
+        self.revision = revision;
+        self.entries.clear();
+        self.line_offsets.clear();
+        self.line_offsets.push(0);
+        self.lines.clear();
+        self.append(entries, width);
+    }
+
+    fn append(&mut self, entries: &[Entry], width: u16) {
+        let width = usize::from(width.max(1));
+        let content_width = width.saturating_sub(theme::CHAT_PADDING * 2).max(1);
+        for entry in entries {
+            self.lines.extend(wrap_entry(entry, width, content_width));
+            self.entries.push(entry.clone());
+            self.line_offsets.push(self.lines.len());
+        }
+    }
+
+    fn height(&self) -> usize {
+        self.lines.len()
+    }
+
+    fn viewport(&self, scroll: usize, height: usize) -> Text<'static> {
+        let end = scroll.saturating_add(height).min(self.lines.len());
+        Text::from(self.lines[scroll.min(end)..end].to_vec())
+    }
+}
 
 impl Component for Chat {
     fn render(
@@ -21,12 +92,16 @@ impl Component for Chat {
     ) {
         let [content_area, scrollbar_area] =
             Layout::horizontal([Constraint::Min(1), Constraint::Length(1)]).areas(area);
-        let transcript = build_transcript(controller.chat(), content_area.width.max(1));
-        let content_height = transcript.height();
+        self.layout.sync(
+            controller.chat(),
+            controller.chat_revision(),
+            content_area.width.max(1),
+        );
+
+        let content_height = self.layout.height();
         let viewport_height = usize::from(content_area.height.max(1));
         let scroll = state.sync_scroll(content_height, viewport_height);
-        let paragraph_scroll = scroll.min(usize::from(u16::MAX)) as u16;
-        let chat = Paragraph::new(transcript).scroll((paragraph_scroll, 0));
+        let chat = Paragraph::new(self.layout.viewport(scroll, viewport_height));
         frame.render_widget(chat, content_area);
 
         if state.max_scroll() > 0 {
@@ -53,17 +128,6 @@ fn scrollbar_position(scroll: usize, max_scroll: usize, content_height: usize) -
         .saturating_mul(content_height - 1)
         .saturating_add(max_scroll / 2)
         / max_scroll
-}
-
-fn build_transcript(entries: &[Entry], width: u16) -> Text<'static> {
-    let width = usize::from(width.max(1));
-    let content_width = width.saturating_sub(theme::CHAT_PADDING * 2).max(1);
-    let mut lines = Vec::new();
-
-    for entry in entries {
-        lines.extend(wrap_entry(entry, width, content_width));
-    }
-    Text::from(lines)
 }
 
 fn wrap_entry(entry: &Entry, width: usize, content_width: usize) -> Vec<Line<'static>> {
@@ -258,7 +322,7 @@ fn wrap_text(text: &str, width: usize) -> Vec<String> {
         let mut current = String::new();
         let mut current_width = 0;
         for character in source_line.chars() {
-            let character_width = Line::from(character.to_string()).width();
+            let character_width = character.width().unwrap_or(0);
             if current_width > 0 && current_width + character_width > width {
                 wrapped.push(std::mem::take(&mut current));
                 current_width = 0;
@@ -277,6 +341,7 @@ fn wrap_text(text: &str, width: usize) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::chat::ToolStatus;
 
     #[test]
     fn maps_scroll_endpoints_to_scrollbar_endpoints() {
@@ -289,5 +354,43 @@ mod tests {
     fn wraps_by_display_width_without_splitting_utf8() {
         assert_eq!(wrap_text("abcdef", 3), ["abc", "def"]);
         assert_eq!(wrap_text("界界界", 4), ["界界", "界"]);
+    }
+
+    #[test]
+    fn transcript_layout_reuses_unchanged_entries() {
+        let entries = vec![
+            Entry::Prompt("first".into()),
+            Entry::ToolCall {
+                id: "call-1".into(),
+                name: "bash".into(),
+                arguments: r#"{\"command\":\"echo first\"}"#.into(),
+                output: "first output".into(),
+                status: ToolStatus::Completed,
+            },
+        ];
+        let mut layout = TranscriptLayout::default();
+        layout.sync(&entries, 1, 80);
+        let cached_first = layout.lines[..layout.line_offsets[1]].to_vec();
+
+        let mut changed = entries.clone();
+        changed.push(Entry::Response("second".into()));
+        layout.sync(&changed, 2, 80);
+
+        assert_eq!(
+            &layout.lines[..layout.line_offsets[1]],
+            cached_first.as_slice()
+        );
+        assert_eq!(layout.entries, changed);
+    }
+
+    #[test]
+    fn transcript_layout_rebuilds_on_width_change() {
+        let entries = vec![Entry::Response("abcdefgh".into())];
+        let mut layout = TranscriptLayout::default();
+        layout.sync(&entries, 1, 12);
+        let narrow_height = layout.height();
+        layout.sync(&entries, 1, 80);
+
+        assert!(layout.height() < narrow_height);
     }
 }

@@ -14,6 +14,7 @@ tokio = { workspace = true }
 futures-util = { workspace = true }
 serde_json = { workspace = true }
 async-trait = { workspace = true }
+unicode-width = "0.2"
 
 [dev-dependencies]
 llm = { workspace = true }

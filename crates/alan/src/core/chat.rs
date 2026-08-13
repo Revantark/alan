@@ -5,7 +5,7 @@ use agent::{Agent, AgentEvent, AgentStream};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Entry {
     Prompt(String),
     Response(String),
@@ -35,6 +35,7 @@ pub struct ChatController {
     stream: Option<AgentStream>,
     busy: bool,
     aborting: bool,
+    revision: u64,
 }
 
 impl ChatController {
@@ -45,11 +46,16 @@ impl ChatController {
             stream: None,
             busy: false,
             aborting: false,
+            revision: 0,
         }
     }
 
     pub fn entries(&self) -> &[Entry] {
         &self.entries
+    }
+
+    pub fn revision(&self) -> u64 {
+        self.revision
     }
 
     pub fn is_busy(&self) -> bool {
@@ -64,6 +70,7 @@ impl ChatController {
         }
 
         self.entries.push(Entry::Prompt(text.to_owned()));
+        self.revision = self.revision.wrapping_add(1);
         self.busy = true;
         self.stream = Some(self.agent.prompt_stream(text.to_owned()));
     }
@@ -88,6 +95,7 @@ impl ChatController {
         let started = Instant::now();
         let mut processed = 0;
         let mut pending_text = String::new();
+        let mut changed = false;
 
         while processed < POLL_EVENT_LIMIT && started.elapsed() < POLL_TIME_BUDGET {
             match stream.try_recv() {
@@ -109,9 +117,10 @@ impl ChatController {
                                 output: String::new(),
                                 status: ToolStatus::Running,
                             });
+                            changed = true;
                         }
                         AgentEvent::ToolCallFinished { id, output } => {
-                            Self::update_tool_call(
+                            changed |= Self::update_tool_call(
                                 &mut self.entries,
                                 &id,
                                 output,
@@ -119,7 +128,7 @@ impl ChatController {
                             );
                         }
                         AgentEvent::ToolCallFailed { id, error } => {
-                            Self::update_tool_call(
+                            changed |= Self::update_tool_call(
                                 &mut self.entries,
                                 &id,
                                 String::new(),
@@ -127,9 +136,9 @@ impl ChatController {
                             );
                         }
                         AgentEvent::Finished => {
-                            Self::append_delta(&mut self.entries, &pending_text);
+                            changed |= Self::append_delta(&mut self.entries, &pending_text);
                             pending_text.clear();
-                            Self::ensure_response_entry(&mut self.entries);
+                            changed |= Self::ensure_response_entry(&mut self.entries);
                             self.busy = false;
                             outcome = Poll::Finished;
                             break;
@@ -137,7 +146,7 @@ impl ChatController {
                     }
                 }
                 Ok(Err(error)) => {
-                    Self::append_delta(&mut self.entries, &pending_text);
+                    changed |= Self::append_delta(&mut self.entries, &pending_text);
                     pending_text.clear();
                     self.busy = false;
                     if matches!(error, agent::AgentError::Aborted) || self.aborting {
@@ -145,13 +154,14 @@ impl ChatController {
                         outcome = Poll::Aborted;
                     } else {
                         self.entries.push(Entry::Error(error.to_string()));
+                        changed = true;
                         outcome = Poll::Error;
                     }
                     break;
                 }
                 Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
                 Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
-                    Self::append_delta(&mut self.entries, &pending_text);
+                    changed |= Self::append_delta(&mut self.entries, &pending_text);
                     pending_text.clear();
                     self.busy = false;
                     if self.aborting {
@@ -160,6 +170,7 @@ impl ChatController {
                     } else {
                         self.entries
                             .push(Entry::Error("agent stream disconnected".into()));
+                        changed = true;
                         outcome = Poll::Error;
                     }
                     break;
@@ -167,8 +178,9 @@ impl ChatController {
             }
         }
 
-        if !pending_text.is_empty() {
-            Self::append_delta(&mut self.entries, &pending_text);
+        changed |= Self::append_delta(&mut self.entries, &pending_text);
+        if changed {
+            self.revision = self.revision.wrapping_add(1);
             outcome = outcome.combine(Poll::Changed);
         }
 
@@ -178,29 +190,37 @@ impl ChatController {
         outcome
     }
 
-    fn append_delta(entries: &mut Vec<Entry>, delta: &str) {
+    fn append_delta(entries: &mut Vec<Entry>, delta: &str) -> bool {
         if delta.is_empty() {
-            return;
+            return false;
         }
 
         match entries.last_mut() {
             Some(Entry::Response(text)) => text.push_str(delta),
             _ => entries.push(Entry::Response(delta.to_owned())),
         }
+        true
     }
 
-    fn ensure_response_entry(entries: &mut Vec<Entry>) {
-        if !matches!(entries.last(), Some(Entry::Response(_))) {
-            entries.push(Entry::Response(String::new()));
+    fn ensure_response_entry(entries: &mut Vec<Entry>) -> bool {
+        if matches!(entries.last(), Some(Entry::Response(_))) {
+            return false;
         }
+        entries.push(Entry::Response(String::new()));
+        true
     }
 
-    fn update_tool_call(entries: &mut [Entry], id: &str, output: String, status: ToolStatus) {
+    fn update_tool_call(
+        entries: &mut [Entry],
+        id: &str,
+        output: String,
+        status: ToolStatus,
+    ) -> bool {
         let Some(entry) = entries
             .iter_mut()
             .find(|entry| matches!(entry, Entry::ToolCall { id: entry_id, .. } if entry_id == id))
         else {
-            return;
+            return false;
         };
 
         if let Entry::ToolCall {
@@ -211,6 +231,8 @@ impl ChatController {
         {
             *entry_output = output;
             *entry_status = status;
+            return true;
         }
+        false
     }
 }

@@ -4,9 +4,9 @@ mod views;
 use core::{Action, Controller, Overlay};
 use crossterm::cursor::SetCursorStyle;
 use crossterm::event::{
-    DisableMouseCapture, EnableMouseCapture, Event, EventStream, KeyCode, KeyEventKind,
-    KeyModifiers, KeyboardEnhancementFlags, MouseEventKind, PopKeyboardEnhancementFlags,
-    PushKeyboardEnhancementFlags,
+    DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture, Event,
+    EventStream, KeyCode, KeyEventKind, KeyModifiers, KeyboardEnhancementFlags, MouseEventKind,
+    PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
 };
 use crossterm::execute;
 use std::io::stdout;
@@ -44,7 +44,7 @@ async fn event_loop(app: &mut Controller) -> anyhow::Result<()> {
     let mut terminal = ratatui::init();
     let keyboard_enhancement =
         crossterm::terminal::supports_keyboard_enhancement().unwrap_or(false);
-    execute!(stdout(), EnableMouseCapture)?;
+    execute!(stdout(), EnableMouseCapture, EnableBracketedPaste)?;
     if keyboard_enhancement {
         execute!(
             stdout(),
@@ -104,7 +104,7 @@ async fn event_loop(app: &mut Controller) -> anyhow::Result<()> {
     if keyboard_enhancement {
         execute!(stdout(), PopKeyboardEnhancementFlags)?;
     }
-    execute!(stdout(), DisableMouseCapture)?;
+    execute!(stdout(), DisableMouseCapture, DisableBracketedPaste)?;
     ratatui::restore();
     result
 }

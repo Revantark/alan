@@ -105,7 +105,7 @@ impl Agent {
             system_prompt: None,
             skills: Vec::new(),
             tools: Vec::new(),
-            max_tool_rounds: 8,
+            max_tool_rounds: 100,
         }
     }
 
@@ -121,7 +121,9 @@ impl Agent {
             .run_with(&model, &mut context, None, &mut cancellation_receiver)
             .await;
         if result.is_err() {
-            context.messages.truncate(original_len);
+            // Keep failed user prompt in history so follow-up prompts can
+            // continue the request shown in the transcript.
+            context.messages.truncate(original_len + 1);
         }
         result
     }
@@ -170,7 +172,9 @@ impl Agent {
             .run_with(&model, &mut context, Some(events), &mut cancellation)
             .await;
         if result.is_err() {
-            context.messages.truncate(original_len);
+            // Keep failed user prompt in history. UI shows prompt and error, so
+            // next prompt must still have enough context for continuation.
+            context.messages.truncate(original_len + 1);
         }
         result
     }
@@ -398,11 +402,14 @@ impl AgentBuilder {
 mod tests {
     use super::*;
     use async_trait::async_trait;
-    use llm::{ContentBlock, LlmApi, LlmError, StopReason};
+    use llm::{ContentBlock, LlmApi, LlmError, LlmEvent, StopReason};
     use providers::{
         ApiId, ModelCapabilities, ModelInfo, OpenRouterProvider, Provider, ProviderId,
     };
-    use std::sync::Arc;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
 
     struct FakeApi;
 
@@ -434,7 +441,38 @@ mod tests {
         }
     }
 
-    fn model() -> Model {
+    struct FailAfterFirstApi {
+        calls: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl LlmApi for FailAfterFirstApi {
+        async fn stream(&self, request: llm::LlmRequest<'_>) -> Result<llm::LlmStream, LlmError> {
+            if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                return Ok(Box::pin(futures_util::stream::iter([
+                    Ok(LlmEvent::TextDelta {
+                        text: "first response".into(),
+                    }),
+                    Ok(LlmEvent::Done {
+                        stop_reason: StopReason::Stop,
+                        usage: None,
+                        model: Some(request.model_id.to_owned()),
+                    }),
+                ])));
+            }
+
+            Ok(Box::pin(futures_util::stream::iter([
+                Ok(LlmEvent::TextDelta {
+                    text: "partial response".into(),
+                }),
+                Err(LlmError::InvalidResponse(
+                    "stream ended without [DONE]".into(),
+                )),
+            ])))
+        }
+    }
+
+    fn model_with_api(api: Arc<dyn LlmApi>) -> Model {
         let info = ModelInfo {
             provider: ProviderId::new("openrouter"),
             id: "test".into(),
@@ -445,11 +483,15 @@ mod tests {
         };
         OpenRouterProvider::builder("key")
             .with_models([info])
-            .with_api(Arc::new(FakeApi))
+            .with_api(api)
             .build()
             .unwrap()
             .bind("test")
             .unwrap()
+    }
+
+    fn model() -> Model {
+        model_with_api(Arc::new(FakeApi))
     }
 
     #[tokio::test]
@@ -478,5 +520,36 @@ mod tests {
             ]
         );
         assert_eq!(agent.messages().await.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn streaming_error_preserves_previous_history() {
+        let api = Arc::new(FailAfterFirstApi {
+            calls: AtomicUsize::new(0),
+        });
+        let agent = Arc::new(Agent::builder(model_with_api(api)).build());
+
+        agent.prompt("first").await.unwrap();
+
+        let mut stream = agent.prompt_stream("second");
+        let mut error = None;
+        while let Some(event) = stream.recv().await {
+            if let Err(error_event) = event {
+                error = Some(error_event);
+                break;
+            }
+        }
+
+        assert_eq!(
+            error.unwrap().to_string(),
+            "invalid response: stream ended without [DONE]"
+        );
+        let messages = agent.messages().await;
+        assert_eq!(messages.len(), 3);
+        assert!(matches!(&messages[0], AgentMessage::User(text) if text == "first"));
+        assert!(
+            matches!(&messages[1], AgentMessage::Assistant(response) if response.text() == "first response")
+        );
+        assert!(matches!(&messages[2], AgentMessage::User(text) if text == "second"));
     }
 }

@@ -21,8 +21,7 @@ pub struct UiState {
     editor_events: EditorEventHandler,
     /// Current rendered top line.
     scroll_offset: usize,
-    /// Desired top line. Scroll input changes this immediately; animation
-    /// moves `scroll_offset` toward it on render ticks.
+    /// Desired top line. Kept equal to `scroll_offset` for immediate input response.
     scroll_target: usize,
     /// Keep viewport pinned to newest content while true.
     follow_output: bool,
@@ -192,36 +191,17 @@ impl UiState {
         } else {
             current.saturating_add(delta as usize).min(self.max_scroll)
         };
-        self.follow_output = false;
+        self.scroll_offset = self.scroll_target;
+        self.follow_output = self.scroll_offset == self.max_scroll;
         self.dirty = true;
     }
 
-    /// Advance scroll animation by one render tick.
+    /// Keep bottom-follow state synchronized on render ticks.
     pub fn tick(&mut self) {
         if self.follow_output {
             self.scroll_offset = self.max_scroll;
             self.scroll_target = self.max_scroll;
-            return;
         }
-        if self.scroll_offset == self.scroll_target {
-            if self.scroll_target == self.max_scroll {
-                self.follow_output = true;
-            }
-            return;
-        }
-
-        let distance = self.scroll_offset.abs_diff(self.scroll_target);
-        let step = (distance / 3).clamp(1, 6);
-        if self.scroll_offset < self.scroll_target {
-            self.scroll_offset = (self.scroll_offset + step).min(self.scroll_target);
-        } else {
-            self.scroll_offset = self.scroll_offset.saturating_sub(step);
-        }
-
-        if self.scroll_offset == self.scroll_target && self.scroll_target == self.max_scroll {
-            self.follow_output = true;
-        }
-        self.dirty = true;
     }
 
     pub(super) fn sync_scroll(&mut self, content_height: usize, viewport_height: usize) -> usize {
@@ -335,12 +315,12 @@ mod tests {
 
         state.scroll_by(-5);
         assert_eq!(state.scroll_target, 75);
-        assert_eq!(state.scroll_offset, 80);
+        assert_eq!(state.scroll_offset, 75);
         assert!(!state.follow_output);
         state.tick();
-        assert!(state.scroll_offset < 80);
+        assert_eq!(state.scroll_offset, 75);
 
-        assert_eq!(state.sync_scroll(120, 20), 79);
+        assert_eq!(state.sync_scroll(120, 20), 75);
         assert!(!state.follow_output);
     }
 
@@ -352,7 +332,7 @@ mod tests {
         state.scroll_by(10);
 
         assert_eq!(state.scroll_target, 80);
-        assert!(!state.follow_output);
+        assert!(state.follow_output);
         state.tick();
         assert!(state.follow_output);
         assert_eq!(state.sync_scroll(120, 20), 100);
@@ -370,14 +350,10 @@ mod tests {
     }
 
     #[test]
-    fn scroll_animation_reaches_target_without_overshooting() {
+    fn scrolling_updates_rendered_offset_immediately() {
         let mut state = UiState::new();
         state.sync_scroll(100, 20);
         state.scroll_by(-10);
-
-        for _ in 0..20 {
-            state.tick();
-        }
 
         assert_eq!(state.scroll_offset, 70);
         assert_eq!(state.scroll_target, 70);

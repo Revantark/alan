@@ -66,6 +66,10 @@ impl Controller {
         self.chat.entries()
     }
 
+    pub fn chat_revision(&self) -> u64 {
+        self.chat.revision()
+    }
+
     pub fn is_busy(&self) -> bool {
         self.chat.is_busy()
     }
