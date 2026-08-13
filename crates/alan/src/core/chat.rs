@@ -9,7 +9,21 @@ use std::time::{Duration, Instant};
 pub enum Entry {
     Prompt(String),
     Response(String),
+    ToolCall {
+        id: String,
+        name: String,
+        arguments: String,
+        output: String,
+        status: ToolStatus,
+    },
     Error(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ToolStatus {
+    Running,
+    Completed,
+    Failed(String),
 }
 
 const POLL_EVENT_LIMIT: usize = 256;
@@ -77,17 +91,50 @@ impl ChatController {
 
         while processed < POLL_EVENT_LIMIT && started.elapsed() < POLL_TIME_BUDGET {
             match stream.try_recv() {
-                Ok(Ok(AgentEvent::TextDelta(text))) => {
-                    pending_text.push_str(&text);
+                Ok(Ok(event)) => {
                     processed += 1;
-                }
-                Ok(Ok(AgentEvent::Finished)) => {
-                    Self::append_delta(&mut self.entries, &pending_text);
-                    pending_text.clear();
-                    Self::ensure_response_entry(&mut self.entries);
-                    self.busy = false;
-                    outcome = Poll::Finished;
-                    break;
+                    match event {
+                        AgentEvent::TextDelta(text) => pending_text.push_str(&text),
+                        AgentEvent::ToolCallStarted {
+                            id,
+                            name,
+                            arguments,
+                        } => {
+                            Self::append_delta(&mut self.entries, &pending_text);
+                            pending_text.clear();
+                            self.entries.push(Entry::ToolCall {
+                                id,
+                                name,
+                                arguments,
+                                output: String::new(),
+                                status: ToolStatus::Running,
+                            });
+                        }
+                        AgentEvent::ToolCallFinished { id, output } => {
+                            Self::update_tool_call(
+                                &mut self.entries,
+                                &id,
+                                output,
+                                ToolStatus::Completed,
+                            );
+                        }
+                        AgentEvent::ToolCallFailed { id, error } => {
+                            Self::update_tool_call(
+                                &mut self.entries,
+                                &id,
+                                String::new(),
+                                ToolStatus::Failed(error),
+                            );
+                        }
+                        AgentEvent::Finished => {
+                            Self::append_delta(&mut self.entries, &pending_text);
+                            pending_text.clear();
+                            Self::ensure_response_entry(&mut self.entries);
+                            self.busy = false;
+                            outcome = Poll::Finished;
+                            break;
+                        }
+                    }
                 }
                 Ok(Err(error)) => {
                     Self::append_delta(&mut self.entries, &pending_text);
@@ -145,6 +192,25 @@ impl ChatController {
     fn ensure_response_entry(entries: &mut Vec<Entry>) {
         if !matches!(entries.last(), Some(Entry::Response(_))) {
             entries.push(Entry::Response(String::new()));
+        }
+    }
+
+    fn update_tool_call(entries: &mut [Entry], id: &str, output: String, status: ToolStatus) {
+        let Some(entry) = entries
+            .iter_mut()
+            .find(|entry| matches!(entry, Entry::ToolCall { id: entry_id, .. } if entry_id == id))
+        else {
+            return;
+        };
+
+        if let Entry::ToolCall {
+            output: entry_output,
+            status: entry_status,
+            ..
+        } = entry
+        {
+            *entry_output = output;
+            *entry_status = status;
         }
     }
 }

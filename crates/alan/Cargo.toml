@@ -12,6 +12,7 @@ edtui = { version = "0.11.6", default-features = false, features = ["mouse-suppo
 anyhow = "1"
 tokio = { workspace = true }
 futures-util = { workspace = true }
+serde_json = { workspace = true }
 async-trait = { workspace = true }
 
 [dev-dependencies]

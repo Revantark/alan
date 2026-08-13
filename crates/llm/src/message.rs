@@ -1,3 +1,4 @@
+use crate::ToolCall;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -10,13 +11,6 @@ pub enum Role {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ToolCall {
-    pub id: String,
-    pub name: String,
-    pub arguments: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Message {
     pub role: Role,
     pub content: Option<String>,

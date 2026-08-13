@@ -2,7 +2,7 @@
 
 ## Project
 
-Alan is Rust workspace exploring Pi-like coding-agent behavior.
+Alan is coding-agent wi.
 
 Workspace crates:
 

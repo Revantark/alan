@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/llm", "crates/providers", "crates/agent", "crates/alan"]
+members = ["crates/tools", "crates/llm", "crates/providers", "crates/agent", "crates/alan"]
 
 [workspace.dependencies]
 async-trait = "0.1"

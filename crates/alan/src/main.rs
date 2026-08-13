@@ -12,7 +12,7 @@ use crossterm::execute;
 use std::io::stdout;
 use std::time::Duration;
 
-use agent::Agent;
+use agent::{Agent, default_tools};
 use futures_util::StreamExt;
 use providers::{FileCredentialStore, OpenRouterProvider, Provider, ProviderRegistry};
 use std::path::PathBuf;
@@ -27,7 +27,7 @@ async fn main() -> anyhow::Result<()> {
         .build()?;
     let model = provider.bind(&model_id)?;
     let registry = ProviderRegistry::new([Arc::new(provider) as Arc<dyn Provider>]);
-    let agent = Agent::builder(model).build();
+    let agent = Agent::builder(model).with_tools(default_tools()).build();
 
     let mut app = Controller::with_runtime(agent, registry, credential_store);
     event_loop(&mut app).await

@@ -1,18 +1,29 @@
-use async_trait::async_trait;
-use llm::{ToolCall, ToolDefinition};
+use llm::ToolDefinition;
 use std::sync::Arc;
-use thiserror::Error;
-
-#[derive(Debug, Error)]
-#[error("tool execution failed: {0}")]
-pub struct ToolError(pub String);
-
-#[async_trait]
-pub trait ToolExecutor: Send + Sync {
-    async fn execute(&self, call: &ToolCall) -> Result<String, ToolError>;
-}
+use tools::{
+    BashExecutor, FileEditExecutor, FileReadExecutor, FileWriteExecutor, ToolExecutor,
+    bash_definition, file_edit_definition, file_read_definition, file_write_definition,
+};
 
 pub struct AgentTool {
     pub definition: ToolDefinition,
     pub executor: Arc<dyn ToolExecutor>,
+}
+
+impl AgentTool {
+    pub fn new(definition: ToolDefinition, executor: impl ToolExecutor + 'static) -> Self {
+        Self {
+            definition,
+            executor: Arc::new(executor),
+        }
+    }
+}
+
+pub fn default_tools() -> Vec<AgentTool> {
+    vec![
+        AgentTool::new(file_read_definition(), FileReadExecutor),
+        AgentTool::new(file_write_definition(), FileWriteExecutor),
+        AgentTool::new(file_edit_definition(), FileEditExecutor),
+        AgentTool::new(bash_definition(), BashExecutor),
+    ]
 }

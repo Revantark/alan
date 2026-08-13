@@ -94,6 +94,68 @@ fn wrap_entry(entry: &Entry, width: usize, content_width: usize) -> Vec<Line<'st
             lines.push(Line::default());
             lines
         }
+        Entry::ToolCall {
+            name,
+            arguments,
+            output,
+            status,
+            ..
+        } => {
+            let (background, foreground) = match status {
+                crate::core::chat::ToolStatus::Running => (theme::TOOL_BG, theme::TOOL_FG),
+                crate::core::chat::ToolStatus::Completed => {
+                    (theme::TOOL_DONE_BG, theme::TOOL_DONE_FG)
+                }
+                crate::core::chat::ToolStatus::Failed(_) => {
+                    (theme::TOOL_ERROR_BG, theme::TOOL_ERROR_FG)
+                }
+            };
+            let mut lines = vec![tool_line("", width, foreground, background)];
+            let argument_summary = compact_arguments(name, arguments);
+
+            if name == "bash" {
+                if !argument_summary.is_empty() {
+                    for line in wrap_text(&argument_summary, content_width.saturating_sub(2)) {
+                        lines.push(tool_detail_line(&line, width, foreground, background));
+                    }
+                }
+            } else {
+                let status_color = match status {
+                    crate::core::chat::ToolStatus::Running => Color::Yellow,
+                    crate::core::chat::ToolStatus::Completed => foreground,
+                    crate::core::chat::ToolStatus::Failed(_) => foreground,
+                };
+                lines.push(tool_header(name, width, status_color, background));
+                if !argument_summary.is_empty() {
+                    for line in wrap_text(&argument_summary, content_width.saturating_sub(2)) {
+                        lines.push(tool_detail_line(&line, width, foreground, background));
+                    }
+                }
+            }
+
+            match status {
+                crate::core::chat::ToolStatus::Failed(error) => {
+                    for line in wrap_text(error, content_width.saturating_sub(2)) {
+                        lines.push(tool_detail_line(&line, width, foreground, background));
+                    }
+                }
+                _ if output.is_empty() => {
+                    lines.push(tool_detail_line(
+                        "(no output)",
+                        width,
+                        foreground,
+                        background,
+                    ));
+                }
+                _ => {
+                    for line in wrap_text(output, content_width.saturating_sub(2)) {
+                        lines.push(tool_detail_line(&line, width, foreground, background));
+                    }
+                }
+            }
+            lines.push(tool_line("", width, foreground, background));
+            lines
+        }
         Entry::Error(text) => {
             let mut lines = vec![Line::default()];
             for line in wrap_text(text, content_width) {
@@ -125,6 +187,64 @@ fn indented_line(text: &str, foreground: Color) -> Line<'static> {
         format!("{}{}", " ".repeat(theme::CHAT_PADDING), text),
         Style::default().fg(foreground).bold(),
     ))
+}
+
+fn compact_arguments(name: &str, arguments: &str) -> String {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(arguments) else {
+        return arguments.to_owned();
+    };
+
+    match name {
+        "bash" => value
+            .get("command")
+            .and_then(serde_json::Value::as_str)
+            .map(|command| format!("$ {command}"))
+            .unwrap_or_default(),
+        "read" | "write" => value
+            .get("path")
+            .and_then(serde_json::Value::as_str)
+            .map(|path| format!("{name}: {path}"))
+            .unwrap_or_default(),
+        _ => value.to_string(),
+    }
+}
+
+fn tool_header(name: &str, width: usize, foreground: Color, background: Color) -> Line<'static> {
+    let content = format!("{}▸ {name}", " ".repeat(theme::CHAT_PADDING));
+    Line::from(Span::styled(
+        pad_line(&content, width),
+        Style::default().fg(foreground).bg(background).bold(),
+    ))
+}
+
+fn tool_line(text: &str, width: usize, foreground: Color, background: Color) -> Line<'static> {
+    let content = format!("{}{}", " ".repeat(theme::CHAT_PADDING), text);
+    let used_width = Line::from(content.as_str()).width();
+    let trailing = " ".repeat(width.saturating_sub(used_width));
+    Line::from(Span::styled(
+        format!("{content}{trailing}"),
+        Style::default().fg(foreground).bg(background),
+    ))
+}
+
+fn tool_detail_line(
+    text: &str,
+    width: usize,
+    foreground: Color,
+    background: Color,
+) -> Line<'static> {
+    let content = format!("{}{}{}", " ".repeat(theme::CHAT_PADDING), "  ", text);
+    let used_width = Line::from(content.as_str()).width();
+    let trailing = " ".repeat(width.saturating_sub(used_width));
+    Line::from(Span::styled(
+        format!("{content}{trailing}"),
+        Style::default().fg(foreground).bg(background),
+    ))
+}
+
+fn pad_line(text: &str, width: usize) -> String {
+    let used_width = Line::from(text).width();
+    format!("{text}{}", " ".repeat(width.saturating_sub(used_width)))
 }
 
 fn wrap_text(text: &str, width: usize) -> Vec<String> {

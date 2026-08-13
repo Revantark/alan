@@ -1,6 +1,6 @@
-use crate::tool::ToolError;
 use providers::ModelError;
 use thiserror::Error;
+use tools::ToolError;
 
 #[derive(Debug, Error)]
 pub enum AgentError {

@@ -11,9 +11,9 @@ dependencies = [
  "llm",
  "providers",
  "serde",
- "serde_json",
  "thiserror",
  "tokio",
+ "tools",
 ]
 
 [[package]]
@@ -29,6 +29,7 @@ dependencies = [
  "llm",
  "providers",
  "ratatui",
+ "serde_json",
  "tokio",
 ]
 
@@ -1939,6 +1940,17 @@ dependencies = [
  "futures-sink",
  "libc",
  "pin-project-lite",
+ "tokio",
+]
+
+[[package]]
+name = "tools"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "llm",
+ "serde_json",
+ "thiserror",
  "tokio",
 ]
 

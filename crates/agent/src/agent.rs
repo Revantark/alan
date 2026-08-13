@@ -5,7 +5,7 @@ use llm::{
     ToolDefinition,
 };
 use providers::{Model, ModelError};
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 use tokio::sync::{
     Mutex,
     mpsc::{self, Receiver, Sender},
@@ -43,12 +43,22 @@ impl Drop for AgentStream {
 }
 
 /// Display-level events emitted while an agent prompt runs.
-///
-/// Tool-call fragments and provider protocol details stay internal to the
-/// agent. Consumers receive only text deltas and a final completion signal.
 #[derive(Debug, Clone, PartialEq)]
 pub enum AgentEvent {
     TextDelta(String),
+    ToolCallStarted {
+        id: String,
+        name: String,
+        arguments: String,
+    },
+    ToolCallFinished {
+        id: String,
+        output: String,
+    },
+    ToolCallFailed {
+        id: String,
+        error: String,
+    },
     Finished,
 }
 
@@ -56,7 +66,30 @@ pub struct AgentContext {
     pub system_prompt: Option<String>,
     pub skills: Vec<Skill>,
     pub messages: Vec<AgentMessage>,
-    pub tools: Vec<AgentTool>,
+    tools: Vec<AgentTool>,
+    tool_definitions: Vec<ToolDefinition>,
+    tool_indexes: HashMap<String, usize>,
+}
+
+impl AgentContext {
+    fn new(system_prompt: Option<String>, skills: Vec<Skill>, tools: Vec<AgentTool>) -> Self {
+        let tool_definitions = tools.iter().map(|tool| tool.definition.clone()).collect();
+        let mut tool_indexes = HashMap::with_capacity(tools.len());
+        for (index, tool) in tools.iter().enumerate() {
+            tool_indexes
+                .entry(tool.definition.name.clone())
+                .or_insert(index);
+        }
+
+        Self {
+            system_prompt,
+            skills,
+            messages: Vec::new(),
+            tools,
+            tool_definitions,
+            tool_indexes,
+        }
+    }
 }
 
 pub struct Agent {
@@ -152,29 +185,77 @@ impl Agent {
         for _ in 0..self.max_tool_rounds {
             Self::check_cancelled(cancellation)?;
             let response = Self::stream_round(model, context, events, cancellation).await?;
-            context
-                .messages
-                .push(AgentMessage::Assistant(response.clone()));
             let calls: Vec<_> = response.tool_calls().cloned().collect();
             if calls.is_empty() {
                 if let Some(events) = events {
                     Self::send_event(events, Ok(AgentEvent::Finished), cancellation).await?;
                 }
+                context
+                    .messages
+                    .push(AgentMessage::Assistant(response.clone()));
                 return Ok(response);
             }
+            context.messages.push(AgentMessage::Assistant(response));
             for call in calls {
                 Self::check_cancelled(cancellation)?;
-                let tool = context
-                    .tools
-                    .iter()
-                    .find(|tool| tool.definition.name == call.name)
+                let tool_index = context
+                    .tool_indexes
+                    .get(&call.name)
+                    .copied()
                     .ok_or_else(|| AgentError::ToolNotFound(call.name.clone()))?;
-                let result = tool.executor.execute(&call).await?;
-                Self::check_cancelled(cancellation)?;
-                context.messages.push(AgentMessage::ToolResult {
-                    tool_call_id: call.id,
-                    content: result,
-                });
+                let call_id = call.id.clone();
+                if let Some(events) = events {
+                    Self::send_event(
+                        events,
+                        Ok(AgentEvent::ToolCallStarted {
+                            id: call_id.clone(),
+                            name: call.name.clone(),
+                            arguments: call.arguments.clone(),
+                        }),
+                        cancellation,
+                    )
+                    .await?;
+                }
+
+                let result = context.tools[tool_index].executor.execute(&call).await;
+                match result {
+                    Ok(result) => {
+                        if let Some(events) = events {
+                            Self::send_event(
+                                events,
+                                Ok(AgentEvent::ToolCallFinished {
+                                    id: call_id.clone(),
+                                    output: tail_lines(&result, 5),
+                                }),
+                                cancellation,
+                            )
+                            .await?;
+                        }
+                        Self::check_cancelled(cancellation)?;
+                        context.messages.push(AgentMessage::ToolResult {
+                            tool_call_id: call_id,
+                            content: result,
+                        });
+                    }
+                    Err(error) => {
+                        if let Some(events) = events {
+                            Self::send_event(
+                                events,
+                                Ok(AgentEvent::ToolCallFailed {
+                                    id: call_id.clone(),
+                                    error: error.to_string(),
+                                }),
+                                cancellation,
+                            )
+                            .await?;
+                        }
+                        Self::check_cancelled(cancellation)?;
+                        context.messages.push(AgentMessage::ToolResult {
+                            tool_call_id: call_id,
+                            content: error.to_string(),
+                        });
+                    }
+                }
             }
         }
         Err(AgentError::MaxToolRounds)
@@ -187,16 +268,11 @@ impl Agent {
         cancellation: &mut watch::Receiver<bool>,
     ) -> Result<LlmResponse, AgentError> {
         let messages = Self::build_messages(context);
-        let definitions: Vec<ToolDefinition> = context
-            .tools
-            .iter()
-            .map(|tool| tool.definition.clone())
-            .collect();
         let options = RequestOptions::default();
         let mut stream = model
             .stream(CompletionInput {
                 messages: &messages,
-                tools: &definitions,
+                tools: &context.tool_definitions,
                 options: &options,
             })
             .await?;
@@ -266,6 +342,12 @@ impl Agent {
     }
 }
 
+fn tail_lines(output: &str, count: usize) -> String {
+    let mut lines: Vec<_> = output.lines().rev().take(count).collect();
+    lines.reverse();
+    lines.join("\n")
+}
+
 pub struct AgentBuilder {
     model: Model,
     system_prompt: Option<String>,
@@ -285,9 +367,13 @@ impl AgentBuilder {
         self
     }
 
-    pub fn tool(mut self, tool: AgentTool) -> Self {
-        self.tools.push(tool);
+    pub fn with_tools(mut self, tools: impl IntoIterator<Item = AgentTool>) -> Self {
+        self.tools.extend(tools);
         self
+    }
+
+    pub fn tool(self, tool: AgentTool) -> Self {
+        self.with_tools([tool])
     }
 
     pub fn max_tool_rounds(mut self, rounds: usize) -> Self {
@@ -298,12 +384,11 @@ impl AgentBuilder {
     pub fn build(self) -> Agent {
         Agent {
             model: Mutex::new(self.model),
-            context: Mutex::new(AgentContext {
-                system_prompt: self.system_prompt,
-                skills: self.skills,
-                messages: Vec::new(),
-                tools: self.tools,
-            }),
+            context: Mutex::new(AgentContext::new(
+                self.system_prompt,
+                self.skills,
+                self.tools,
+            )),
             max_tool_rounds: self.max_tool_rounds,
         }
     }
