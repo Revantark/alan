@@ -72,13 +72,23 @@ impl TranscriptLayout {
         }
     }
 
-    fn height(&self) -> usize {
+    pub(crate) fn height(&self) -> usize {
         self.lines.len()
     }
 
-    fn viewport(&self, scroll: usize, height: usize) -> Text<'static> {
+    pub(crate) fn lines(&self) -> &[Line<'static>] {
+        &self.lines
+    }
+
+    pub(crate) fn viewport(&self, scroll: usize, height: usize) -> Vec<Line<'static>> {
         let end = scroll.saturating_add(height).min(self.lines.len());
-        Text::from(self.lines[scroll.min(end)..end].to_vec())
+        self.lines[scroll.min(end)..end].to_vec()
+    }
+}
+
+impl Chat {
+    pub fn lines(&self) -> &[Line<'static>] {
+        self.layout.lines()
     }
 }
 
@@ -101,7 +111,18 @@ impl Component for Chat {
         let content_height = self.layout.height();
         let viewport_height = usize::from(content_area.height.max(1));
         let scroll = state.sync_scroll(content_height, viewport_height);
-        let chat = Paragraph::new(self.layout.viewport(scroll, viewport_height));
+        state.set_chat_area(content_area);
+
+        let viewport_lines = self.layout.viewport(scroll, viewport_height);
+        let highlighted_lines = crate::views::selection::apply_selection_to_lines(
+            &viewport_lines,
+            scroll,
+            state.selection(),
+            theme::SELECTION_BG,
+            theme::SELECTION_FG,
+        );
+
+        let chat = Paragraph::new(Text::from(highlighted_lines));
         frame.render_widget(chat, content_area);
 
         if state.max_scroll() > 0 {

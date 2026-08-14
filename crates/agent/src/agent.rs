@@ -113,17 +113,23 @@ impl Agent {
     pub async fn prompt(&self, content: impl Into<String>) -> Result<LlmResponse, AgentError> {
         let model = self.model.lock().await;
         let mut context = self.context.lock().await;
-        let original_len = context.messages.len();
         context.messages.push(AgentMessage::user(content));
 
         let (_cancellation, mut cancellation_receiver) = watch::channel(false);
+        let mut partial = String::new();
         let result = self
-            .run_with(&model, &mut context, None, &mut cancellation_receiver)
+            .run_with(
+                &model,
+                &mut context,
+                None,
+                &mut cancellation_receiver,
+                &mut partial,
+            )
             .await;
-        if result.is_err() {
-            // Keep failed user prompt in history so follow-up prompts can
-            // continue the request shown in the transcript.
-            context.messages.truncate(original_len + 1);
+        if result.is_err() && !partial.is_empty() {
+            context
+                .messages
+                .push(AgentMessage::Assistant(partial_response(&partial)));
         }
         result
     }
@@ -165,16 +171,22 @@ impl Agent {
     ) -> Result<LlmResponse, AgentError> {
         let model = self.model.lock().await;
         let mut context = self.context.lock().await;
-        let original_len = context.messages.len();
         context.messages.push(AgentMessage::user(content));
 
+        let mut partial = String::new();
         let result = self
-            .run_with(&model, &mut context, Some(events), &mut cancellation)
+            .run_with(
+                &model,
+                &mut context,
+                Some(events),
+                &mut cancellation,
+                &mut partial,
+            )
             .await;
-        if result.is_err() {
-            // Keep failed user prompt in history. UI shows prompt and error, so
-            // next prompt must still have enough context for continuation.
-            context.messages.truncate(original_len + 1);
+        if result.is_err() && !partial.is_empty() {
+            context
+                .messages
+                .push(AgentMessage::Assistant(partial_response(&partial)));
         }
         result
     }
@@ -185,10 +197,12 @@ impl Agent {
         context: &mut AgentContext,
         events: Option<&Sender<Result<AgentEvent, AgentError>>>,
         cancellation: &mut watch::Receiver<bool>,
+        partial: &mut String,
     ) -> Result<LlmResponse, AgentError> {
         for _ in 0..self.max_tool_rounds {
             Self::check_cancelled(cancellation)?;
-            let response = Self::stream_round(model, context, events, cancellation).await?;
+            let response =
+                Self::stream_round(model, context, events, cancellation, partial).await?;
             let calls: Vec<_> = response.tool_calls().cloned().collect();
             if calls.is_empty() {
                 if let Some(events) = events {
@@ -224,11 +238,15 @@ impl Agent {
                 let result = context.tools[tool_index].executor.execute(&call).await;
                 match result {
                     Ok(result) => {
+                        context.messages.push(AgentMessage::ToolResult {
+                            tool_call_id: call_id.clone(),
+                            content: result.clone(),
+                        });
                         if let Some(events) = events {
                             Self::send_event(
                                 events,
                                 Ok(AgentEvent::ToolCallFinished {
-                                    id: call_id.clone(),
+                                    id: call_id,
                                     output: tail_lines(&result, 5),
                                 }),
                                 cancellation,
@@ -236,28 +254,22 @@ impl Agent {
                             .await?;
                         }
                         Self::check_cancelled(cancellation)?;
-                        context.messages.push(AgentMessage::ToolResult {
-                            tool_call_id: call_id,
-                            content: result,
-                        });
                     }
                     Err(error) => {
+                        let error = error.to_string();
+                        context.messages.push(AgentMessage::ToolResult {
+                            tool_call_id: call_id.clone(),
+                            content: error.clone(),
+                        });
                         if let Some(events) = events {
                             Self::send_event(
                                 events,
-                                Ok(AgentEvent::ToolCallFailed {
-                                    id: call_id.clone(),
-                                    error: error.to_string(),
-                                }),
+                                Ok(AgentEvent::ToolCallFailed { id: call_id, error }),
                                 cancellation,
                             )
                             .await?;
                         }
                         Self::check_cancelled(cancellation)?;
-                        context.messages.push(AgentMessage::ToolResult {
-                            tool_call_id: call_id,
-                            content: error.to_string(),
-                        });
                     }
                 }
             }
@@ -270,6 +282,7 @@ impl Agent {
         context: &AgentContext,
         events: Option<&Sender<Result<AgentEvent, AgentError>>>,
         cancellation: &mut watch::Receiver<bool>,
+        partial: &mut String,
     ) -> Result<LlmResponse, AgentError> {
         let messages = Self::build_messages(context);
         let options = RequestOptions::default();
@@ -282,6 +295,7 @@ impl Agent {
             .await?;
 
         let mut builder = LlmResponseBuilder::new();
+        partial.clear();
         loop {
             let next = tokio::select! {
                 result = stream.next() => result,
@@ -296,6 +310,9 @@ impl Agent {
             let Some(event) = next else { break };
             let event = event.map_err(ModelError::from)?;
             builder.apply(&event).map_err(ModelError::from)?;
+            if let LlmEvent::TextDelta { text } = &event {
+                partial.push_str(text);
+            }
             if let LlmEvent::TextDelta { text } = &event
                 && let Some(events) = events
             {
@@ -343,6 +360,15 @@ impl Agent {
         }
         messages.extend(context.messages.iter().map(AgentMessage::to_llm));
         messages
+    }
+}
+
+fn partial_response(text: &str) -> LlmResponse {
+    LlmResponse {
+        content: vec![llm::ContentBlock::Text(text.to_owned())],
+        stop_reason: llm::StopReason::Aborted,
+        usage: None,
+        model: None,
     }
 }
 
@@ -445,6 +471,10 @@ mod tests {
         calls: AtomicUsize,
     }
 
+    struct PendingAfterFirstApi {
+        calls: AtomicUsize,
+    }
+
     #[async_trait]
     impl LlmApi for FailAfterFirstApi {
         async fn stream(&self, request: llm::LlmRequest<'_>) -> Result<llm::LlmStream, LlmError> {
@@ -469,6 +499,39 @@ mod tests {
                     "stream ended without [DONE]".into(),
                 )),
             ])))
+        }
+    }
+
+    #[async_trait]
+    impl LlmApi for PendingAfterFirstApi {
+        async fn stream(&self, request: llm::LlmRequest<'_>) -> Result<llm::LlmStream, LlmError> {
+            if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                return Ok(Box::pin(futures_util::stream::iter([
+                    Ok(LlmEvent::TextDelta {
+                        text: "first response".into(),
+                    }),
+                    Ok(LlmEvent::Done {
+                        stop_reason: StopReason::Stop,
+                        usage: None,
+                        model: Some(request.model_id.to_owned()),
+                    }),
+                ])));
+            }
+
+            Ok(Box::pin(futures_util::stream::unfold(
+                0,
+                |state| async move {
+                    match state {
+                        0 => Some((
+                            Ok(LlmEvent::TextDelta {
+                                text: "partial response".into(),
+                            }),
+                            1,
+                        )),
+                        _ => futures_util::future::pending().await,
+                    }
+                },
+            )))
         }
     }
 
@@ -545,11 +608,42 @@ mod tests {
             "invalid response: stream ended without [DONE]"
         );
         let messages = agent.messages().await;
-        assert_eq!(messages.len(), 3);
+        assert_eq!(messages.len(), 4);
         assert!(matches!(&messages[0], AgentMessage::User(text) if text == "first"));
         assert!(
             matches!(&messages[1], AgentMessage::Assistant(response) if response.text() == "first response")
         );
         assert!(matches!(&messages[2], AgentMessage::User(text) if text == "second"));
+        assert!(
+            matches!(&messages[3], AgentMessage::Assistant(response) if response.text() == "partial response")
+        );
+    }
+
+    #[tokio::test]
+    async fn abort_preserves_partial_assistant_output() {
+        let api = Arc::new(PendingAfterFirstApi {
+            calls: AtomicUsize::new(0),
+        });
+        let agent = Arc::new(Agent::builder(model_with_api(api)).build());
+
+        agent.prompt("first").await.unwrap();
+
+        let mut stream = agent.prompt_stream("second");
+        assert!(matches!(
+            stream.recv().await,
+            Some(Ok(AgentEvent::TextDelta(text))) if text == "partial response"
+        ));
+        stream.abort();
+        assert!(matches!(
+            stream.recv().await,
+            Some(Err(AgentError::Aborted))
+        ));
+
+        let messages = agent.messages().await;
+        assert_eq!(messages.len(), 4);
+        assert!(matches!(&messages[2], AgentMessage::User(text) if text == "second"));
+        assert!(
+            matches!(&messages[3], AgentMessage::Assistant(response) if response.text() == "partial response")
+        );
     }
 }

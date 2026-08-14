@@ -5,14 +5,20 @@
 
 mod component;
 mod components;
+pub mod selection;
 mod theme;
 
 use crate::core::{Action, Command, Controller, Overlay, Poll};
 use components::{Chat, Footer, Header, LoginOverlay};
-use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEventKind};
+use crossterm::event::{
+    Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+};
 use edtui::{EditorEventHandler, EditorMode, EditorState, Lines};
 use ratatui::Frame;
-use ratatui::layout::{Constraint, Layout, Position};
+use ratatui::layout::{Constraint, Layout, Position, Rect};
+use selection::{Selection, TextPosition};
+
+use std::time::Instant;
 
 pub struct UiState {
     /// Login prompt input. Main editor uses [`EditorState`].
@@ -29,6 +35,12 @@ pub struct UiState {
     /// before next render clamps them again.
     viewport_height: usize,
     max_scroll: usize,
+    /// Last rendered content area of chat
+    chat_area: Rect,
+    /// Active text selection in transcript
+    selection: Option<Selection>,
+    /// Last click timestamp and position for double-click detection
+    last_click: Option<(Instant, u16, u16)>,
     /// True when something changed since last draw and a redraw is needed.
     dirty: bool,
 }
@@ -46,6 +58,9 @@ impl UiState {
             follow_output: true,
             viewport_height: 0,
             max_scroll: 0,
+            chat_area: Rect::default(),
+            selection: None,
+            last_click: None,
             dirty: true,
         }
     }
@@ -103,15 +118,18 @@ impl UiState {
         command
     }
 
-    /// Handle primary editor events and app-level shortcuts.
-    pub fn handle_editor_event(&mut self, event: Event) -> Option<Command> {
+    pub fn handle_editor_event(
+        &mut self,
+        event: Event,
+        rendered_lines: &[ratatui::text::Line<'static>],
+    ) -> Option<Command> {
         let command = match event {
             Event::Key(key) if key.kind != KeyEventKind::Press => None,
-            Event::Key(key)
-                if key.modifiers.contains(KeyModifiers::CONTROL)
-                    && key.code == KeyCode::Char('c') =>
-            {
-                self.apply(Action::Interrupt, false)
+            // Clear selection on Escape
+            Event::Key(key) if key.code == KeyCode::Esc && self.has_active_selection() => {
+                self.selection = None;
+                self.dirty = true;
+                None
             }
             Event::Key(key) if is_multiline_enter(key) => {
                 if self.editor.mode != EditorMode::Insert {
@@ -141,12 +159,7 @@ impl UiState {
             Event::Key(key) if key.code == KeyCode::PageDown => {
                 self.apply(Action::ScrollDown, false)
             }
-            Event::Mouse(mouse) if mouse.kind == MouseEventKind::ScrollUp => {
-                self.apply(Action::MouseScrollUp, false)
-            }
-            Event::Mouse(mouse) if mouse.kind == MouseEventKind::ScrollDown => {
-                self.apply(Action::MouseScrollDown, false)
-            }
+            Event::Mouse(mouse) => self.handle_mouse_event(mouse, rendered_lines),
             event => {
                 self.editor_events.on_event(event, &mut self.editor);
                 self.dirty = true;
@@ -154,6 +167,115 @@ impl UiState {
             }
         };
         command
+    }
+
+    fn handle_mouse_event(
+        &mut self,
+        mouse: MouseEvent,
+        rendered_lines: &[ratatui::text::Line<'static>],
+    ) -> Option<Command> {
+        match mouse.kind {
+            MouseEventKind::ScrollUp => self.apply(Action::MouseScrollUp, false),
+            MouseEventKind::ScrollDown => self.apply(Action::MouseScrollDown, false),
+            MouseEventKind::Down(MouseButton::Left) => {
+                if self.is_mouse_in_chat(mouse.column, mouse.row) {
+                    let now = Instant::now();
+                    let is_double_click = self.last_click.map_or(false, |(t, c, r)| {
+                        c == mouse.column
+                            && r == mouse.row
+                            && now.duration_since(t).as_millis() <= 500
+                    });
+
+                    if let Some(pos) = self.screen_to_text_pos(mouse.column, mouse.row) {
+                        if is_double_click && pos.line < rendered_lines.len() {
+                            let (start_col, end_col) =
+                                selection::find_word_bounds_at(&rendered_lines[pos.line], pos.col);
+                            let sel = Selection::new_word(pos, start_col, end_col);
+                            self.selection = Some(sel);
+                            self.last_click = None;
+                            self.copy_selection(rendered_lines);
+                        } else {
+                            self.selection = Some(Selection::new(pos));
+                            self.last_click = Some((now, mouse.column, mouse.row));
+                        }
+                        self.dirty = true;
+                    }
+                } else if self.selection.is_some() {
+                    self.selection = None;
+                    self.dirty = true;
+                }
+                None
+            }
+            MouseEventKind::Drag(MouseButton::Left) => {
+                let is_dragging = self.selection.as_ref().is_some_and(|s| s.is_dragging);
+                if is_dragging {
+                    if mouse.row < self.chat_area.top() {
+                        self.scroll_by(-1);
+                    } else if mouse.row >= self.chat_area.bottom() {
+                        self.scroll_by(1);
+                    }
+
+                    let pos = self.screen_to_text_pos(mouse.column, mouse.row);
+                    if let (Some(sel), Some(pos)) = (&mut self.selection, pos) {
+                        sel.update_cursor(pos, rendered_lines);
+                        self.dirty = true;
+                    }
+                }
+                None
+            }
+            MouseEventKind::Up(MouseButton::Left) => {
+                if let Some(sel) = &mut self.selection {
+                    sel.is_dragging = false;
+                    if sel.is_empty() {
+                        self.selection = None;
+                    } else {
+                        // Auto-copy on selection mouse release
+                        self.copy_selection(rendered_lines);
+                    }
+                    self.dirty = true;
+                }
+                None
+            }
+            _ => None,
+        }
+    }
+
+    fn is_mouse_in_chat(&self, column: u16, row: u16) -> bool {
+        column >= self.chat_area.left()
+            && column < self.chat_area.right()
+            && row >= self.chat_area.top()
+            && row < self.chat_area.bottom()
+    }
+
+    fn screen_to_text_pos(&self, column: u16, row: u16) -> Option<TextPosition> {
+        let rel_row = row.saturating_sub(self.chat_area.top()) as usize;
+        let line = self.scroll_offset.saturating_add(rel_row);
+        let col = column.saturating_sub(self.chat_area.left()) as usize;
+        Some(TextPosition::new(line, col))
+    }
+
+    pub fn has_active_selection(&self) -> bool {
+        self.selection.as_ref().is_some_and(|s| !s.is_empty())
+    }
+
+    pub fn copy_selection(&mut self, lines: &[ratatui::text::Line<'static>]) {
+        let Some(sel) = &self.selection else {
+            return;
+        };
+        let text = selection::extract_selected_text(lines, sel);
+        if !text.is_empty() {
+            if let Ok(mut clipboard) = arboard::Clipboard::new() {
+                let _ = clipboard.set_text(text);
+            }
+        }
+    }
+
+    pub fn selection(&self) -> Option<&Selection> {
+        self.selection.as_ref()
+    }
+
+    pub fn set_chat_area(&mut self, area: Rect) {
+        self.chat_area = area;
     }
 
     fn submit_editor_or_accept(&mut self) -> Option<Command> {
@@ -302,6 +424,10 @@ impl AppView {
         self.chat.render(frame, chat_area, controller, state);
         self.footer.render(frame, footer_area, controller, state);
     }
+
+    pub fn lines(&self) -> &[ratatui::text::Line<'static>] {
+        self.chat.lines()
+    }
 }
 
 #[cfg(test)]
@@ -363,24 +489,27 @@ mod tests {
     #[test]
     fn vim_escape_returns_to_normal_without_clearing_text() {
         let mut state = UiState::new();
-        state.handle_editor_event(crossterm::event::Event::Key(
-            crossterm::event::KeyEvent::new(
+        state.handle_editor_event(
+            crossterm::event::Event::Key(crossterm::event::KeyEvent::new(
                 crossterm::event::KeyCode::Char('i'),
                 crossterm::event::KeyModifiers::NONE,
-            ),
-        ));
-        state.handle_editor_event(crossterm::event::Event::Key(
-            crossterm::event::KeyEvent::new(
+            )),
+            &[],
+        );
+        state.handle_editor_event(
+            crossterm::event::Event::Key(crossterm::event::KeyEvent::new(
                 crossterm::event::KeyCode::Char('x'),
                 crossterm::event::KeyModifiers::NONE,
-            ),
-        ));
-        state.handle_editor_event(crossterm::event::Event::Key(
-            crossterm::event::KeyEvent::new(
+            )),
+            &[],
+        );
+        state.handle_editor_event(
+            crossterm::event::Event::Key(crossterm::event::KeyEvent::new(
                 crossterm::event::KeyCode::Esc,
                 crossterm::event::KeyModifiers::NONE,
-            ),
-        ));
+            )),
+            &[],
+        );
 
         assert_eq!(state.editor_text(), "x");
         assert_eq!(state.editor_mode(), EditorMode::Normal);
@@ -389,25 +518,28 @@ mod tests {
     #[test]
     fn shift_enter_inserts_newline_without_submitting() {
         let mut state = UiState::new();
-        state.handle_editor_event(crossterm::event::Event::Key(
-            crossterm::event::KeyEvent::new(
+        state.handle_editor_event(
+            crossterm::event::Event::Key(crossterm::event::KeyEvent::new(
                 crossterm::event::KeyCode::Char('i'),
                 crossterm::event::KeyModifiers::NONE,
-            ),
-        ));
-        state.handle_editor_event(crossterm::event::Event::Key(
-            crossterm::event::KeyEvent::new(
+            )),
+            &[],
+        );
+        state.handle_editor_event(
+            crossterm::event::Event::Key(crossterm::event::KeyEvent::new(
                 crossterm::event::KeyCode::Char('a'),
                 crossterm::event::KeyModifiers::NONE,
-            ),
-        ));
+            )),
+            &[],
+        );
 
-        let command = state.handle_editor_event(crossterm::event::Event::Key(
-            crossterm::event::KeyEvent::new(
+        let command = state.handle_editor_event(
+            crossterm::event::Event::Key(crossterm::event::KeyEvent::new(
                 crossterm::event::KeyCode::Enter,
                 crossterm::event::KeyModifiers::SHIFT,
-            ),
-        ));
+            )),
+            &[],
+        );
 
         assert_eq!(command, None);
         assert_eq!(state.editor_text(), "a\n");
@@ -416,25 +548,28 @@ mod tests {
     #[test]
     fn zed_shift_enter_aliases_insert_newline() {
         let mut state = UiState::new();
-        state.handle_editor_event(crossterm::event::Event::Key(
-            crossterm::event::KeyEvent::new(
+        state.handle_editor_event(
+            crossterm::event::Event::Key(crossterm::event::KeyEvent::new(
                 crossterm::event::KeyCode::Char('i'),
                 crossterm::event::KeyModifiers::NONE,
-            ),
-        ));
-        state.handle_editor_event(crossterm::event::Event::Key(
-            crossterm::event::KeyEvent::new(
+            )),
+            &[],
+        );
+        state.handle_editor_event(
+            crossterm::event::Event::Key(crossterm::event::KeyEvent::new(
                 crossterm::event::KeyCode::Char('a'),
                 crossterm::event::KeyModifiers::NONE,
-            ),
-        ));
+            )),
+            &[],
+        );
 
-        let command = state.handle_editor_event(crossterm::event::Event::Key(
-            crossterm::event::KeyEvent::new(
+        let command = state.handle_editor_event(
+            crossterm::event::Event::Key(crossterm::event::KeyEvent::new(
                 crossterm::event::KeyCode::Enter,
                 crossterm::event::KeyModifiers::ALT,
-            ),
-        ));
+            )),
+            &[],
+        );
 
         assert_eq!(command, None);
         assert_eq!(state.editor_text(), "a\n");
@@ -443,18 +578,20 @@ mod tests {
     #[test]
     fn ctrl_j_inserts_newline() {
         let mut state = UiState::new();
-        state.handle_editor_event(crossterm::event::Event::Key(
-            crossterm::event::KeyEvent::new(
+        state.handle_editor_event(
+            crossterm::event::Event::Key(crossterm::event::KeyEvent::new(
                 crossterm::event::KeyCode::Char('i'),
                 crossterm::event::KeyModifiers::NONE,
-            ),
-        ));
-        let command = state.handle_editor_event(crossterm::event::Event::Key(
-            crossterm::event::KeyEvent::new(
+            )),
+            &[],
+        );
+        let command = state.handle_editor_event(
+            crossterm::event::Event::Key(crossterm::event::KeyEvent::new(
                 crossterm::event::KeyCode::Char('j'),
                 crossterm::event::KeyModifiers::CONTROL,
-            ),
-        ));
+            )),
+            &[],
+        );
 
         assert_eq!(command, None);
         assert_eq!(state.editor_text(), "\n");
@@ -463,18 +600,20 @@ mod tests {
     #[test]
     fn ctrl_m_inserts_newline() {
         let mut state = UiState::new();
-        state.handle_editor_event(crossterm::event::Event::Key(
-            crossterm::event::KeyEvent::new(
+        state.handle_editor_event(
+            crossterm::event::Event::Key(crossterm::event::KeyEvent::new(
                 crossterm::event::KeyCode::Char('i'),
                 crossterm::event::KeyModifiers::NONE,
-            ),
-        ));
-        let command = state.handle_editor_event(crossterm::event::Event::Key(
-            crossterm::event::KeyEvent::new(
+            )),
+            &[],
+        );
+        let command = state.handle_editor_event(
+            crossterm::event::Event::Key(crossterm::event::KeyEvent::new(
                 crossterm::event::KeyCode::Char('m'),
                 crossterm::event::KeyModifiers::CONTROL,
-            ),
-        ));
+            )),
+            &[],
+        );
 
         assert_eq!(command, None);
         assert_eq!(state.editor_text(), "\n");
@@ -483,18 +622,20 @@ mod tests {
     #[test]
     fn control_enter_inserts_newline() {
         let mut state = UiState::new();
-        state.handle_editor_event(crossterm::event::Event::Key(
-            crossterm::event::KeyEvent::new(
+        state.handle_editor_event(
+            crossterm::event::Event::Key(crossterm::event::KeyEvent::new(
                 crossterm::event::KeyCode::Char('i'),
                 crossterm::event::KeyModifiers::NONE,
-            ),
-        ));
-        let command = state.handle_editor_event(crossterm::event::Event::Key(
-            crossterm::event::KeyEvent::new(
+            )),
+            &[],
+        );
+        let command = state.handle_editor_event(
+            crossterm::event::Event::Key(crossterm::event::KeyEvent::new(
                 crossterm::event::KeyCode::Enter,
                 crossterm::event::KeyModifiers::CONTROL,
-            ),
-        ));
+            )),
+            &[],
+        );
 
         assert_eq!(command, None);
         assert_eq!(state.editor_text(), "\n");
@@ -505,27 +646,30 @@ mod tests {
         let mut state = UiState::new();
         assert!(state.take_dirty());
 
-        state.handle_editor_event(crossterm::event::Event::Key(
-            crossterm::event::KeyEvent::new(
+        state.handle_editor_event(
+            crossterm::event::Event::Key(crossterm::event::KeyEvent::new(
                 crossterm::event::KeyCode::Char('i'),
                 crossterm::event::KeyModifiers::NONE,
-            ),
-        ));
-        state.handle_editor_event(crossterm::event::Event::Key(
-            crossterm::event::KeyEvent::new(
+            )),
+            &[],
+        );
+        state.handle_editor_event(
+            crossterm::event::Event::Key(crossterm::event::KeyEvent::new(
                 crossterm::event::KeyCode::Char('h'),
                 crossterm::event::KeyModifiers::NONE,
-            ),
-        ));
+            )),
+            &[],
+        );
         assert!(state.take_dirty());
         assert!(!state.take_dirty());
 
-        let command = state.handle_editor_event(crossterm::event::Event::Key(
-            crossterm::event::KeyEvent::new(
+        let command = state.handle_editor_event(
+            crossterm::event::Event::Key(crossterm::event::KeyEvent::new(
                 crossterm::event::KeyCode::Enter,
                 crossterm::event::KeyModifiers::NONE,
-            ),
-        ));
+            )),
+            &[],
+        );
 
         assert_eq!(command, Some(Command::Submit("h".into())));
         assert!(state.take_dirty());
