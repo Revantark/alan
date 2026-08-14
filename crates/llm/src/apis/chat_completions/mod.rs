@@ -136,7 +136,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Message, RequestOptions, ToolDefinition};
+    use crate::{Message, RequestOptions, ToolSpec};
     use futures_util::StreamExt;
     use std::sync::Arc;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -145,7 +145,7 @@ mod tests {
     fn request<'a>(
         model_id: &'a str,
         messages: &'a [Message],
-        tools: &'a [ToolDefinition],
+        tools: &'a [ToolSpec],
         options: &'a RequestOptions,
     ) -> LlmRequest<'a> {
         LlmRequest {

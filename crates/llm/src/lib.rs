@@ -18,5 +18,5 @@ pub use event::{LlmEvent, LlmStream};
 pub use message::{Message, Role};
 pub use request::{CompletionInput, Credential, LlmRequest, RequestOptions};
 pub use response::{ContentBlock, LlmResponse, LlmResponseBuilder, StopReason, Usage};
-pub use tool::{ToolCall, ToolDefinition};
+pub use tool::{ServerTool, ToolCall, ToolDefinition, ToolSpec};
 pub use transport::HttpClient;

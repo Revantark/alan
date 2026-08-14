@@ -159,6 +159,12 @@ impl UiState {
             Event::Key(key) if key.code == KeyCode::PageDown => {
                 self.apply(Action::ScrollDown, false)
             }
+            Event::Key(key)
+                if key.code == KeyCode::Char('c')
+                    && key.modifiers.contains(KeyModifiers::CONTROL) =>
+            {
+                Some(Command::Interrupt)
+            }
             Event::Mouse(mouse) => self.handle_mouse_event(mouse, rendered_lines),
             event => {
                 self.editor_events.on_event(event, &mut self.editor);

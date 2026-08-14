@@ -1,8 +1,9 @@
+use crate::model::ModelOptions;
 use crate::provider::bind_model;
 use crate::{
     ApiId, ApiKeyAuth, AuthError, AuthEvent, AuthInteraction, AuthPrompt, AuthResolver, Credential,
     CredentialAuth, Model, ModelCapabilities, ModelInfo, ModelPricing, Provider, ProviderAuth,
-    ProviderError, ProviderId,
+    ProviderError, ProviderId, ServerToolInfo,
 };
 use async_trait::async_trait;
 use llm::{ChatCompletionsApi, HttpClient, LlmApi};
@@ -14,6 +15,7 @@ const BASE_URL: &str = "https://openrouter.ai/api/v1";
 pub struct OpenRouterProvider {
     id: ProviderId,
     models: Vec<ModelInfo>,
+    server_tools: Vec<ServerToolInfo>,
     apis: HashMap<ApiId, Arc<dyn LlmApi>>,
     auth: Arc<dyn AuthResolver>,
     login: OpenRouterAuth,
@@ -86,10 +88,32 @@ impl Provider for OpenRouterProvider {
     fn models(&self) -> &[ModelInfo] {
         &self.models
     }
+    fn server_tools(&self) -> &[ServerToolInfo] {
+        &self.server_tools
+    }
     fn bind(&self, model_id: &str) -> Result<Model, ProviderError> {
-        bind_model(&self.models, &self.apis, self.auth.clone(), model_id)
+        bind_model(
+            &self.models,
+            &self.apis,
+            self.auth.clone(),
+            model_id,
+            ModelOptions::default(),
+        )
     }
 
+    fn bind_with_options(
+        &self,
+        model_id: &str,
+        options: ModelOptions,
+    ) -> Result<Model, ProviderError> {
+        bind_model(
+            &self.models,
+            &self.apis,
+            self.auth.clone(),
+            model_id,
+            options,
+        )
+    }
     fn auth(&self) -> &dyn ProviderAuth {
         &self.login
     }
@@ -149,6 +173,16 @@ impl OpenRouterBuilder {
         Ok(OpenRouterProvider {
             id: ProviderId::new("openrouter"),
             models: self.models,
+            server_tools: vec![
+                ServerToolInfo {
+                    id: "openrouter:web_fetch".into(),
+                    description: "Fetch a web page".into(),
+                },
+                ServerToolInfo {
+                    id: "openrouter:web_search".into(),
+                    description: "Search the web".into(),
+                },
+            ],
             apis: HashMap::from([(ApiId::ChatCompletions, api)]),
             auth,
             login: OpenRouterAuth,

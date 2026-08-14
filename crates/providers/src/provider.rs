@@ -1,6 +1,7 @@
 use crate::Model;
 use crate::auth::{AuthResolver, ProviderAuth};
-use crate::catalog::{ApiId, ModelInfo, ProviderId};
+use crate::catalog::{ApiId, ModelInfo, ProviderId, ServerToolInfo};
+use crate::model::ModelOptions;
 use llm::LlmApi;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -19,7 +20,16 @@ pub enum ProviderError {
 pub trait Provider: Send + Sync {
     fn id(&self) -> &ProviderId;
     fn models(&self) -> &[ModelInfo];
+    fn server_tools(&self) -> &[ServerToolInfo];
     fn bind(&self, model_id: &str) -> Result<Model, ProviderError>;
+    fn bind_with_options(
+        &self,
+        model_id: &str,
+        options: ModelOptions,
+    ) -> Result<Model, ProviderError> {
+        let _ = options;
+        self.bind(model_id)
+    }
     fn auth(&self) -> &dyn ProviderAuth;
 }
 
@@ -34,16 +44,11 @@ impl ProviderRegistry {
             providers: providers.into_iter().collect(),
         }
     }
-
     pub fn providers(&self) -> &[Arc<dyn Provider>] {
         &self.providers
     }
-
     pub fn get(&self, id: &ProviderId) -> Option<Arc<dyn Provider>> {
-        self.providers
-            .iter()
-            .find(|provider| provider.id() == id)
-            .cloned()
+        self.providers.iter().find(|p| p.id() == id).cloned()
     }
 }
 
@@ -52,6 +57,7 @@ pub(crate) fn bind_model(
     apis: &HashMap<ApiId, Arc<dyn LlmApi>>,
     auth: Arc<dyn AuthResolver>,
     model_id: &str,
+    options: ModelOptions,
 ) -> Result<Model, ProviderError> {
     let info = models
         .iter()
@@ -64,5 +70,5 @@ pub(crate) fn bind_model(
         .ok_or_else(|| ProviderError::MissingApi {
             model: info.id.clone(),
         })?;
-    Ok(Model::new(info, api, auth))
+    Ok(Model::new_with_options(info, api, auth, options))
 }

@@ -9,12 +9,12 @@ pub use auth::{
     ApiKeyAuth, AuthError, AuthEvent, AuthInteraction, AuthOption, AuthPrompt, AuthResolver,
     CredentialAuth, InteractionError, ProviderAuth,
 };
-pub use catalog::{ApiId, ModelCapabilities, ModelInfo, ModelPricing, ProviderId};
+pub use catalog::{ApiId, ModelCapabilities, ModelInfo, ModelPricing, ProviderId, ServerToolInfo};
 pub use credentials::{
     Credential, CredentialError, CredentialInfo, CredentialKind, CredentialStore,
     FileCredentialStore, InMemoryCredentialStore, SharedCredentialStore,
 };
-pub use model::{Model, ModelError};
+pub use model::{Model, ModelError, ModelOptions};
 pub use openrouter::{OpenRouterAuth, OpenRouterBuilder, OpenRouterProvider};
 pub use provider::{Provider, ProviderError, ProviderRegistry};
 

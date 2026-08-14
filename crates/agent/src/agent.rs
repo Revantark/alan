@@ -1,8 +1,7 @@
 use crate::{AgentError, AgentMessage, AgentTool, Skill, build_system_prompt};
 use futures_util::StreamExt;
 use llm::{
-    CompletionInput, LlmEvent, LlmResponse, LlmResponseBuilder, Message, RequestOptions,
-    ToolDefinition,
+    CompletionInput, LlmEvent, LlmResponse, LlmResponseBuilder, Message, RequestOptions, ToolSpec,
 };
 use providers::{Model, ModelError};
 use std::{collections::HashMap, sync::Arc};
@@ -67,13 +66,16 @@ pub struct AgentContext {
     pub skills: Vec<Skill>,
     pub messages: Vec<AgentMessage>,
     tools: Vec<AgentTool>,
-    tool_definitions: Vec<ToolDefinition>,
+    tool_definitions: Vec<ToolSpec>,
     tool_indexes: HashMap<String, usize>,
 }
 
 impl AgentContext {
     fn new(system_prompt: Option<String>, skills: Vec<Skill>, tools: Vec<AgentTool>) -> Self {
-        let tool_definitions = tools.iter().map(|tool| tool.definition.clone()).collect();
+        let tool_definitions = tools
+            .iter()
+            .map(|tool| ToolSpec::Function(tool.definition.clone()))
+            .collect();
         let mut tool_indexes = HashMap::with_capacity(tools.len());
         for (index, tool) in tools.iter().enumerate() {
             tool_indexes

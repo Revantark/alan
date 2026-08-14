@@ -1,4 +1,4 @@
-use crate::{LlmError, LlmEvent, LlmRequest, Message, Role, StopReason, Usage};
+use crate::{LlmError, LlmEvent, LlmRequest, Message, Role, StopReason, ToolSpec, Usage};
 use serde::{Deserialize, Serialize};
 
 #[derive(Serialize)]
@@ -41,8 +41,9 @@ struct WireFunction {
 #[derive(Serialize)]
 struct WireTool {
     #[serde(rename = "type")]
-    kind: &'static str,
-    function: WireDefinition,
+    kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    function: Option<WireDefinition>,
 }
 
 #[derive(Serialize)]
@@ -209,13 +210,19 @@ fn wire_message(message: &Message) -> WireMessage {
     }
 }
 
-fn wire_tool(tool: &crate::ToolDefinition) -> WireTool {
-    WireTool {
-        kind: "function",
-        function: WireDefinition {
-            name: tool.name.clone(),
-            description: tool.description.clone(),
-            parameters: tool.parameters.clone(),
+fn wire_tool(tool: &ToolSpec) -> WireTool {
+    match tool {
+        ToolSpec::Function(tool) => WireTool {
+            kind: "function".into(),
+            function: Some(WireDefinition {
+                name: tool.name.clone(),
+                description: tool.description.clone(),
+                parameters: tool.parameters.clone(),
+            }),
+        },
+        ToolSpec::Server(tool) => WireTool {
+            kind: tool.kind.clone(),
+            function: None,
         },
     }
 }
@@ -232,12 +239,12 @@ fn role(role: Role) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{RequestOptions, ToolDefinition};
+    use crate::{RequestOptions, ToolDefinition, ToolSpec};
 
     fn request<'a>(
         model_id: &'a str,
         messages: &'a [Message],
-        tools: &'a [ToolDefinition],
+        tools: &'a [ToolSpec],
         options: &'a RequestOptions,
     ) -> LlmRequest<'a> {
         LlmRequest {
@@ -252,11 +259,11 @@ mod tests {
     #[test]
     fn serializes_stream_request_with_options_messages_and_tools() {
         let messages = [Message::system("system"), Message::user("hello")];
-        let tools = [ToolDefinition {
+        let tools = [ToolSpec::Function(ToolDefinition {
             name: "weather".into(),
             description: "Get weather".into(),
             parameters: serde_json::json!({"type": "object"}),
-        }];
+        })];
         let options = RequestOptions {
             temperature: Some(0.2),
             max_tokens: Some(128),

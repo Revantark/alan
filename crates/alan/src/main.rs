@@ -9,12 +9,15 @@ use crossterm::event::{
     PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
 };
 use crossterm::execute;
+use llm::ServerTool;
 use std::io::stdout;
 use std::time::Duration;
 
 use agent::{Agent, default_tools};
 use futures_util::StreamExt;
-use providers::{FileCredentialStore, OpenRouterProvider, Provider, ProviderRegistry};
+use providers::{
+    FileCredentialStore, ModelOptions, OpenRouterProvider, Provider, ProviderRegistry,
+};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -25,7 +28,8 @@ async fn main() -> anyhow::Result<()> {
     let provider = OpenRouterProvider::from_store(credential_store.clone())
         .with_model(&model_id)
         .build()?;
-    let model = provider.bind(&model_id)?;
+    let server_tools = enabled_server_tools(&provider)?;
+    let model = provider.bind_with_options(&model_id, ModelOptions { server_tools })?;
     let registry = ProviderRegistry::new([Arc::new(provider) as Arc<dyn Provider>]);
     let agent = Agent::builder(model).with_tools(default_tools()).build();
 
@@ -33,6 +37,35 @@ async fn main() -> anyhow::Result<()> {
     event_loop(&mut app).await
 }
 
+fn enabled_server_tools(provider: &OpenRouterProvider) -> anyhow::Result<Vec<ServerTool>> {
+    let mut enabled = Vec::new();
+    for tool in provider.server_tools() {
+        let variable = match tool.id.as_str() {
+            "openrouter:web_fetch" => "ALAN_OPENROUTER_WEB_FETCH",
+            "openrouter:web_search" => "ALAN_OPENROUTER_WEB_SEARCH",
+            _ => continue,
+        };
+        if parse_bool_env(variable)? {
+            enabled.push(ServerTool {
+                kind: tool.id.clone(),
+            });
+        }
+    }
+    Ok(enabled)
+}
+
+fn parse_bool_env(name: &str) -> anyhow::Result<bool> {
+    let Some(value) = std::env::var_os(name) else {
+        return Ok(false);
+    };
+    match value.to_string_lossy().trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Ok(true),
+        "0" | "false" | "no" | "off" => Ok(false),
+        value => Err(anyhow::anyhow!(
+            "{name} must be a boolean (true/false), got {value:?}"
+        )),
+    }
+}
 fn auth_path() -> anyhow::Result<PathBuf> {
     let home = std::env::var_os("ALAN_HOME")
         .or_else(|| std::env::var_os("HOME"))

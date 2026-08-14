@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 agent = { path = "../agent" }
+llm = { path = "../llm" }
 providers = { path = "../providers" }
 ratatui = { version = "0.30.2", default-features = false, features = ["crossterm_0_29"] }
 crossterm = { version = "0.29", features = ["event-stream"] }

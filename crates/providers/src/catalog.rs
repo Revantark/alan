@@ -3,6 +3,12 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ProviderId(pub String);
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct ServerToolInfo {
+    pub id: String,
+    pub description: String,
+}
+
 impl ProviderId {
     pub fn new(value: impl Into<String>) -> Self {
         Self(value.into())

@@ -1,4 +1,4 @@
-use crate::{Message, ToolDefinition};
+use crate::{Message, ToolSpec};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Credential {
@@ -15,14 +15,14 @@ pub struct RequestOptions {
 
 pub struct CompletionInput<'a> {
     pub messages: &'a [Message],
-    pub tools: &'a [ToolDefinition],
+    pub tools: &'a [ToolSpec],
     pub options: &'a RequestOptions,
 }
 
 pub struct LlmRequest<'a> {
     pub model_id: &'a str,
     pub messages: &'a [Message],
-    pub tools: &'a [ToolDefinition],
+    pub tools: &'a [ToolSpec],
     pub options: &'a RequestOptions,
     pub credential: Option<&'a Credential>,
 }
