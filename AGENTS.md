@@ -2,7 +2,7 @@
 
 ## Project
 
-Alan is coding-agent wi.
+Alan is minimal coding-agent written in rust.
 
 Workspace crates:
 
