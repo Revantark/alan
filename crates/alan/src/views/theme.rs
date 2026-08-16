@@ -15,5 +15,7 @@ pub const EDITOR_BG: Color = Color::Rgb(28, 32, 39);
 pub const EDITOR_FG: Color = Color::White;
 pub const CHAT_PADDING: usize = 3;
 pub const EDITOR_VISIBLE_LINES: u16 = 7;
+/// Width of the `  › ` prompt column to the left of the editor.
+pub const PROMPT_GUTTER: u16 = 4;
 pub const SELECTION_BG: Color = Color::Rgb(58, 76, 107);
 pub const SELECTION_FG: Color = Color::White;

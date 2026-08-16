@@ -128,7 +128,7 @@ async fn event_loop(app: &mut Controller) -> anyhow::Result<()> {
         terminal.clear()?;
         let mut ui = views::UiState::new();
         let mut view = views::AppView::new();
-        sync_cursor_style(&ui)?;
+        execute!(stdout(), SetCursorStyle::SteadyBar)?;
         let mut events = EventStream::new();
         let mut render_tick = tokio::time::interval(Duration::from_millis(16));
         render_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -140,7 +140,6 @@ async fn event_loop(app: &mut Controller) -> anyhow::Result<()> {
 
             if ui.take_dirty() {
                 terminal.draw(|frame| view.render(frame, app, &mut ui))?;
-                sync_cursor_style(&ui)?;
             }
 
             tokio::select! {
@@ -159,7 +158,6 @@ async fn event_loop(app: &mut Controller) -> anyhow::Result<()> {
                     let should_quit = command.is_some_and(|command| app.handle(command));
                     if ui.take_dirty() {
                         terminal.draw(|frame| view.render(frame, app, &mut ui))?;
-                        sync_cursor_style(&ui)?;
                     }
                     if should_quit {
                         break;
@@ -177,15 +175,6 @@ async fn event_loop(app: &mut Controller) -> anyhow::Result<()> {
     execute!(stdout(), DisableMouseCapture, DisableBracketedPaste)?;
     ratatui::restore();
     result
-}
-
-fn sync_cursor_style(ui: &views::UiState) -> anyhow::Result<()> {
-    let style = match ui.editor_mode() {
-        edtui::EditorMode::Insert => SetCursorStyle::SteadyBar,
-        _ => SetCursorStyle::SteadyBlock,
-    };
-    execute!(stdout(), style)?;
-    Ok(())
 }
 
 fn action_from_event(event: &Event) -> Option<Action> {

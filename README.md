@@ -14,7 +14,7 @@ Alan is a minimal coding agent written in Rust. It runs in your terminal and use
 
 ## Requirements
 
-- Rust 1.85 or newer
+- Rust 1.88 or newer
 - OpenRouter API key
 
 ## Run
