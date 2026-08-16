@@ -8,6 +8,7 @@ pub enum Action {
     ClearInput,
     Backspace,
     Insert(char),
+    Paste(String),
     ScrollUp,
     ScrollDown,
     MouseScrollUp,

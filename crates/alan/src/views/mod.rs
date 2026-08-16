@@ -89,6 +89,10 @@ impl UiState {
                 self.input.push(character);
                 None
             }
+            Action::Paste(text) => {
+                self.input.push_str(&text);
+                None
+            }
             Action::ScrollUp => {
                 if login_selection_active {
                     Some(Command::MoveLoginSelection(-1))

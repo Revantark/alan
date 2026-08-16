@@ -176,6 +176,7 @@ fn action_from_event(event: &Event) -> Option<Action> {
             _ => return None,
         }),
         Event::Resize(_, _) => Some(Action::Resize),
+        Event::Paste(data) => Some(Action::Paste(data.clone())),
         _ => None,
     }
 }
