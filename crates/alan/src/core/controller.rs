@@ -42,6 +42,9 @@ pub struct Controller {
 }
 
 impl Controller {
+    // TODO: drop the attribute once a non-test caller exists. Only `#[cfg(test)]`
+    // code reaches this today, so the binary build reports it as dead.
+    #[allow(dead_code)]
     pub fn new(agent: Agent) -> Self {
         Self::with_runtime(
             agent,
@@ -87,8 +90,7 @@ impl Controller {
     }
 
     pub fn poll(&mut self) -> Poll {
-        let outcome = self.chat.poll().combine(self.login.poll());
-        outcome
+        self.chat.poll().combine(self.login.poll())
     }
 
     pub fn handle(&mut self, command: Command) -> bool {

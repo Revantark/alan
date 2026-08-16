@@ -126,12 +126,11 @@ impl AuthResolver for CredentialAuth {
             };
         }
 
-        if let Some(variable) = self.environment_variable {
-            if let Ok(key) = env::var(variable) {
-                if !key.is_empty() {
-                    return Ok(RequestCredential::ApiKey(key));
-                }
-            }
+        if let Some(variable) = self.environment_variable
+            && let Ok(key) = env::var(variable)
+            && !key.is_empty()
+        {
+            return Ok(RequestCredential::ApiKey(key));
         }
 
         Err(AuthError::Missing)
