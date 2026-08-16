@@ -2,7 +2,6 @@ use crate::core::{Controller, LoginState};
 use crate::views::UiState;
 use crate::views::component::Component;
 use crate::views::theme;
-use edtui::{EditorTheme, EditorView};
 use providers::AuthPrompt;
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
@@ -96,23 +95,16 @@ impl Component for Footer {
         }
 
         let [prompt_area, input_area] =
-            Layout::horizontal([Constraint::Length(4), Constraint::Min(1)]).areas(editor_area);
+            Layout::horizontal([Constraint::Length(theme::PROMPT_GUTTER), Constraint::Min(1)])
+                .areas(editor_area);
         frame.render_widget(
             Paragraph::new("  › ")
                 .style(Style::default().fg(theme::PROMPT_FG).bg(theme::EDITOR_BG)),
             prompt_area,
         );
-        EditorView::new(state.editor())
-            .wrap(false)
-            .theme(
-                EditorTheme::default()
-                    .base(Style::default().fg(theme::EDITOR_FG).bg(theme::EDITOR_BG))
-                    .hide_cursor()
-                    .hide_status_line(),
-            )
-            .render(input_area, frame.buffer_mut());
+        state.editor().render(input_area, frame.buffer_mut());
         if let Some(position) = state.cursor_screen_position() {
-            frame.set_cursor_position((position.x, position.y));
+            frame.set_cursor_position(position);
         }
     }
 }

@@ -13,18 +13,18 @@ use components::{Chat, Footer, Header, LoginOverlay};
 use crossterm::event::{
     Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
-use edtui::{EditorEventHandler, EditorMode, EditorState, Lines};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Position, Rect};
+use ratatui::style::Style;
 use selection::{Selection, TextPosition};
+use tui_textarea::{CursorRenderMode, TextArea, WrapMode};
 
 use std::time::Instant;
 
 pub struct UiState {
-    /// Login prompt input. Main editor uses [`EditorState`].
+    /// Login prompt input. Main editor uses [`TextArea`].
     input: String,
-    editor: EditorState,
-    editor_events: EditorEventHandler,
+    editor: TextArea<'static>,
     /// Current rendered top line.
     scroll_offset: usize,
     /// Desired top line. Kept equal to `scroll_offset` for immediate input response.
@@ -52,7 +52,6 @@ impl UiState {
         Self {
             input: String::new(),
             editor,
-            editor_events: EditorEventHandler::vim_mode(),
             scroll_offset: 0,
             scroll_target: 0,
             follow_output: true,
@@ -136,29 +135,11 @@ impl UiState {
                 None
             }
             Event::Key(key) if is_multiline_enter(key) => {
-                if self.editor.mode != EditorMode::Insert {
-                    self.editor.mode = EditorMode::Insert;
-                }
-                self.editor.execute(edtui::actions::LineBreak(1));
+                self.editor.insert_newline();
                 self.dirty = true;
                 None
             }
             Event::Key(key) if key.code == KeyCode::Enter => self.submit_editor_or_accept(),
-            Event::Key(key) if key.code == KeyCode::Esc => {
-                self.editor_events.on_event(event, &mut self.editor);
-                self.dirty = true;
-                None
-            }
-            Event::Key(key)
-                if key.code == KeyCode::Char('/')
-                    && key.modifiers == KeyModifiers::NONE
-                    && self.editor.mode == EditorMode::Normal =>
-            {
-                self.editor.mode = EditorMode::Insert;
-                self.editor_events.on_event(event, &mut self.editor);
-                self.dirty = true;
-                None
-            }
             Event::Key(key) if key.code == KeyCode::PageUp => self.apply(Action::ScrollUp, false),
             Event::Key(key) if key.code == KeyCode::PageDown => {
                 self.apply(Action::ScrollDown, false)
@@ -169,9 +150,28 @@ impl UiState {
             {
                 Some(Command::Interrupt)
             }
+            // Terminals send Ctrl+U for Cmd+Delete, but the widget binds it to
+            // undo, so Cmd+Delete would undo instead of clearing the line. Its
+            // keymap is a match arm rather than a table, so interception is the
+            // only way to change it.
+            Event::Key(key)
+                if key.code == KeyCode::Char('u')
+                    && key.modifiers.contains(KeyModifiers::CONTROL) =>
+            {
+                self.editor.delete_line_by_head();
+                self.dirty = true;
+                None
+            }
             Event::Mouse(mouse) => self.handle_mouse_event(mouse, rendered_lines),
+            // Bracketed paste arrives as its own event. The widget's crossterm
+            // conversion drops it, so insert the text directly.
+            Event::Paste(text) => {
+                self.editor.insert_str(text);
+                self.dirty = true;
+                None
+            }
             event => {
-                self.editor_events.on_event(event, &mut self.editor);
+                self.editor.input(event);
                 self.dirty = true;
                 None
             }
@@ -296,12 +296,22 @@ impl UiState {
         Some(Command::Submit(text))
     }
 
-    fn new_editor() -> EditorState {
-        EditorState::new(Lines::from(""))
+    /// The prompt soft-wraps at word boundaries and grows up to
+    /// [`theme::EDITOR_VISIBLE_LINES`] rows. The terminal owns the cursor, so
+    /// the widget does not paint one of its own.
+    fn new_editor() -> TextArea<'static> {
+        let mut editor = TextArea::default();
+        editor.set_style(Style::default().fg(theme::EDITOR_FG).bg(theme::EDITOR_BG));
+        editor.set_cursor_line_style(Style::default());
+        editor.set_wrap_mode(WrapMode::WordOrGlyph);
+        editor.set_cursor_render_mode(CursorRenderMode::Hidden);
+        editor.set_min_rows(1);
+        editor.set_max_rows(theme::EDITOR_VISIBLE_LINES);
+        editor
     }
 
     fn editor_text(&self) -> String {
-        self.editor.lines.to_string()
+        self.editor.lines().join("\n")
     }
 
     /// Consume a poll outcome. Manual scroll position survives streamed text.
@@ -355,23 +365,20 @@ impl UiState {
         &self.input
     }
 
-    pub(super) fn editor(&mut self) -> &mut EditorState {
-        &mut self.editor
+    pub(super) fn editor(&self) -> &TextArea<'static> {
+        &self.editor
     }
 
-    pub(super) fn editor_mode(&self) -> EditorMode {
-        self.editor.mode
-    }
-
-    pub(super) fn editor_line_count(&self) -> u16 {
-        self.editor
-            .lines
-            .len()
-            .clamp(1, usize::from(theme::EDITOR_VISIBLE_LINES)) as u16
+    /// Rows the prompt needs at `width`, accounting for soft wrapping.
+    ///
+    /// Wrapped text occupies more rows than it has lines, so the footer cannot
+    /// be sized from the line count alone.
+    pub(super) fn editor_rows(&mut self, width: u16) -> u16 {
+        self.editor.measure(width.max(1)).preferred_rows
     }
 
     pub(super) fn cursor_screen_position(&self) -> Option<Position> {
-        self.editor.cursor_screen_position()
+        self.editor.rendered_cursor_position()
     }
 
     pub(super) fn max_scroll(&self) -> usize {
@@ -422,10 +429,12 @@ impl AppView {
             return;
         }
 
+        // Measure against the width the editor actually gets, not the frame's.
+        let editor_width = frame.area().width.saturating_sub(theme::PROMPT_GUTTER);
         let [header_area, chat_area, footer_area] = Layout::vertical([
             Constraint::Length(1),
             Constraint::Min(1),
-            Constraint::Length(4 + state.editor_line_count()),
+            Constraint::Length(4 + state.editor_rows(editor_width)),
         ])
         .areas(frame.area());
 
@@ -495,45 +504,69 @@ mod tests {
         assert!(!state.follow_output);
     }
 
-    #[test]
-    fn vim_escape_returns_to_normal_without_clearing_text() {
-        let mut state = UiState::new();
-        state.handle_editor_event(
-            crossterm::event::Event::Key(crossterm::event::KeyEvent::new(
-                crossterm::event::KeyCode::Char('i'),
-                crossterm::event::KeyModifiers::NONE,
-            )),
-            &[],
-        );
-        state.handle_editor_event(
-            crossterm::event::Event::Key(crossterm::event::KeyEvent::new(
-                crossterm::event::KeyCode::Char('x'),
-                crossterm::event::KeyModifiers::NONE,
-            )),
-            &[],
-        );
-        state.handle_editor_event(
-            crossterm::event::Event::Key(crossterm::event::KeyEvent::new(
-                crossterm::event::KeyCode::Esc,
-                crossterm::event::KeyModifiers::NONE,
-            )),
-            &[],
-        );
+    fn key(code: crossterm::event::KeyCode) -> crossterm::event::Event {
+        crossterm::event::Event::Key(crossterm::event::KeyEvent::new(
+            code,
+            crossterm::event::KeyModifiers::NONE,
+        ))
+    }
 
-        assert_eq!(state.editor_text(), "x");
-        assert_eq!(state.editor_mode(), EditorMode::Normal);
+    #[test]
+    fn typing_inserts_immediately_and_escape_is_inert() {
+        let mut state = UiState::new();
+        state.handle_editor_event(key(crossterm::event::KeyCode::Char('h')), &[]);
+        state.handle_editor_event(key(crossterm::event::KeyCode::Char('i')), &[]);
+        state.handle_editor_event(key(crossterm::event::KeyCode::Esc), &[]);
+
+        assert_eq!(state.editor_text(), "hi");
+    }
+
+    #[test]
+    fn bracketed_paste_inserts_multiline_text() {
+        let mut state = UiState::new();
+        state.handle_editor_event(crossterm::event::Event::Paste("first\nsecond".into()), &[]);
+
+        assert_eq!(state.editor_text(), "first\nsecond");
+    }
+
+    fn ctrl(code: char) -> crossterm::event::Event {
+        crossterm::event::Event::Key(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Char(code),
+            crossterm::event::KeyModifiers::CONTROL,
+        ))
+    }
+
+    /// Terminals send Ctrl+U for Cmd+Delete, so it must clear the line rather
+    /// than undo, which is what the widget binds it to by default.
+    #[test]
+    fn ctrl_u_deletes_to_start_of_line() {
+        let mut state = UiState::new();
+        for character in "one two".chars() {
+            state.handle_editor_event(key(crossterm::event::KeyCode::Char(character)), &[]);
+        }
+
+        state.handle_editor_event(ctrl('u'), &[]);
+
+        assert_eq!(state.editor_text(), "");
+    }
+
+    #[test]
+    fn prompt_grows_with_wrapped_text_up_to_the_row_limit() {
+        let mut state = UiState::new();
+        assert_eq!(state.editor_rows(20), 1);
+
+        for character in "aaaaa bbbbb ccccc ddddd".chars() {
+            state.handle_editor_event(key(crossterm::event::KeyCode::Char(character)), &[]);
+        }
+
+        // Wrapping at width 12 needs more rows than the single logical line.
+        assert!(state.editor_rows(12) > 1);
+        assert!(state.editor_rows(12) <= theme::EDITOR_VISIBLE_LINES);
     }
 
     #[test]
     fn shift_enter_inserts_newline_without_submitting() {
         let mut state = UiState::new();
-        state.handle_editor_event(
-            crossterm::event::Event::Key(crossterm::event::KeyEvent::new(
-                crossterm::event::KeyCode::Char('i'),
-                crossterm::event::KeyModifiers::NONE,
-            )),
-            &[],
-        );
         state.handle_editor_event(
             crossterm::event::Event::Key(crossterm::event::KeyEvent::new(
                 crossterm::event::KeyCode::Char('a'),
@@ -559,13 +592,6 @@ mod tests {
         let mut state = UiState::new();
         state.handle_editor_event(
             crossterm::event::Event::Key(crossterm::event::KeyEvent::new(
-                crossterm::event::KeyCode::Char('i'),
-                crossterm::event::KeyModifiers::NONE,
-            )),
-            &[],
-        );
-        state.handle_editor_event(
-            crossterm::event::Event::Key(crossterm::event::KeyEvent::new(
                 crossterm::event::KeyCode::Char('a'),
                 crossterm::event::KeyModifiers::NONE,
             )),
@@ -587,13 +613,6 @@ mod tests {
     #[test]
     fn ctrl_j_inserts_newline() {
         let mut state = UiState::new();
-        state.handle_editor_event(
-            crossterm::event::Event::Key(crossterm::event::KeyEvent::new(
-                crossterm::event::KeyCode::Char('i'),
-                crossterm::event::KeyModifiers::NONE,
-            )),
-            &[],
-        );
         let command = state.handle_editor_event(
             crossterm::event::Event::Key(crossterm::event::KeyEvent::new(
                 crossterm::event::KeyCode::Char('j'),
@@ -609,13 +628,6 @@ mod tests {
     #[test]
     fn ctrl_m_inserts_newline() {
         let mut state = UiState::new();
-        state.handle_editor_event(
-            crossterm::event::Event::Key(crossterm::event::KeyEvent::new(
-                crossterm::event::KeyCode::Char('i'),
-                crossterm::event::KeyModifiers::NONE,
-            )),
-            &[],
-        );
         let command = state.handle_editor_event(
             crossterm::event::Event::Key(crossterm::event::KeyEvent::new(
                 crossterm::event::KeyCode::Char('m'),
@@ -631,13 +643,6 @@ mod tests {
     #[test]
     fn control_enter_inserts_newline() {
         let mut state = UiState::new();
-        state.handle_editor_event(
-            crossterm::event::Event::Key(crossterm::event::KeyEvent::new(
-                crossterm::event::KeyCode::Char('i'),
-                crossterm::event::KeyModifiers::NONE,
-            )),
-            &[],
-        );
         let command = state.handle_editor_event(
             crossterm::event::Event::Key(crossterm::event::KeyEvent::new(
                 crossterm::event::KeyCode::Enter,
@@ -655,13 +660,6 @@ mod tests {
         let mut state = UiState::new();
         assert!(state.take_dirty());
 
-        state.handle_editor_event(
-            crossterm::event::Event::Key(crossterm::event::KeyEvent::new(
-                crossterm::event::KeyCode::Char('i'),
-                crossterm::event::KeyModifiers::NONE,
-            )),
-            &[],
-        );
         state.handle_editor_event(
             crossterm::event::Event::Key(crossterm::event::KeyEvent::new(
                 crossterm::event::KeyCode::Char('h'),

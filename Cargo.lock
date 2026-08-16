@@ -40,7 +40,6 @@ dependencies = [
  "arboard",
  "async-trait",
  "crossterm",
- "edtui",
  "futures-util",
  "llm",
  "providers",
@@ -48,6 +47,7 @@ dependencies = [
  "serde_json",
  "tokio",
  "tui-markdown",
+ "tui-textarea-2",
  "unicode-width",
 ]
 
@@ -507,26 +507,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "92773504d58c093f6de2459af4af33faa518c13451eb8f2b5698ed3d36e7c813"
 
 [[package]]
-name = "edtui"
-version = "0.11.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9131e0e4f053070d7dd0ae21012e8378aaf914d77db72f63bbed5f8f5810ad01"
-dependencies = [
- "crossterm",
- "edtui-jagged",
- "enum_dispatch",
- "ratatui-core",
- "ratatui-widgets",
- "unicode-width",
-]
-
-[[package]]
-name = "edtui-jagged"
-version = "0.1.13"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c6818b2d6b8b3da52f7491b6331e27d45ae34e5baaffeb1edfde43911fe63dd6"
-
-[[package]]
 name = "either"
 version = "1.17.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -539,18 +519,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "75030f3c4f45dafd7586dd6780965a8c7e8e285a5ecb86713e63a79c5b2766f3"
 dependencies = [
  "cfg-if",
-]
-
-[[package]]
-name = "enum_dispatch"
-version = "0.3.13"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "aa18ce2bc66555b3218614519ac839ddb759a7d6720732f979ef8d13be147ecd"
-dependencies = [
- "once_cell",
- "proc-macro2",
- "quote",
- "syn 2.0.119",
 ]
 
 [[package]]
@@ -2699,6 +2667,20 @@ dependencies = [
  "rstest",
  "syntect",
  "tracing",
+]
+
+[[package]]
+name = "tui-textarea-2"
+version = "0.12.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4296a13cbcb20abd7b62f96154cad81053eb82ee8d24db3d7fdca16b31f118e9"
+dependencies = [
+ "crossterm",
+ "portable-atomic",
+ "ratatui-core",
+ "ratatui-widgets",
+ "unicode-segmentation",
+ "unicode-width",
 ]
 
 [[package]]
