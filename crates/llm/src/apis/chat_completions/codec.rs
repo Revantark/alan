@@ -133,20 +133,24 @@ pub(crate) fn deserialize_stream_chunk(body: &str) -> Result<StreamChunk, LlmErr
         .and_then(|delta| delta.tool_calls.as_ref())
         .into_iter()
         .flatten()
-        .map(|call| StreamToolCall {
-            index: call.index.unwrap_or_default(),
-            id: call.id.clone(),
-            name: call
-                .function
-                .as_ref()
-                .and_then(|function| function.name.clone()),
-            arguments: call
-                .function
-                .as_ref()
-                .and_then(|function| function.arguments.clone())
-                .unwrap_or_default(),
+        .map(|call| {
+            Ok(StreamToolCall {
+                index: call.index.ok_or_else(|| {
+                    LlmError::InvalidResponse("stream tool call is missing index".into())
+                })?,
+                id: call.id.clone(),
+                name: call
+                    .function
+                    .as_ref()
+                    .and_then(|function| function.name.clone()),
+                arguments: call
+                    .function
+                    .as_ref()
+                    .and_then(|function| function.arguments.clone())
+                    .unwrap_or_default(),
+            })
         })
-        .collect();
+        .collect::<Result<Vec<_>, LlmError>>()?;
 
     Ok(StreamChunk {
         model: response.model,
@@ -318,6 +322,14 @@ mod tests {
         assert_eq!(chunk.usage.unwrap().output_tokens, 7);
     }
 
+    #[test]
+    fn rejects_tool_call_without_index() {
+        let error = deserialize_stream_chunk(
+            r#"{"choices":[{"delta":{"tool_calls":[{"id":"call-1","function":{"name":"bash"}}]}}]}"#,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("missing index"));
+    }
     #[test]
     fn accepts_usage_only_chunk() {
         let chunk = deserialize_stream_chunk(

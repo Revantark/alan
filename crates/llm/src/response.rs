@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 
 use crate::{LlmError, LlmEvent, Message, ToolCall};
@@ -78,7 +80,7 @@ impl LlmResponse {
 #[derive(Debug, Default)]
 pub struct LlmResponseBuilder {
     text: String,
-    tool_calls: Vec<Option<PartialToolCall>>,
+    tool_calls: BTreeMap<usize, PartialToolCall>,
     stop_reason: Option<StopReason>,
     usage: Option<Usage>,
     model: Option<String>,
@@ -111,10 +113,10 @@ impl LlmResponseBuilder {
                 name,
                 arguments,
             } => {
-                if self.tool_calls.len() <= *index {
-                    self.tool_calls.resize_with(index + 1, || None);
-                }
-                let call = self.tool_calls[*index].get_or_insert_with(PartialToolCall::default);
+                let call = self
+                    .tool_calls
+                    .entry(*index)
+                    .or_insert_with(PartialToolCall::default);
                 if let Some(id) = id {
                     call.id.push_str(id);
                 }
@@ -145,10 +147,7 @@ impl LlmResponseBuilder {
         if !self.text.is_empty() {
             content.push(ContentBlock::Text(self.text));
         }
-        for call in self.tool_calls {
-            let call = call.ok_or_else(|| {
-                LlmError::InvalidResponse("tool call indexes are not contiguous".into())
-            })?;
+        for (_, call) in self.tool_calls {
             if call.id.is_empty() || call.name.is_empty() {
                 return Err(LlmError::InvalidResponse(
                     "tool call missing id or name".into(),
@@ -160,12 +159,63 @@ impl LlmResponseBuilder {
                 arguments: call.arguments,
             }));
         }
-
         Ok(LlmResponse {
             content,
             stop_reason,
             usage: self.usage,
             model: self.model,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn done() -> LlmEvent {
+        LlmEvent::Done {
+            stop_reason: StopReason::ToolUse,
+            usage: None,
+            model: None,
+        }
+    }
+
+    #[test]
+    fn accepts_sparse_provider_tool_indexes() {
+        let mut builder = LlmResponseBuilder::new();
+        builder
+            .apply(&LlmEvent::ToolCallDelta {
+                index: 1,
+                id: Some("call-1".into()),
+                name: Some("bash".into()),
+                arguments: "{}".into(),
+            })
+            .unwrap();
+        builder.apply(&done()).unwrap();
+
+        let response = builder.finish().unwrap();
+        let calls: Vec<_> = response.tool_calls().collect();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].id, "call-1");
+    }
+
+    #[test]
+    fn emits_sparse_tool_indexes_in_provider_order() {
+        let mut builder = LlmResponseBuilder::new();
+        for (index, id) in [(3, "call-3"), (1, "call-1")] {
+            builder
+                .apply(&LlmEvent::ToolCallDelta {
+                    index,
+                    id: Some(id.into()),
+                    name: Some("bash".into()),
+                    arguments: "{}".into(),
+                })
+                .unwrap();
+        }
+        builder.apply(&done()).unwrap();
+
+        let response = builder.finish().unwrap();
+        let ids: Vec<_> = response.tool_calls().map(|call| call.id.as_str()).collect();
+        assert_eq!(ids, ["call-1", "call-3"]);
     }
 }
