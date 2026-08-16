@@ -162,6 +162,17 @@ impl UiState {
                 self.dirty = true;
                 None
             }
+            // Undo lost its binding to the line clear above, so it moves here.
+            // Terminals cannot report Cmd, so Cmd+Z is not available. Redo
+            // stays on the widget's native Ctrl+R.
+            Event::Key(key)
+                if key.code == KeyCode::Char('z')
+                    && key.modifiers.contains(KeyModifiers::CONTROL) =>
+            {
+                self.editor.undo();
+                self.dirty = true;
+                None
+            }
             Event::Mouse(mouse) => self.handle_mouse_event(mouse, rendered_lines),
             // Bracketed paste arrives as its own event. The widget's crossterm
             // conversion drops it, so insert the text directly.
@@ -534,6 +545,23 @@ mod tests {
             crossterm::event::KeyCode::Char(code),
             crossterm::event::KeyModifiers::CONTROL,
         ))
+    }
+
+    /// Ctrl+U was the widget's undo binding before it was taken for the line
+    /// clear, so undo and redo have to keep working from their new homes.
+    #[test]
+    fn ctrl_z_undoes_and_ctrl_r_redoes() {
+        let mut state = UiState::new();
+        for character in "hello".chars() {
+            state.handle_editor_event(key(crossterm::event::KeyCode::Char(character)), &[]);
+        }
+        assert_eq!(state.editor_text(), "hello");
+
+        state.handle_editor_event(ctrl('z'), &[]);
+        assert_ne!(state.editor_text(), "hello");
+
+        state.handle_editor_event(ctrl('r'), &[]);
+        assert_eq!(state.editor_text(), "hello");
     }
 
     /// Terminals send Ctrl+U for Cmd+Delete, so it must clear the line rather
