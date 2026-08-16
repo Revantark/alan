@@ -172,9 +172,7 @@ fn wrap_entry(entry: &Entry, width: usize, content_width: usize) -> Vec<Line<'st
             if text.is_empty() {
                 lines.push(indented_line("(empty response)", theme::MUTED_FG));
             } else {
-                for line in wrap_text(text, content_width) {
-                    lines.push(indented_line(&line, theme::RESPONSE_FG));
-                }
+                lines.extend(wrap_markdown(text, content_width));
             }
             lines.push(Line::default());
             lines
@@ -330,6 +328,63 @@ fn tool_detail_line(
 fn pad_line(text: &str, width: usize) -> String {
     let used_width = Line::from(text).width();
     format!("{text}{}", " ".repeat(width.saturating_sub(used_width)))
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct MarkdownStyleSheet;
+
+impl tui_markdown::StyleSheet for MarkdownStyleSheet {
+    fn heading(&self, level: u8) -> Style {
+        tui_markdown::DefaultStyleSheet.heading(level).bold()
+    }
+
+    fn code(&self) -> Style {
+        Style::default().fg(theme::RESPONSE_FG).bg(Color::Reset)
+    }
+}
+
+fn wrap_markdown(text: &str, width: usize) -> Vec<Line<'static>> {
+    let options = tui_markdown::Options::new(MarkdownStyleSheet);
+    let markdown = tui_markdown::from_str_with_options(text, &options);
+    let mut lines = Vec::new();
+    let prefix = " ".repeat(theme::CHAT_PADDING);
+    let available = width.saturating_sub(theme::CHAT_PADDING).max(1);
+
+    for source in markdown.lines {
+        let mut current = Line::from(Span::styled(
+            prefix.clone(),
+            Style::default().fg(theme::RESPONSE_FG),
+        ));
+        let mut current_width = theme::CHAT_PADDING;
+
+        for span in source.spans {
+            let style = span.style;
+            for character in span.content.chars() {
+                let character_width = UnicodeWidthChar::width(character).unwrap_or(0);
+                if current_width > theme::CHAT_PADDING
+                    && current_width - theme::CHAT_PADDING + character_width > available
+                {
+                    lines.push(current);
+                    current = Line::from(Span::styled(
+                        prefix.clone(),
+                        Style::default().fg(theme::RESPONSE_FG),
+                    ));
+                    current_width = theme::CHAT_PADDING;
+                }
+                current.push_span(Span::styled(
+                    character.to_string(),
+                    Style::default().fg(theme::RESPONSE_FG).patch(style),
+                ));
+                current_width += character_width;
+            }
+        }
+        lines.push(current);
+    }
+
+    if lines.is_empty() {
+        lines.push(indented_line("", theme::RESPONSE_FG));
+    }
+    lines
 }
 
 fn wrap_text(text: &str, width: usize) -> Vec<String> {
