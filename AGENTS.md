@@ -20,9 +20,14 @@ Run from repository root:
 ```bash
 cargo fmt --all
 cargo check --workspace
+cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 cargo run -p alan
 ```
+
+CI runs `cargo fmt --all -- --check`, the `clippy` command above, and
+`cargo test --workspace` on every pull request. Use `cargo check` for the fast
+inner loop; run `clippy` before pushing.
 
 Focused checks:
 

@@ -123,7 +123,7 @@ impl UiState {
         event: Event,
         rendered_lines: &[ratatui::text::Line<'static>],
     ) -> Option<Command> {
-        let command = match event {
+        match event {
             Event::Key(key) if key.kind != KeyEventKind::Press => None,
             // Clear selection on Escape
             Event::Key(key) if key.code == KeyCode::Esc && self.has_active_selection() => {
@@ -171,8 +171,7 @@ impl UiState {
                 self.dirty = true;
                 None
             }
-        };
-        command
+        }
     }
 
     fn handle_mouse_event(
@@ -186,7 +185,7 @@ impl UiState {
             MouseEventKind::Down(MouseButton::Left) => {
                 if self.is_mouse_in_chat(mouse.column, mouse.row) {
                     let now = Instant::now();
-                    let is_double_click = self.last_click.map_or(false, |(t, c, r)| {
+                    let is_double_click = self.last_click.is_some_and(|(t, c, r)| {
                         c == mouse.column
                             && r == mouse.row
                             && now.duration_since(t).as_millis() <= 500
@@ -269,10 +268,10 @@ impl UiState {
             return;
         };
         let text = selection::extract_selected_text(lines, sel);
-        if !text.is_empty() {
-            if let Ok(mut clipboard) = arboard::Clipboard::new() {
-                let _ = clipboard.set_text(text);
-            }
+        if !text.is_empty()
+            && let Ok(mut clipboard) = arboard::Clipboard::new()
+        {
+            let _ = clipboard.set_text(text);
         }
     }
 
