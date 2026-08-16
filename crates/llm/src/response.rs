@@ -113,10 +113,7 @@ impl LlmResponseBuilder {
                 name,
                 arguments,
             } => {
-                let call = self
-                    .tool_calls
-                    .entry(*index)
-                    .or_insert_with(PartialToolCall::default);
+                let call = self.tool_calls.entry(*index).or_default();
                 if let Some(id) = id {
                     call.id.push_str(id);
                 }
