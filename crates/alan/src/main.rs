@@ -187,6 +187,12 @@ fn action_from_event(event: &Event) -> Option<Action> {
                 KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                     Action::Interrupt
                 }
+                KeyCode::Tab | KeyCode::BackTab
+                    if key.modifiers.contains(KeyModifiers::SHIFT)
+                        || key.code == KeyCode::BackTab =>
+                {
+                    Action::TogglePlanMode
+                }
                 KeyCode::Enter => Action::Submit,
                 KeyCode::Esc => Action::ClearInput,
                 KeyCode::Backspace => Action::Backspace,

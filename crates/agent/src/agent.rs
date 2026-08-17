@@ -4,7 +4,13 @@ use llm::{
     CompletionInput, LlmEvent, LlmResponse, LlmResponseBuilder, Message, RequestOptions, ToolSpec,
 };
 use providers::{Model, ModelError};
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::HashMap,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+};
 use tokio::sync::{
     Mutex,
     mpsc::{self, Receiver, Sender},
@@ -66,16 +72,12 @@ pub struct AgentContext {
     pub skills: Vec<Skill>,
     pub messages: Vec<AgentMessage>,
     tools: Vec<AgentTool>,
-    tool_definitions: Vec<ToolSpec>,
     tool_indexes: HashMap<String, usize>,
+    plan_mode: bool,
 }
 
 impl AgentContext {
     fn new(system_prompt: Option<String>, skills: Vec<Skill>, tools: Vec<AgentTool>) -> Self {
-        let tool_definitions = tools
-            .iter()
-            .map(|tool| ToolSpec::Function(tool.definition.clone()))
-            .collect();
         let mut tool_indexes = HashMap::with_capacity(tools.len());
         for (index, tool) in tools.iter().enumerate() {
             tool_indexes
@@ -88,8 +90,8 @@ impl AgentContext {
             skills,
             messages: Vec::new(),
             tools,
-            tool_definitions,
             tool_indexes,
+            plan_mode: false,
         }
     }
 }
@@ -97,6 +99,7 @@ impl AgentContext {
 pub struct Agent {
     model: Mutex<Model>,
     context: Mutex<AgentContext>,
+    plan_mode: AtomicBool,
     max_tool_rounds: usize,
 }
 
@@ -115,7 +118,10 @@ impl Agent {
     pub async fn prompt(&self, content: impl Into<String>) -> Result<LlmResponse, AgentError> {
         let model = self.model.lock().await;
         let mut context = self.context.lock().await;
-        context.messages.push(AgentMessage::user(content));
+        let plan_mode = self.plan_mode();
+        context
+            .messages
+            .push(AgentMessage::user(prompt_content(content, plan_mode)));
 
         let (_cancellation, mut cancellation_receiver) = watch::channel(false);
         let mut partial = String::new();
@@ -161,6 +167,14 @@ impl Agent {
         *self.model.lock().await = model;
     }
 
+    pub fn set_plan_mode(&self, enabled: bool) {
+        self.plan_mode.store(enabled, Ordering::Release);
+    }
+
+    pub fn plan_mode(&self) -> bool {
+        self.plan_mode.load(Ordering::Acquire)
+    }
+
     pub async fn messages(&self) -> Vec<AgentMessage> {
         self.context.lock().await.messages.clone()
     }
@@ -173,7 +187,10 @@ impl Agent {
     ) -> Result<LlmResponse, AgentError> {
         let model = self.model.lock().await;
         let mut context = self.context.lock().await;
-        context.messages.push(AgentMessage::user(content));
+        let plan_mode = self.plan_mode();
+        context
+            .messages
+            .push(AgentMessage::user(prompt_content(content, plan_mode)));
 
         let mut partial = String::new();
         let result = self
@@ -201,6 +218,7 @@ impl Agent {
         cancellation: &mut watch::Receiver<bool>,
         partial: &mut String,
     ) -> Result<LlmResponse, AgentError> {
+        context.plan_mode = self.plan_mode();
         for _ in 0..self.max_tool_rounds {
             Self::check_cancelled(cancellation)?;
             let response =
@@ -223,6 +241,10 @@ impl Agent {
                     .get(&call.name)
                     .copied()
                     .ok_or_else(|| AgentError::ToolNotFound(call.name.clone()))?;
+                if context.plan_mode && !context.tools[tool_index].read_only && call.name != "bash"
+                {
+                    return Err(AgentError::ToolNotFound(call.name.clone()));
+                }
                 let call_id = call.id.clone();
                 if let Some(events) = events {
                     Self::send_event(
@@ -286,12 +308,18 @@ impl Agent {
         cancellation: &mut watch::Receiver<bool>,
         partial: &mut String,
     ) -> Result<LlmResponse, AgentError> {
+        let tools: Vec<_> = context
+            .tools
+            .iter()
+            .filter(|tool| !context.plan_mode || tool.read_only || tool.definition.name == "bash")
+            .map(|tool| ToolSpec::Function(tool.definition.clone()))
+            .collect();
         let messages = Self::build_messages(context);
         let options = RequestOptions::default();
         let mut stream = model
             .stream(CompletionInput {
                 messages: &messages,
-                tools: &context.tool_definitions,
+                tools: &tools,
                 options: &options,
             })
             .await?;
@@ -365,6 +393,15 @@ impl Agent {
     }
 }
 
+fn prompt_content(content: impl Into<String>, plan_mode: bool) -> String {
+    let content = content.into();
+    if plan_mode {
+        format!("{content}\n\nPlan mode is on, do not edit any files.")
+    } else {
+        content
+    }
+}
+
 fn partial_response(text: &str) -> LlmResponse {
     LlmResponse {
         content: vec![llm::ContentBlock::Text(text.to_owned())],
@@ -421,6 +458,7 @@ impl AgentBuilder {
                 self.skills,
                 self.tools,
             )),
+            plan_mode: AtomicBool::new(false),
             max_tool_rounds: self.max_tool_rounds,
         }
     }

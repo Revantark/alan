@@ -8,6 +8,7 @@ use tools::{
 pub struct AgentTool {
     pub definition: ToolDefinition,
     pub executor: Arc<dyn ToolExecutor>,
+    pub read_only: bool,
 }
 
 impl AgentTool {
@@ -15,13 +16,19 @@ impl AgentTool {
         Self {
             definition,
             executor: Arc::new(executor),
+            read_only: false,
         }
+    }
+
+    pub fn read_only(mut self) -> Self {
+        self.read_only = true;
+        self
     }
 }
 
 pub fn default_tools() -> Vec<AgentTool> {
     vec![
-        AgentTool::new(file_read_definition(), FileReadExecutor),
+        AgentTool::new(file_read_definition(), FileReadExecutor).read_only(),
         AgentTool::new(file_write_definition(), FileWriteExecutor),
         AgentTool::new(file_edit_definition(), FileEditExecutor),
         AgentTool::new(bash_definition(), BashExecutor),

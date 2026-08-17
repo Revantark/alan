@@ -70,6 +70,7 @@ impl UiState {
                 self.input.clear();
                 Some(Command::Interrupt)
             }
+            Action::TogglePlanMode => Some(Command::TogglePlanMode),
             Action::Resize => None,
             Action::Submit => {
                 self.follow_output = true;
@@ -133,6 +134,13 @@ impl UiState {
                 self.selection = None;
                 self.dirty = true;
                 None
+            }
+            Event::Key(key)
+                if key.code == KeyCode::BackTab
+                    || (key.code == KeyCode::Tab
+                        && key.modifiers.contains(KeyModifiers::SHIFT)) =>
+            {
+                self.apply(Action::TogglePlanMode, false)
             }
             Event::Key(key) if is_multiline_enter(key) => {
                 self.editor.insert_newline();

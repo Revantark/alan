@@ -62,6 +62,14 @@ impl ChatController {
         self.busy
     }
 
+    pub fn plan_mode(&self) -> bool {
+        self.agent.plan_mode()
+    }
+
+    pub fn toggle_plan_mode(&mut self) {
+        self.agent.set_plan_mode(!self.agent.plan_mode());
+    }
+
     pub fn submit(&mut self, text: impl Into<String>) {
         let text = text.into();
         let text = text.trim();

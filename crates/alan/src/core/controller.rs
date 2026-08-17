@@ -77,6 +77,10 @@ impl Controller {
         self.chat.is_busy()
     }
 
+    pub fn plan_mode(&self) -> bool {
+        self.chat.plan_mode()
+    }
+
     pub fn login_state(&self) -> &LoginState {
         self.login.state()
     }
@@ -108,6 +112,10 @@ impl Controller {
             }
             Command::MoveLoginSelection(delta) => {
                 self.move_login_selection(delta);
+                false
+            }
+            Command::TogglePlanMode => {
+                self.chat.toggle_plan_mode();
                 false
             }
         }

@@ -13,6 +13,7 @@ pub enum Action {
     ScrollDown,
     MouseScrollUp,
     MouseScrollDown,
+    TogglePlanMode,
 }
 
 /// Semantic commands emitted by frontend state and handled by application core.
@@ -22,4 +23,5 @@ pub enum Command {
     Cancel,
     Submit(String),
     MoveLoginSelection(isize),
+    TogglePlanMode,
 }

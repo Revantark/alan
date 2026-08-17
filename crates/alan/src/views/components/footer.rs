@@ -39,29 +39,30 @@ impl Component for Footer {
         ])
         .areas(area);
 
-        let status = if controller.is_busy() {
-            Line::from(vec![
-                Span::styled(
-                    "  ● thinking",
-                    Style::default().italic().fg(ratatui::style::Color::Yellow),
-                ),
-                Span::styled(
-                    "  Shift+Enter/Ctrl+J newline · Esc normal mode · Ctrl-C stop",
-                    Style::default().fg(theme::MUTED_FG),
-                ),
-            ])
+        let (indicator, indicator_style, shortcuts) = if controller.is_busy() {
+            (
+                "  ● thinking",
+                Style::default().italic().fg(ratatui::style::Color::Yellow),
+                "· Ctrl-C stop",
+            )
         } else {
-            Line::from(vec![
-                Span::styled(
-                    "  ● idle",
-                    Style::default().fg(ratatui::style::Color::Green),
-                ),
-                Span::styled(
-                    "  Enter send · Shift+Enter/Ctrl+J newline · Ctrl-C quit",
-                    Style::default().fg(theme::MUTED_FG),
-                ),
-            ])
+            (
+                "  ● idle",
+                Style::default().fg(ratatui::style::Color::Green),
+                "  Enter send · Ctrl-C quit",
+            )
         };
+        let mut status_spans = vec![
+            Span::styled(indicator, indicator_style),
+            Span::styled(shortcuts, Style::default().fg(theme::MUTED_FG)),
+        ];
+        if controller.plan_mode() {
+            status_spans.push(Span::styled(
+                " · Plan mode",
+                Style::default().fg(ratatui::style::Color::White),
+            ));
+        }
+        let status = Line::from(status_spans);
         frame.render_widget(
             Paragraph::new(status).style(Style::default().bg(theme::EDITOR_BG)),
             status_area,
