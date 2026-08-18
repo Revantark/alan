@@ -1,3 +1,4 @@
+use llm::ReasoningEffort;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -28,7 +29,8 @@ pub struct ModelCapabilities {
     pub streaming: bool,
     pub tools: bool,
     pub vision: bool,
-    pub reasoning: bool,
+    #[serde(default)]
+    pub reasoning: Option<ReasoningEffort>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

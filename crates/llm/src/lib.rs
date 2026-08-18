@@ -16,7 +16,7 @@ pub use apis::ChatCompletionsApi;
 pub use error::LlmError;
 pub use event::{LlmEvent, LlmStream};
 pub use message::{Message, Role};
-pub use request::{CompletionInput, Credential, LlmRequest, RequestOptions};
+pub use request::{CompletionInput, Credential, LlmRequest, ReasoningEffort, RequestOptions};
 pub use response::{ContentBlock, LlmResponse, LlmResponseBuilder, StopReason, Usage};
 pub use tool::{ServerTool, ToolCall, ToolDefinition, ToolSpec};
 pub use transport::HttpClient;

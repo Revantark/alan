@@ -32,6 +32,9 @@ pub struct LlmResponse {
     pub stop_reason: StopReason,
     pub usage: Option<Usage>,
     pub model: Option<String>,
+    pub reasoning: Option<String>,
+    #[serde(default)]
+    pub reasoning_details: Vec<serde_json::Value>,
 }
 
 impl LlmResponse {
@@ -73,6 +76,8 @@ impl LlmResponse {
             stop_reason,
             usage: None,
             model: None,
+            reasoning: message.reasoning,
+            reasoning_details: message.reasoning_details.unwrap_or_default(),
         }
     }
 }
@@ -80,6 +85,8 @@ impl LlmResponse {
 #[derive(Debug, Default)]
 pub struct LlmResponseBuilder {
     text: String,
+    reasoning: String,
+    reasoning_details: Vec<serde_json::Value>,
     tool_calls: BTreeMap<usize, PartialToolCall>,
     stop_reason: Option<StopReason>,
     usage: Option<Usage>,
@@ -107,6 +114,10 @@ impl LlmResponseBuilder {
 
         match event {
             LlmEvent::TextDelta { text } => self.text.push_str(text),
+            LlmEvent::ReasoningDelta { reasoning, details } => {
+                self.reasoning.push_str(reasoning);
+                self.reasoning_details.extend(details.iter().cloned());
+            }
             LlmEvent::ToolCallDelta {
                 index,
                 id,
@@ -161,6 +172,8 @@ impl LlmResponseBuilder {
             stop_reason,
             usage: self.usage,
             model: self.model,
+            reasoning: (!self.reasoning.is_empty()).then_some(self.reasoning),
+            reasoning_details: self.reasoning_details,
         })
     }
 }

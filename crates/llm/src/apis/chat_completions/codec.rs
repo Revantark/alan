@@ -12,6 +12,8 @@ struct Request<'a> {
     temperature: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     max_tokens: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning: Option<WireReasoning>,
 }
 
 #[derive(Serialize)]
@@ -22,6 +24,8 @@ struct WireMessage {
     tool_calls: Option<Vec<WireToolCall>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_call_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning_details: Option<Vec<serde_json::Value>>,
 }
 
 #[derive(Serialize)]
@@ -53,6 +57,13 @@ struct WireDefinition {
     parameters: serde_json::Value,
 }
 
+#[derive(Serialize)]
+struct WireReasoning {
+    effort: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    exclude: Option<bool>,
+}
+
 #[derive(Deserialize)]
 struct StreamResponse {
     model: Option<String>,
@@ -70,6 +81,9 @@ struct StreamChoice {
 struct StreamDelta {
     content: Option<String>,
     tool_calls: Option<Vec<StreamToolCallWire>>,
+    reasoning: Option<String>,
+    reasoning_content: Option<String>,
+    reasoning_details: Option<Vec<serde_json::Value>>,
 }
 
 #[derive(Deserialize)]
@@ -95,6 +109,8 @@ struct WireUsage {
 pub(crate) struct StreamChunk {
     pub(crate) model: Option<String>,
     pub(crate) text: Option<String>,
+    pub(crate) reasoning: Option<String>,
+    pub(crate) reasoning_details: Vec<serde_json::Value>,
     pub(crate) tool_calls: Vec<StreamToolCall>,
     pub(crate) finish_reason: Option<String>,
     pub(crate) usage: Option<Usage>,
@@ -111,6 +127,10 @@ pub(crate) struct StreamToolCall {
 pub(crate) fn serialize_request(request: &LlmRequest<'_>) -> Result<String, LlmError> {
     let messages = request.messages.iter().map(wire_message).collect();
     let tools = request.tools.iter().map(wire_tool).collect();
+    let reasoning = request.reasoning_effort.map(|effort| WireReasoning {
+        effort: effort.as_str().to_string(),
+        exclude: None,
+    });
     serde_json::to_string(&Request {
         model: request.model_id,
         stream: true,
@@ -118,6 +138,7 @@ pub(crate) fn serialize_request(request: &LlmRequest<'_>) -> Result<String, LlmE
         tools,
         temperature: request.options.temperature,
         max_tokens: request.options.max_tokens,
+        reasoning,
     })
     .map_err(LlmError::Serialization)
 }
@@ -152,9 +173,22 @@ pub(crate) fn deserialize_stream_chunk(body: &str) -> Result<StreamChunk, LlmErr
         })
         .collect::<Result<Vec<_>, LlmError>>()?;
 
+    let reasoning = delta.and_then(|delta| {
+        delta
+            .reasoning
+            .clone()
+            .or_else(|| delta.reasoning_content.clone())
+            .filter(|reasoning| !reasoning.is_empty())
+    });
+    let reasoning_details = delta
+        .and_then(|delta| delta.reasoning_details.clone())
+        .unwrap_or_default();
+
     Ok(StreamChunk {
         model: response.model,
         text,
+        reasoning,
+        reasoning_details,
         tool_calls,
         finish_reason: choice.and_then(|choice| choice.finish_reason.clone()),
         usage: response.usage.map(|usage| Usage {
@@ -166,6 +200,23 @@ pub(crate) fn deserialize_stream_chunk(body: &str) -> Result<StreamChunk, LlmErr
 
 pub(crate) fn stream_events(chunk: StreamChunk) -> Vec<LlmEvent> {
     let mut events = Vec::new();
+    let details = chunk.reasoning_details;
+    if let Some(reasoning) = chunk.reasoning {
+        let details = if details.is_empty() {
+            vec![serde_json::json!({
+                "type": "reasoning.text",
+                "text": reasoning.clone(),
+            })]
+        } else {
+            details
+        };
+        events.push(LlmEvent::ReasoningDelta { reasoning, details });
+    } else if !details.is_empty() {
+        let reasoning = reasoning_text(&details);
+        if !reasoning.is_empty() {
+            events.push(LlmEvent::ReasoningDelta { reasoning, details });
+        }
+    }
     if let Some(text) = chunk.text {
         events.push(LlmEvent::TextDelta { text });
     }
@@ -181,6 +232,18 @@ pub(crate) fn stream_events(chunk: StreamChunk) -> Vec<LlmEvent> {
             }),
     );
     events
+}
+
+fn reasoning_text(details: &[serde_json::Value]) -> String {
+    details
+        .iter()
+        .filter_map(|detail| {
+            detail
+                .get("text")
+                .and_then(serde_json::Value::as_str)
+                .or_else(|| detail.get("summary").and_then(serde_json::Value::as_str))
+        })
+        .collect()
 }
 
 pub(crate) fn stop_reason_for_finish_reason(reason: Option<&str>) -> Option<StopReason> {
@@ -211,6 +274,10 @@ fn wire_message(message: &Message) -> WireMessage {
                 .collect()
         }),
         tool_call_id: message.tool_call_id.clone(),
+        reasoning_details: message
+            .reasoning_details
+            .clone()
+            .filter(|details| !details.is_empty()),
     }
 }
 
@@ -257,6 +324,7 @@ mod tests {
             tools,
             options,
             credential: None,
+            reasoning_effort: None,
         }
     }
 
@@ -284,9 +352,33 @@ mod tests {
     }
 
     #[test]
+    fn serializes_reasoning_effort_and_preserves_reasoning_details() {
+        let messages = [Message::assistant_with_tool_calls_and_reasoning(
+            None,
+            vec![crate::ToolCall {
+                id: "call-1".into(),
+                name: "weather".into(),
+                arguments: "{}".into(),
+            }],
+            Some("think".into()),
+            vec![serde_json::json!({"type": "reasoning.text", "text": "think"})],
+        )];
+        let options = RequestOptions::default();
+        let mut request = request("model-a", &messages, &[], &options);
+        request.reasoning_effort = Some(crate::ReasoningEffort::High);
+        let json: serde_json::Value =
+            serde_json::from_str(&serialize_request(&request).unwrap()).unwrap();
+        assert_eq!(json["reasoning"]["effort"], "high");
+        assert_eq!(json["messages"][0]["reasoning_details"][0]["text"], "think");
+    }
+
+    #[test]
     fn omits_empty_tools_and_unset_options() {
         let messages = [Message::user("hello")];
-        let options = RequestOptions::default();
+        let options = RequestOptions {
+            temperature: None,
+            max_tokens: None,
+        };
         let body = serialize_request(&request("model-a", &messages, &[], &options)).unwrap();
         let json: serde_json::Value = serde_json::from_str(&body).unwrap();
 

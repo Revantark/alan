@@ -1,4 +1,5 @@
 mod core;
+mod logging;
 mod views;
 
 use core::{Action, Controller, Overlay};
@@ -15,11 +16,14 @@ use std::time::Duration;
 
 use agent::{Agent, default_tools};
 use futures_util::StreamExt;
+use llm::ReasoningEffort;
 use providers::{
     FileCredentialStore, ModelOptions, OpenRouterProvider, Provider, ProviderRegistry,
 };
 use std::path::PathBuf;
 use std::sync::Arc;
+
+use crate::logging::init;
 
 const ALAN_SYSTEM_PROMPT: &str = r#"You are Alan, a reliable, pragmatic coding agent running in the user's project in a terminal.
 
@@ -57,13 +61,21 @@ Be concise and useful. State assumptions when they matter. For implementation ta
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    let _guard = init().unwrap();
     let model_id = std::env::var("ALAN_MODEL").unwrap_or_else(|_| "openai/gpt-4o-mini".into());
     let credential_store = Arc::new(FileCredentialStore::new(auth_path()?));
     let provider = OpenRouterProvider::from_store(credential_store.clone())
         .with_model(&model_id)
         .build()?;
     let server_tools = enabled_server_tools(&provider)?;
-    let model = provider.bind_with_options(&model_id, ModelOptions { server_tools })?;
+    let reasoning_effort = configured_reasoning_effort()?;
+    let model = provider.bind_with_options(
+        &model_id,
+        ModelOptions {
+            server_tools,
+            reasoning_effort,
+        },
+    )?;
     let registry = ProviderRegistry::new([Arc::new(provider) as Arc<dyn Provider>]);
     let agent = Agent::builder(model)
         .system_prompt(ALAN_SYSTEM_PROMPT)
@@ -100,6 +112,23 @@ fn parse_bool_env(name: &str) -> anyhow::Result<bool> {
         "0" | "false" | "no" | "off" => Ok(false),
         value => Err(anyhow::anyhow!(
             "{name} must be a boolean (true/false), got {value:?}"
+        )),
+    }
+}
+fn configured_reasoning_effort() -> anyhow::Result<Option<ReasoningEffort>> {
+    let Some(value) = std::env::var_os("ALAN_REASONING_EFFORT") else {
+        return Ok(None);
+    };
+    match value.to_string_lossy().trim().to_ascii_lowercase().as_str() {
+        "none" => Ok(None),
+        "minimal" => Ok(Some(ReasoningEffort::Minimal)),
+        "low" => Ok(Some(ReasoningEffort::Low)),
+        "medium" => Ok(Some(ReasoningEffort::Medium)),
+        "high" => Ok(Some(ReasoningEffort::High)),
+        "xhigh" => Ok(Some(ReasoningEffort::XHigh)),
+        "max" => Ok(Some(ReasoningEffort::Max)),
+        value => Err(anyhow::anyhow!(
+            "ALAN_REASONING_EFFORT must be one of none, minimal, low, medium, high, xhigh, max; got {value:?}"
         )),
     }
 }

@@ -196,11 +196,12 @@ fn default_model(id: &str) -> ModelInfo {
         id: id.into(),
         name: id.into(),
         api: ApiId::ChatCompletions,
+        //TODO: Do we need this ?
         capabilities: ModelCapabilities {
             streaming: true,
             tools: true,
             vision: false,
-            reasoning: false,
+            reasoning: None,
         },
         pricing: Some(ModelPricing::default()),
     }

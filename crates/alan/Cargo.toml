@@ -18,6 +18,9 @@ async-trait = { workspace = true }
 unicode-width = "0.2"
 arboard = "=3.4.1"
 tui-markdown = "0.3.9"
+tracing-subscriber = { workspace = true }
+tracing = { workspace = true }
+tracing-appender = { workspace = true }
 
 [dev-dependencies]
 llm = { workspace = true }

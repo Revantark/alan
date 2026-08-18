@@ -154,6 +154,7 @@ mod tests {
             tools,
             options,
             credential: None,
+            reasoning_effort: None,
         }
     }
 

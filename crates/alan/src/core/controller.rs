@@ -225,6 +225,57 @@ mod tests {
         assert!(!controller.is_busy());
     }
 
+    struct ReasoningFakeApi;
+
+    #[async_trait]
+    impl LlmApi for ReasoningFakeApi {
+        async fn stream(&self, request: llm::LlmRequest<'_>) -> Result<llm::LlmStream, LlmError> {
+            Ok(Box::pin(futures_util::stream::iter([
+                Ok(LlmEvent::ReasoningDelta {
+                    reasoning: "thinking...".into(),
+                    details: vec![],
+                }),
+                Ok(LlmEvent::TextDelta {
+                    text: "answer".into(),
+                }),
+                Ok(LlmEvent::Done {
+                    stop_reason: StopReason::Stop,
+                    usage: None,
+                    model: Some(request.model_id.to_owned()),
+                }),
+            ])))
+        }
+    }
+
+    #[tokio::test]
+    async fn submit_streams_reasoning_and_response() {
+        let info = ModelInfo {
+            provider: ProviderId::new("openrouter"),
+            id: "test".into(),
+            name: "Test".into(),
+            api: ApiId::ChatCompletions,
+            capabilities: ModelCapabilities::default(),
+            pricing: None,
+        };
+        let model = OpenRouterProvider::builder("key")
+            .with_models([info])
+            .with_api(Arc::new(ReasoningFakeApi))
+            .build()
+            .unwrap()
+            .bind("test")
+            .unwrap();
+        let mut controller = Controller::new(Agent::builder(model).build());
+
+        controller.submit("hi".into());
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(controller.poll(), Poll::Finished);
+        assert_eq!(controller.chat().len(), 3);
+        assert!(matches!(&controller.chat()[0], Entry::Prompt(text) if text == "hi"));
+        assert!(matches!(&controller.chat()[1], Entry::Reasoning(text) if text == "thinking..."));
+        assert!(matches!(&controller.chat()[2], Entry::Response(text) if text == "answer"));
+        assert!(!controller.is_busy());
+    }
+
     #[test]
     fn submit_ignores_empty_and_busy() {
         let mut controller = make_controller();

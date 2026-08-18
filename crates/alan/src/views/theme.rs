@@ -9,10 +9,11 @@ pub const TOOL_DONE_FG: Color = Color::Rgb(184, 224, 194);
 pub const TOOL_DONE_BG: Color = Color::Rgb(43, 67, 52);
 pub const TOOL_ERROR_FG: Color = Color::Rgb(240, 180, 184);
 pub const TOOL_ERROR_BG: Color = Color::Rgb(70, 43, 47);
-pub const RESPONSE_FG: Color = Color::White;
+pub const RESPONSE_FG: Color = Color::Gray;
 pub const MUTED_FG: Color = Color::DarkGray;
+pub const REASONING_FG: Color = Color::DarkGray;
 pub const EDITOR_BG: Color = Color::Rgb(28, 32, 39);
-pub const EDITOR_FG: Color = Color::White;
+pub const EDITOR_FG: Color = Color::Gray;
 pub const CHAT_PADDING: usize = 3;
 pub const EDITOR_VISIBLE_LINES: u16 = 7;
 /// Width of the `  › ` prompt column to the left of the editor.

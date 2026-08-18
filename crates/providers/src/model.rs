@@ -1,7 +1,8 @@
 use crate::auth::{AuthError, AuthResolver};
 use crate::catalog::ModelInfo;
 use llm::{
-    CompletionInput, LlmApi, LlmError, LlmRequest, LlmResponse, LlmStream, ServerTool, ToolSpec,
+    CompletionInput, LlmApi, LlmError, LlmRequest, LlmResponse, LlmStream, ReasoningEffort,
+    ServerTool, ToolSpec,
 };
 use std::sync::Arc;
 use thiserror::Error;
@@ -17,6 +18,7 @@ pub enum ModelError {
 #[derive(Clone, Default)]
 pub struct ModelOptions {
     pub server_tools: Vec<ServerTool>,
+    pub reasoning_effort: Option<ReasoningEffort>,
 }
 
 #[derive(Clone)]
@@ -25,6 +27,7 @@ pub struct Model {
     api: Arc<dyn LlmApi>,
     auth: Arc<dyn AuthResolver>,
     server_tools: Vec<ServerTool>,
+    reasoning_effort: Option<ReasoningEffort>,
 }
 
 impl Model {
@@ -34,11 +37,13 @@ impl Model {
         auth: Arc<dyn AuthResolver>,
         options: ModelOptions,
     ) -> Self {
+        let reasoning_effort = options.reasoning_effort.or(info.capabilities.reasoning);
         Self {
             info,
             api,
             auth,
             server_tools: options.server_tools,
+            reasoning_effort,
         }
     }
 
@@ -63,6 +68,7 @@ impl Model {
             tools: &tools,
             options: input.options,
             credential: Some(&credential),
+            reasoning_effort: self.reasoning_effort,
         };
         Ok(self.api.complete(request).await?)
     }
@@ -76,6 +82,7 @@ impl Model {
             tools: &tools,
             options: input.options,
             credential: Some(&credential),
+            reasoning_effort: self.reasoning_effort,
         };
         Ok(self.api.stream(request).await?)
     }

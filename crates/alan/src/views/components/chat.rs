@@ -177,6 +177,18 @@ fn wrap_entry(entry: &Entry, width: usize, content_width: usize) -> Vec<Line<'st
             lines.push(Line::default());
             lines
         }
+        Entry::Reasoning(text) => {
+            let mut lines = vec![Line::default()];
+            if text.is_empty() {
+                lines.push(indented_line("(reasoning)", theme::MUTED_FG));
+            } else {
+                for line in wrap_text(text, content_width) {
+                    lines.push(indented_line(&line, theme::REASONING_FG));
+                }
+            }
+            lines.push(Line::default());
+            lines
+        }
         Entry::ToolCall {
             name,
             arguments,
@@ -268,7 +280,7 @@ fn background_line(
 fn indented_line(text: &str, foreground: Color) -> Line<'static> {
     Line::from(Span::styled(
         format!("{}{}", " ".repeat(theme::CHAT_PADDING), text),
-        Style::default().fg(foreground).bold(),
+        Style::default().fg(foreground),
     ))
 }
 

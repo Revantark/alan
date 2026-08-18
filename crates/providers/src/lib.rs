@@ -42,6 +42,8 @@ mod tests {
                 stop_reason: StopReason::Stop,
                 usage: None,
                 model: Some(request.model_id.to_owned()),
+                reasoning: None,
+                reasoning_details: Vec::new(),
             };
             let text = response.text();
             let model = response.model.clone();

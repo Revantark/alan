@@ -1,5 +1,6 @@
-use crate::ToolCall;
 use serde::{Deserialize, Serialize};
+
+use crate::ToolCall;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -18,6 +19,10 @@ pub struct Message {
     pub tool_calls: Option<Vec<ToolCall>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_details: Option<Vec<serde_json::Value>>,
 }
 
 impl Message {
@@ -29,16 +34,34 @@ impl Message {
         Self::text(Role::User, content)
     }
 
-    pub fn assistant(content: impl Into<String>) -> Self {
-        Self::text(Role::Assistant, content)
+    pub fn assistant_with_reasoning(
+        content: Option<String>,
+        reasoning: Option<String>,
+        reasoning_details: Vec<serde_json::Value>,
+    ) -> Self {
+        Self {
+            role: Role::Assistant,
+            content,
+            tool_calls: None,
+            tool_call_id: None,
+            reasoning,
+            reasoning_details: (!reasoning_details.is_empty()).then_some(reasoning_details),
+        }
     }
 
-    pub fn assistant_with_tool_calls(content: Option<String>, tool_calls: Vec<ToolCall>) -> Self {
+    pub fn assistant_with_tool_calls_and_reasoning(
+        content: Option<String>,
+        tool_calls: Vec<ToolCall>,
+        reasoning: Option<String>,
+        reasoning_details: Vec<serde_json::Value>,
+    ) -> Self {
         Self {
             role: Role::Assistant,
             content,
             tool_calls: Some(tool_calls),
             tool_call_id: None,
+            reasoning,
+            reasoning_details: (!reasoning_details.is_empty()).then_some(reasoning_details),
         }
     }
 
@@ -48,6 +71,8 @@ impl Message {
             content: Some(content.into()),
             tool_calls: None,
             tool_call_id: Some(tool_call_id.into()),
+            reasoning: None,
+            reasoning_details: None,
         }
     }
 
@@ -57,6 +82,8 @@ impl Message {
             content: Some(content.into()),
             tool_calls: None,
             tool_call_id: None,
+            reasoning: None,
+            reasoning_details: None,
         }
     }
 }

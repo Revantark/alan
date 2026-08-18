@@ -51,6 +51,7 @@ impl Drop for AgentStream {
 #[derive(Debug, Clone, PartialEq)]
 pub enum AgentEvent {
     TextDelta(String),
+    ReasoningDelta(String),
     ToolCallStarted {
         id: String,
         name: String,
@@ -340,18 +341,29 @@ impl Agent {
             let Some(event) = next else { break };
             let event = event.map_err(ModelError::from)?;
             builder.apply(&event).map_err(ModelError::from)?;
-            if let LlmEvent::TextDelta { text } = &event {
-                partial.push_str(text);
-            }
-            if let LlmEvent::TextDelta { text } = &event
-                && let Some(events) = events
-            {
-                Self::send_event(
-                    events,
-                    Ok(AgentEvent::TextDelta(text.clone())),
-                    cancellation,
-                )
-                .await?;
+            match &event {
+                LlmEvent::ReasoningDelta { reasoning, .. } => {
+                    if let Some(events) = events {
+                        Self::send_event(
+                            events,
+                            Ok(AgentEvent::ReasoningDelta(reasoning.clone())),
+                            cancellation,
+                        )
+                        .await?;
+                    }
+                }
+                LlmEvent::TextDelta { text } => {
+                    partial.push_str(text);
+                    if let Some(events) = events {
+                        Self::send_event(
+                            events,
+                            Ok(AgentEvent::TextDelta(text.clone())),
+                            cancellation,
+                        )
+                        .await?;
+                    }
+                }
+                _ => {}
             }
         }
         Ok(builder.finish().map_err(ModelError::from)?)
@@ -408,6 +420,8 @@ fn partial_response(text: &str) -> LlmResponse {
         stop_reason: llm::StopReason::Aborted,
         usage: None,
         model: None,
+        reasoning: None,
+        reasoning_details: Vec::new(),
     }
 }
 
@@ -493,6 +507,8 @@ mod tests {
                 stop_reason: StopReason::Stop,
                 usage: None,
                 model: Some(request.model_id.to_owned()),
+                reasoning: None,
+                reasoning_details: Vec::new(),
             };
             let text = response.text();
             let model = response.model.clone();
@@ -623,6 +639,58 @@ mod tests {
             ]
         );
         assert_eq!(agent.messages().await.len(), 2);
+    }
+
+    struct ReasoningApi;
+
+    #[async_trait]
+    impl LlmApi for ReasoningApi {
+        async fn stream(&self, _request: llm::LlmRequest<'_>) -> Result<llm::LlmStream, LlmError> {
+            Ok(Box::pin(futures_util::stream::iter([
+                Ok(llm::LlmEvent::ReasoningDelta {
+                    reasoning: "thinking...".into(),
+                    details: vec![
+                        serde_json::json!({"type": "reasoning.text", "text": "thinking..."}),
+                    ],
+                }),
+                Ok(llm::LlmEvent::TextDelta {
+                    text: "done thinking".into(),
+                }),
+                Ok(llm::LlmEvent::Done {
+                    stop_reason: StopReason::Stop,
+                    usage: None,
+                    model: Some("reasoning-model".into()),
+                }),
+            ])))
+        }
+    }
+
+    #[tokio::test]
+    async fn prompt_stream_emits_reasoning_and_text_deltas() {
+        let agent = Arc::new(Agent::builder(model_with_api(Arc::new(ReasoningApi))).build());
+        let mut rx = agent.prompt_stream("hello");
+
+        let mut events = Vec::new();
+        while let Some(event) = rx.recv().await {
+            events.push(event.unwrap());
+        }
+
+        assert_eq!(
+            events,
+            vec![
+                AgentEvent::ReasoningDelta("thinking...".into()),
+                AgentEvent::TextDelta("done thinking".into()),
+                AgentEvent::Finished,
+            ]
+        );
+        let messages = agent.messages().await;
+        assert_eq!(messages.len(), 2);
+        if let AgentMessage::Assistant(resp) = &messages[1] {
+            assert_eq!(resp.reasoning.as_deref(), Some("thinking..."));
+            assert_eq!(resp.text(), "done thinking");
+        } else {
+            panic!("expected assistant message");
+        }
     }
 
     #[tokio::test]

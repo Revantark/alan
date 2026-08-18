@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 pub enum Entry {
     Prompt(String),
     Response(String),
+    Reasoning(String),
     ToolCall {
         id: String,
         name: String,
@@ -110,7 +111,14 @@ impl ChatController {
                 Ok(Ok(event)) => {
                     processed += 1;
                     match event {
-                        AgentEvent::TextDelta(text) => pending_text.push_str(&text),
+                        AgentEvent::TextDelta(text) => {
+                            pending_text.push_str(&text);
+                        }
+                        AgentEvent::ReasoningDelta(reasoning) => {
+                            changed |= Self::append_delta(&mut self.entries, &pending_text);
+                            pending_text.clear();
+                            changed |= Self::append_reasoning(&mut self.entries, &reasoning);
+                        }
                         AgentEvent::ToolCallStarted {
                             id,
                             name,
@@ -185,7 +193,6 @@ impl ChatController {
                 }
             }
         }
-
         changed |= Self::append_delta(&mut self.entries, &pending_text);
         if changed {
             self.revision = self.revision.wrapping_add(1);
@@ -210,6 +217,17 @@ impl ChatController {
         true
     }
 
+    fn append_reasoning(entries: &mut Vec<Entry>, delta: &str) -> bool {
+        if delta.is_empty() {
+            return false;
+        }
+
+        match entries.last_mut() {
+            Some(Entry::Reasoning(text)) => text.push_str(delta),
+            _ => entries.push(Entry::Reasoning(delta.to_owned())),
+        }
+        true
+    }
     fn ensure_response_entry(entries: &mut Vec<Entry>) -> bool {
         if matches!(entries.last(), Some(Entry::Response(_))) {
             return false;

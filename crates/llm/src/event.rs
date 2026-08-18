@@ -8,6 +8,10 @@ pub enum LlmEvent {
     TextDelta {
         text: String,
     },
+    ReasoningDelta {
+        reasoning: String,
+        details: Vec<serde_json::Value>,
+    },
     ToolCallDelta {
         index: usize,
         id: Option<String>,
