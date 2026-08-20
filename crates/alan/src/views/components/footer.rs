@@ -62,6 +62,12 @@ impl Component for Footer {
                 Style::default().fg(ratatui::style::Color::White),
             ));
         }
+        if let Some(cost) = controller.usage().cost {
+            status_spans.push(Span::styled(
+                format!(" · ${:.4}", (cost * 10_000.0).trunc() / 10_000.0),
+                Style::default().fg(theme::MUTED_FG),
+            ));
+        }
         let status = Line::from(status_spans);
         frame.render_widget(
             Paragraph::new(status).style(Style::default().bg(theme::EDITOR_BG)),

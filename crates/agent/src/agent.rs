@@ -1,7 +1,8 @@
 use crate::{AgentError, AgentMessage, AgentTool, Skill, build_system_prompt};
 use futures_util::StreamExt;
 use llm::{
-    CompletionInput, LlmEvent, LlmResponse, LlmResponseBuilder, Message, RequestOptions, ToolSpec,
+    CompletionInput, LlmEvent, LlmResponse, LlmResponseBuilder, Message, RequestOptions, Usage,
+    ToolSpec,
 };
 use providers::{Model, ModelError};
 use std::{
@@ -66,13 +67,16 @@ pub enum AgentEvent {
         id: String,
         error: String,
     },
-    Finished,
+    Finished {
+        usage: Usage,
+    },
 }
 
 pub struct AgentContext {
     pub system_prompt: Option<String>,
     pub skills: Vec<Skill>,
     pub messages: Vec<AgentMessage>,
+    pub usage: Usage,
     tools: Vec<AgentTool>,
     tool_indexes: HashMap<String, usize>,
 }
@@ -90,6 +94,7 @@ impl AgentContext {
             system_prompt,
             skills,
             messages: Vec::new(),
+            usage: Usage::default(),
             tools,
             tool_indexes,
         }
@@ -233,9 +238,19 @@ impl Agent {
             )
             .await?;
             let calls: Vec<_> = response.tool_calls().cloned().collect();
+            if let Some(usage) = response.usage.as_ref() {
+                context.usage.accumulate(usage);
+            }
             if calls.is_empty() {
                 if let Some(events) = events {
-                    Self::send_event(events, Ok(AgentEvent::Finished), cancellation).await?;
+                    Self::send_event(
+                        events,
+                        Ok(AgentEvent::Finished {
+                            usage: context.usage.clone(),
+                        }),
+                        cancellation,
+                    )
+                    .await?;
                 }
                 context
                     .messages
@@ -661,7 +676,9 @@ mod tests {
             events,
             vec![
                 AgentEvent::TextDelta("echo: hello".into()),
-                AgentEvent::Finished,
+                AgentEvent::Finished {
+                    usage: Usage::default(),
+                },
             ]
         );
         assert_eq!(agent.messages().await.len(), 2);
@@ -706,7 +723,9 @@ mod tests {
             vec![
                 AgentEvent::ReasoningDelta("thinking...".into()),
                 AgentEvent::TextDelta("done thinking".into()),
-                AgentEvent::Finished,
+                AgentEvent::Finished {
+                    usage: Usage::default(),
+                },
             ]
         );
         let messages = agent.messages().await;

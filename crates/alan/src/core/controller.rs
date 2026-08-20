@@ -4,6 +4,7 @@ use super::action::Command;
 use super::chat::{ChatController, Entry};
 use super::login::{LoginController, LoginState};
 use agent::Agent;
+use llm::Usage;
 use providers::{CredentialStore, ProviderRegistry};
 use std::sync::Arc;
 
@@ -79,6 +80,10 @@ impl Controller {
 
     pub fn plan_mode(&self) -> bool {
         self.chat.plan_mode()
+    }
+
+    pub fn usage(&self) -> Usage {
+        self.chat.usage()
     }
 
     pub fn login_state(&self) -> &LoginState {

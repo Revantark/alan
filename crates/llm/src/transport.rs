@@ -1,4 +1,5 @@
 use crate::{Credential, LlmError};
+use std::time::Duration;
 
 /// Reusable HTTP client shared by API implementations.
 pub struct HttpClient {
@@ -22,22 +23,32 @@ impl HttpClient {
         body: &str,
         credential: Option<&Credential>,
     ) -> Result<reqwest::Response, LlmError> {
-        let request = self
-            .client
-            .post(url)
-            .header("Content-Type", "application/json");
-        let request = match credential {
-            Some(Credential::ApiKey(value) | Credential::BearerToken(value)) => {
-                request.bearer_auth(value)
-            }
-            Some(Credential::None) | None => request,
-        };
+        let mut attempt = 0;
+        loop {
+            let request = self
+                .client
+                .post(url)
+                .header("Content-Type", "application/json");
+            let request = match credential {
+                Some(Credential::ApiKey(value) | Credential::BearerToken(value)) => {
+                    request.bearer_auth(value)
+                }
+                Some(Credential::None) | None => request,
+            };
 
-        request
-            .body(body.to_owned())
-            .send()
-            .await
-            .map_err(LlmError::Transport)
+            let response = request.body(body.to_owned()).send().await;
+
+            match response {
+                Ok(resp)
+                    if resp.status() == reqwest::StatusCode::TOO_MANY_REQUESTS && attempt < 5 =>
+                {
+                    attempt += 1;
+                    tokio::time::sleep(Duration::from_secs(attempt as u64)).await;
+                    continue;
+                }
+                other => return other.map_err(LlmError::Transport),
+            }
+        }
     }
 }
 
