@@ -1,8 +1,8 @@
 use crate::{AgentError, AgentMessage, AgentTool, Skill, build_system_prompt};
 use futures_util::StreamExt;
 use llm::{
-    CompletionInput, LlmEvent, LlmResponse, LlmResponseBuilder, Message, RequestOptions, Usage,
-    ToolSpec,
+    CompletionInput, LlmEvent, LlmResponse, LlmResponseBuilder, Message, RequestOptions, ToolSpec,
+    Usage,
 };
 use providers::{Model, ModelError};
 use std::{
@@ -265,8 +265,7 @@ impl Agent {
                     .get(&call.name)
                     .copied()
                     .ok_or_else(|| AgentError::ToolNotFound(call.name.clone()))?;
-                if plan && !context.tools[tool_index].read_only && call.name != "bash"
-                {
+                if plan && !context.tools[tool_index].read_only && call.name != "bash" {
                     return Err(AgentError::ToolNotFound(call.name.clone()));
                 }
                 let call_id = call.id.clone();
