@@ -2,6 +2,7 @@
 
 use super::action::Command;
 use super::chat::{ChatController, Entry};
+use super::command::SlashCommand;
 use super::login::{LoginController, LoginState};
 use agent::Agent;
 use providers::{CredentialStore, ProviderRegistry};
@@ -139,11 +140,17 @@ impl Controller {
             return;
         }
 
-        let text = text.trim();
-        if text == "/login" {
-            self.open_login();
+        // Not trimmed: a leading space means this is a prompt.
+        if let Some(command) = SlashCommand::parse(&text) {
+            match command {
+                SlashCommand::Login => self.open_login(),
+                SlashCommand::Plan => self.chat.toggle_plan_mode(),
+                SlashCommand::Help => self.chat.push_info(SlashCommand::help()),
+            }
             return;
         }
+
+        let text = text.trim();
         if text.is_empty() || self.chat.is_busy() {
             return;
         }
@@ -282,5 +289,56 @@ mod tests {
         controller.submit("   ".into());
         assert!(controller.chat().is_empty());
         assert!(!controller.is_busy());
+    }
+
+    #[test]
+    fn help_writes_to_the_transcript_without_reaching_the_agent() {
+        let mut controller = make_controller();
+        controller.submit("/help".into());
+
+        assert_eq!(controller.chat().len(), 1);
+        assert!(matches!(
+            &controller.chat()[0],
+            Entry::Info(text) if text.contains("/help")
+        ));
+        // A command must never start an agent turn.
+        assert!(!controller.is_busy());
+    }
+
+    /// Streamed text merges into a trailing `Response`, and commands run
+    /// while the agent is streaming. `Info` must not be merged into.
+    #[tokio::test]
+    async fn info_is_not_absorbed_by_a_streaming_response() {
+        let mut controller = make_controller();
+        controller.submit("hi".into());
+        controller.submit("/help".into());
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        controller.poll();
+
+        assert_eq!(controller.chat().len(), 3);
+        assert!(matches!(&controller.chat()[0], Entry::Prompt(text) if text == "hi"));
+        assert!(matches!(&controller.chat()[1], Entry::Info(text) if text.contains("/help")));
+        assert!(matches!(&controller.chat()[2], Entry::Response(text) if text == "hello"));
+    }
+
+    #[test]
+    fn plan_command_toggles_the_same_state_as_the_shortcut() {
+        let mut controller = make_controller();
+        assert!(!controller.plan_mode());
+
+        controller.submit("/plan".into());
+        assert!(controller.plan_mode());
+
+        controller.submit("/plan".into());
+        assert!(!controller.plan_mode());
+    }
+
+    /// Submitting a prompt spawns an agent task, so this needs a runtime.
+    #[tokio::test]
+    async fn unknown_slash_text_is_sent_as_a_prompt() {
+        let mut controller = make_controller();
+        controller.submit("/logn".into());
+
+        assert!(matches!(&controller.chat()[0], Entry::Prompt(text) if text == "/logn"));
     }
 }

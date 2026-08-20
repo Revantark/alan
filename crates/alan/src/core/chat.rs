@@ -10,6 +10,7 @@ pub enum Entry {
     Prompt(String),
     Response(String),
     Reasoning(String),
+    Info(String),
     ToolCall {
         id: String,
         name: String,
@@ -69,6 +70,11 @@ impl ChatController {
 
     pub fn toggle_plan_mode(&mut self) {
         self.agent.set_plan_mode(!self.agent.plan_mode());
+    }
+
+    pub fn push_info(&mut self, text: impl Into<String>) {
+        self.entries.push(Entry::Info(text.into()));
+        self.revision = self.revision.wrapping_add(1);
     }
 
     pub fn submit(&mut self, text: impl Into<String>) {
