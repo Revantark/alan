@@ -10,6 +10,7 @@ use std::{
         Arc,
         atomic::{AtomicBool, Ordering},
     },
+    time::{SystemTime, UNIX_EPOCH},
 };
 use tokio::sync::{
     Mutex,
@@ -102,6 +103,7 @@ pub struct Agent {
     context: Mutex<AgentContext>,
     plan_mode: AtomicBool,
     max_tool_rounds: usize,
+    session_id: String,
 }
 
 impl Agent {
@@ -222,8 +224,15 @@ impl Agent {
         context.plan_mode = self.plan_mode();
         for _ in 0..self.max_tool_rounds {
             Self::check_cancelled(cancellation)?;
-            let response =
-                Self::stream_round(model, context, events, cancellation, partial).await?;
+            let response = Self::stream_round(
+                self.session_id.clone(),
+                model,
+                context,
+                events,
+                cancellation,
+                partial,
+            )
+            .await?;
             let calls: Vec<_> = response.tool_calls().cloned().collect();
             if calls.is_empty() {
                 if let Some(events) = events {
@@ -303,6 +312,7 @@ impl Agent {
     }
 
     async fn stream_round(
+        session_id: String,
         model: &Model,
         context: &AgentContext,
         events: Option<&Sender<Result<AgentEvent, AgentError>>>,
@@ -316,7 +326,12 @@ impl Agent {
             .map(|tool| ToolSpec::Function(tool.definition.clone()))
             .collect();
         let messages = Self::build_messages(context);
-        let options = RequestOptions::default();
+        let options = RequestOptions {
+            // when we add persistent sessions, we need to get these from disk
+            prompt_cache_key: Some(session_id.clone()),
+            session_id: Some(session_id),
+            ..RequestOptions::default()
+        };
         let mut stream = model
             .stream(CompletionInput {
                 messages: &messages,
@@ -465,6 +480,16 @@ impl AgentBuilder {
     }
 
     pub fn build(self) -> Agent {
+        let name = &self.model.info().name;
+        let model_name = name
+            .split_once('/')
+            .map_or_else(|| name.clone(), |(_, model)| model.to_owned());
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock is before Unix epoch")
+            .as_nanos()
+            .to_string();
+
         Agent {
             model: Mutex::new(self.model),
             context: Mutex::new(AgentContext::new(
@@ -474,6 +499,7 @@ impl AgentBuilder {
             )),
             plan_mode: AtomicBool::new(false),
             max_tool_rounds: self.max_tool_rounds,
+            session_id: format!("{}_{}", model_name, timestamp),
         }
     }
 }

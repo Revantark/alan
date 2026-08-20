@@ -14,6 +14,12 @@ struct Request<'a> {
     max_tokens: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     reasoning: Option<WireReasoning>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    session_id: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    prompt_cache_key: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cache_control: Option<&'a crate::PromptCacheControl>,
 }
 
 #[derive(Serialize)]
@@ -139,6 +145,9 @@ pub(crate) fn serialize_request(request: &LlmRequest<'_>) -> Result<String, LlmE
         temperature: request.options.temperature,
         max_tokens: request.options.max_tokens,
         reasoning,
+        session_id: request.options.session_id.as_deref(),
+        prompt_cache_key: request.options.prompt_cache_key.as_deref(),
+        cache_control: request.options.cache_control.as_ref(),
     })
     .map_err(LlmError::Serialization)
 }
@@ -339,6 +348,7 @@ mod tests {
         let options = RequestOptions {
             temperature: Some(0.2),
             max_tokens: Some(128),
+            ..RequestOptions::default()
         };
         let body = serialize_request(&request("model-a", &messages, &tools, &options)).unwrap();
         let json: serde_json::Value = serde_json::from_str(&body).unwrap();
@@ -378,6 +388,7 @@ mod tests {
         let options = RequestOptions {
             temperature: None,
             max_tokens: None,
+            ..RequestOptions::default()
         };
         let body = serialize_request(&request("model-a", &messages, &[], &options)).unwrap();
         let json: serde_json::Value = serde_json::from_str(&body).unwrap();
