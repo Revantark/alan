@@ -75,7 +75,6 @@ pub struct AgentContext {
     pub messages: Vec<AgentMessage>,
     tools: Vec<AgentTool>,
     tool_indexes: HashMap<String, usize>,
-    plan_mode: bool,
 }
 
 impl AgentContext {
@@ -93,7 +92,6 @@ impl AgentContext {
             messages: Vec::new(),
             tools,
             tool_indexes,
-            plan_mode: false,
         }
     }
 }
@@ -221,7 +219,7 @@ impl Agent {
         cancellation: &mut watch::Receiver<bool>,
         partial: &mut String,
     ) -> Result<LlmResponse, AgentError> {
-        context.plan_mode = self.plan_mode();
+        let plan = self.plan_mode();
         for _ in 0..self.max_tool_rounds {
             Self::check_cancelled(cancellation)?;
             let response = Self::stream_round(
@@ -231,6 +229,7 @@ impl Agent {
                 events,
                 cancellation,
                 partial,
+                plan,
             )
             .await?;
             let calls: Vec<_> = response.tool_calls().cloned().collect();
@@ -251,7 +250,7 @@ impl Agent {
                     .get(&call.name)
                     .copied()
                     .ok_or_else(|| AgentError::ToolNotFound(call.name.clone()))?;
-                if context.plan_mode && !context.tools[tool_index].read_only && call.name != "bash"
+                if plan && !context.tools[tool_index].read_only && call.name != "bash"
                 {
                     return Err(AgentError::ToolNotFound(call.name.clone()));
                 }
@@ -318,11 +317,12 @@ impl Agent {
         events: Option<&Sender<Result<AgentEvent, AgentError>>>,
         cancellation: &mut watch::Receiver<bool>,
         partial: &mut String,
+        plan: bool,
     ) -> Result<LlmResponse, AgentError> {
         let tools: Vec<_> = context
             .tools
             .iter()
-            .filter(|tool| !context.plan_mode || tool.read_only || tool.definition.name == "bash")
+            .filter(|tool| !plan || tool.read_only || tool.definition.name == "bash")
             .map(|tool| ToolSpec::Function(tool.definition.clone()))
             .collect();
         let messages = Self::build_messages(context);
