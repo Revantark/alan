@@ -205,12 +205,16 @@ impl UiState {
     fn sync_command_highlight(&mut self) {
         // Highlights accumulate, so the previous one has to go first.
         self.editor.clear_custom_highlight();
-        let text = self.editor_text();
-        if SlashCommand::parse(&text).is_none() {
+        // Only the first line can be a command, so the rest of the buffer is
+        // never read. More than one line is not a command at all.
+        let [line] = self.editor.lines() else {
+            return;
+        };
+        if SlashCommand::parse(line).is_none() {
             return;
         }
         // `custom_highlight` ranges are byte offsets.
-        let end = text.find(char::is_whitespace).unwrap_or(text.len());
+        let end = line.find(char::is_whitespace).unwrap_or(line.len());
         self.editor.custom_highlight(
             ((0, 0), (0, end)),
             Style::default().fg(theme::COMMAND_FG),

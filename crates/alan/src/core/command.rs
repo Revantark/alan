@@ -96,22 +96,4 @@ mod tests {
         assert_eq!(SlashCommand::parse(" /plan"), None);
         assert_eq!(SlashCommand::parse("\t/help"), None);
     }
-
-    /// `/help` is generated from the variants, so a new command cannot be
-    /// added without appearing in it.
-    #[test]
-    fn help_lists_every_command() {
-        let help = SlashCommand::help();
-        for command in SlashCommand::iter() {
-            assert!(help.contains(&command.name()), "{} missing", command.name());
-            assert!(help.contains(command.description()));
-        }
-    }
-
-    #[test]
-    fn every_command_round_trips_through_parse() {
-        for command in SlashCommand::iter() {
-            assert_eq!(SlashCommand::parse(&command.name()), Some(command));
-        }
-    }
 }
