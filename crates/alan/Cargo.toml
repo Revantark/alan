@@ -9,7 +9,7 @@ llm = { path = "../llm" }
 providers = { path = "../providers" }
 ratatui = { version = "0.30.2", default-features = false, features = ["crossterm_0_29"] }
 crossterm = { version = "0.29", features = ["event-stream"] }
-tui-textarea-2 = "0.12"
+tui-textarea-2 = "0.13"
 anyhow = "1"
 tokio = { workspace = true }
 futures-util = { workspace = true }
