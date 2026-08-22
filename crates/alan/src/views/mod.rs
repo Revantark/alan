@@ -488,6 +488,7 @@ impl UiState {
         editor.set_cursor_render_mode(CursorRenderMode::Hidden);
         editor.set_min_rows(1);
         editor.set_max_rows(theme::EDITOR_VISIBLE_LINES);
+        editor.set_undo_coalescing(true);
         editor
     }
 
@@ -857,15 +858,13 @@ mod tests {
     /// Ctrl+U was the widget's undo binding before it was taken for the line
     /// clear, so undo and redo have to keep working from their new homes.
     #[test]
-    fn ctrl_z_undoes_and_ctrl_r_redoes() {
+    fn ctrl_z_undoes_a_typing_run_and_ctrl_r_redoes_it() {
         let mut state = UiState::new();
-        for character in "hello".chars() {
-            state.handle_editor_event_for_test(key(crossterm::event::KeyCode::Char(character)));
-        }
+        type_text(&mut state, "hello");
         assert_eq!(state.editor_text(), "hello");
 
         state.handle_editor_event_for_test(ctrl('z'));
-        assert_ne!(state.editor_text(), "hello");
+        assert_eq!(state.editor_text(), "");
 
         state.handle_editor_event_for_test(ctrl('r'));
         assert_eq!(state.editor_text(), "hello");
