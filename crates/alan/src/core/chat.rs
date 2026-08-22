@@ -2,6 +2,7 @@
 
 use super::Poll;
 use agent::{Agent, AgentEvent, AgentStream};
+use llm::Usage;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -38,6 +39,7 @@ pub struct ChatController {
     busy: bool,
     aborting: bool,
     revision: u64,
+    usage: Usage,
 }
 
 impl ChatController {
@@ -49,6 +51,7 @@ impl ChatController {
             busy: false,
             aborting: false,
             revision: 0,
+            usage: Usage::default(),
         }
     }
 
@@ -66,6 +69,10 @@ impl ChatController {
 
     pub fn plan_mode(&self) -> bool {
         self.agent.plan_mode()
+    }
+
+    pub fn usage(&self) -> Usage {
+        self.usage.clone()
     }
 
     pub fn toggle_plan_mode(&mut self) {
@@ -157,10 +164,11 @@ impl ChatController {
                                 ToolStatus::Failed(error),
                             );
                         }
-                        AgentEvent::Finished => {
+                        AgentEvent::Finished { usage } => {
                             changed |= Self::append_delta(&mut self.entries, &pending_text);
                             pending_text.clear();
                             changed |= Self::ensure_response_entry(&mut self.entries);
+                            self.usage = usage;
                             self.busy = false;
                             outcome = Poll::Finished;
                             break;

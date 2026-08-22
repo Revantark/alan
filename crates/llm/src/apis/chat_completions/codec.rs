@@ -105,10 +105,36 @@ struct StreamFunctionWire {
     arguments: Option<String>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Default)]
+#[serde(default)]
 struct WireUsage {
     prompt_tokens: u64,
     completion_tokens: u64,
+    total_tokens: Option<u64>,
+    cost: Option<f64>,
+    cost_details: Option<WireCostDetails>,
+    prompt_tokens_details: Option<WirePromptTokensDetails>,
+    completion_tokens_details: Option<WireCompletionTokensDetails>,
+}
+
+#[derive(Deserialize, Clone, Default)]
+#[serde(default)]
+struct WireCostDetails {
+    upstream_inference_cost: Option<f64>,
+}
+
+#[derive(Deserialize, Clone, Default)]
+#[serde(default)]
+struct WirePromptTokensDetails {
+    cached_tokens: Option<u64>,
+    cache_write_tokens: Option<u64>,
+    audio_tokens: Option<u64>,
+}
+
+#[derive(Deserialize, Clone, Default)]
+#[serde(default)]
+struct WireCompletionTokensDetails {
+    reasoning_tokens: Option<u64>,
 }
 
 #[derive(Debug)]
@@ -200,9 +226,20 @@ pub(crate) fn deserialize_stream_chunk(body: &str) -> Result<StreamChunk, LlmErr
         reasoning_details,
         tool_calls,
         finish_reason: choice.and_then(|choice| choice.finish_reason.clone()),
-        usage: response.usage.map(|usage| Usage {
-            input_tokens: usage.prompt_tokens,
-            output_tokens: usage.completion_tokens,
+        usage: response.usage.map(|usage| {
+            let prompt_details = usage.prompt_tokens_details;
+            let completion_details = usage.completion_tokens_details;
+            Usage {
+                input_tokens: usage.prompt_tokens,
+                output_tokens: usage.completion_tokens,
+                total_tokens: usage.total_tokens,
+                cost: usage.cost,
+                upstream_inference_cost: usage.cost_details.and_then(|d| d.upstream_inference_cost),
+                cached_tokens: prompt_details.as_ref().and_then(|d| d.cached_tokens),
+                cache_write_tokens: prompt_details.as_ref().and_then(|d| d.cache_write_tokens),
+                reasoning_tokens: completion_details.as_ref().and_then(|d| d.reasoning_tokens),
+                audio_tokens: prompt_details.as_ref().and_then(|d| d.audio_tokens),
+            }
         }),
     })
 }

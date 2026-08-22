@@ -182,7 +182,7 @@ async fn event_loop(app: &mut Controller) -> anyhow::Result<()> {
                             ui.apply(action, app.login_selection_active())
                         })
                     } else {
-                        ui.handle_editor_event(event, view.lines())
+                        ui.handle_event(event, view.lines(), app.completion_mut())
                     };
                     let should_quit = command.is_some_and(|command| app.handle(command));
                     if ui.take_dirty() {

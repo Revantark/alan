@@ -1,6 +1,7 @@
 use crate::core::{Controller, LoginState};
 use crate::views::UiState;
 use crate::views::component::Component;
+use crate::views::components::PopupList;
 use crate::views::theme;
 use providers::AuthPrompt;
 use ratatui::Frame;
@@ -11,7 +12,9 @@ use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::Paragraph;
 
 #[derive(Debug, Default)]
-pub struct Footer;
+pub struct Footer {
+    popup: PopupList,
+}
 
 impl Component for Footer {
     fn render(
@@ -62,6 +65,12 @@ impl Component for Footer {
                 Style::default().fg(ratatui::style::Color::White),
             ));
         }
+        if let Some(cost) = controller.usage().cost {
+            status_spans.push(Span::styled(
+                format!(" · ${:.4}", (cost * 10_000.0).trunc() / 10_000.0),
+                Style::default().fg(theme::MUTED_FG),
+            ));
+        }
         let status = Line::from(status_spans);
         frame.render_widget(
             Paragraph::new(status).style(Style::default().bg(theme::EDITOR_BG)),
@@ -106,6 +115,11 @@ impl Component for Footer {
         state.editor().render(input_area, frame.buffer_mut());
         if let Some(position) = state.cursor_screen_position() {
             frame.set_cursor_position(position);
+            if let Some(popup_area) =
+                PopupList::area_above_cursor(Rect::new(position.x, position.y, 1, 1), frame.area())
+            {
+                self.popup.render(frame, popup_area, controller, state);
+            }
         }
     }
 }

@@ -1,8 +1,6 @@
-use std::collections::BTreeMap;
-
-use serde::{Deserialize, Serialize};
-
 use crate::{LlmError, LlmEvent, Message, ToolCall};
+use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ContentBlock {
@@ -24,6 +22,13 @@ pub enum StopReason {
 pub struct Usage {
     pub input_tokens: u64,
     pub output_tokens: u64,
+    pub total_tokens: Option<u64>,
+    pub cost: Option<f64>,
+    pub upstream_inference_cost: Option<f64>,
+    pub cached_tokens: Option<u64>,
+    pub cache_write_tokens: Option<u64>,
+    pub reasoning_tokens: Option<u64>,
+    pub audio_tokens: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -35,6 +40,30 @@ pub struct LlmResponse {
     pub reasoning: Option<String>,
     #[serde(default)]
     pub reasoning_details: Vec<serde_json::Value>,
+}
+
+fn add<T: std::ops::Add<Output = T> + Copy>(a: Option<T>, b: Option<T>) -> Option<T> {
+    match (a, b) {
+        (Some(x), Some(y)) => Some(x + y),
+        (a, None) => a,
+        (None, b) => b,
+    }
+}
+
+impl Usage {
+    pub fn accumulate(&mut self, other: &Usage) {
+        self.input_tokens += other.input_tokens;
+        self.output_tokens += other.output_tokens;
+
+        self.total_tokens = add(self.total_tokens, other.total_tokens);
+        self.cost = add(self.cost, other.cost);
+        self.upstream_inference_cost =
+            add(self.upstream_inference_cost, other.upstream_inference_cost);
+        self.cached_tokens = add(self.cached_tokens, other.cached_tokens);
+        self.cache_write_tokens = add(self.cache_write_tokens, other.cache_write_tokens);
+        self.reasoning_tokens = add(self.reasoning_tokens, other.reasoning_tokens);
+        self.audio_tokens = add(self.audio_tokens, other.audio_tokens);
+    }
 }
 
 impl LlmResponse {
