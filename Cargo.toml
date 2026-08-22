@@ -6,6 +6,7 @@ members = ["crates/tools", "crates/llm", "crates/providers", "crates/agent", "cr
 async-trait = "0.1"
 bytes = "1"
 futures-util = "0.3"
+ignore = "0.4.33"
 llm = { path = "crates/llm" }
 reqwest = { version = "0.13", features = ["json", "stream"] }
 serde = { version = "1", features = ["derive"] }

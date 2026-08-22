@@ -8,7 +8,7 @@ mod components;
 pub mod selection;
 mod theme;
 
-use crate::core::{Action, Command, Controller, Overlay, Poll};
+use crate::core::{Action, Command, CompletionController, Controller, Overlay, Poll};
 use components::{Chat, Footer, Header, LoginOverlay};
 use crossterm::event::{
     Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
@@ -17,7 +17,7 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Position, Rect};
 use ratatui::style::Style;
 use selection::{Selection, TextPosition};
-use tui_textarea::{CursorRenderMode, TextArea, WrapMode};
+use tui_textarea::{CursorMove, CursorRenderMode, TextArea, WrapMode};
 
 use std::time::Instant;
 
@@ -122,13 +122,32 @@ impl UiState {
         command
     }
 
-    pub fn handle_editor_event(
+    pub fn handle_event(
         &mut self,
         event: Event,
         rendered_lines: &[ratatui::text::Line<'static>],
+        completion: &mut CompletionController,
+    ) -> Option<Command> {
+        if matches!(&event, Event::Key(key) if key.kind != KeyEventKind::Press) {
+            return None;
+        }
+        if let Event::Key(key) = &event
+            && completion.is_open()
+            && (completion.has_items() || !matches!(key.code, KeyCode::Enter | KeyCode::Tab))
+            && self.handle_completion_key(*key, completion)
+        {
+            return None;
+        }
+        self.handle_editor_event(event, rendered_lines, completion)
+    }
+
+    fn handle_editor_event(
+        &mut self,
+        event: Event,
+        rendered_lines: &[ratatui::text::Line<'static>],
+        completion: &mut CompletionController,
     ) -> Option<Command> {
         match event {
-            Event::Key(key) if key.kind != KeyEventKind::Press => None,
             // Clear selection on Escape
             Event::Key(key) if key.code == KeyCode::Esc && self.has_active_selection() => {
                 self.selection = None;
@@ -140,14 +159,19 @@ impl UiState {
                     || (key.code == KeyCode::Tab
                         && key.modifiers.contains(KeyModifiers::SHIFT)) =>
             {
+                completion.dismiss();
                 self.apply(Action::TogglePlanMode, false)
             }
             Event::Key(key) if is_multiline_enter(key) => {
                 self.editor.insert_newline();
                 self.dirty = true;
+                self.sync_completion(completion);
                 None
             }
-            Event::Key(key) if key.code == KeyCode::Enter => self.submit_editor_or_accept(),
+            Event::Key(key) if key.code == KeyCode::Enter => {
+                completion.dismiss();
+                self.submit_editor_or_accept()
+            }
             Event::Key(key) if key.code == KeyCode::PageUp => self.apply(Action::ScrollUp, false),
             Event::Key(key) if key.code == KeyCode::PageDown => {
                 self.apply(Action::ScrollDown, false)
@@ -158,42 +182,155 @@ impl UiState {
             {
                 Some(Command::Interrupt)
             }
-            // Terminals send Ctrl+U for Cmd+Delete, but the widget binds it to
-            // undo, so Cmd+Delete would undo instead of clearing the line. Its
-            // keymap is a match arm rather than a table, so interception is the
-            // only way to change it.
             Event::Key(key)
                 if key.code == KeyCode::Char('u')
                     && key.modifiers.contains(KeyModifiers::CONTROL) =>
             {
                 self.editor.delete_line_by_head();
                 self.dirty = true;
+                self.sync_completion(completion);
                 None
             }
-            // Undo lost its binding to the line clear above, so it moves here.
-            // Terminals cannot report Cmd, so Cmd+Z is not available. Redo
-            // stays on the widget's native Ctrl+R.
             Event::Key(key)
                 if key.code == KeyCode::Char('z')
                     && key.modifiers.contains(KeyModifiers::CONTROL) =>
             {
                 self.editor.undo();
                 self.dirty = true;
+                self.sync_completion(completion);
                 None
             }
             Event::Mouse(mouse) => self.handle_mouse_event(mouse, rendered_lines),
-            // Bracketed paste arrives as its own event. The widget's crossterm
-            // conversion drops it, so insert the text directly.
             Event::Paste(text) => {
                 self.editor.insert_str(text);
                 self.dirty = true;
+                self.sync_completion(completion);
                 None
             }
             event => {
                 self.editor.input(event);
                 self.dirty = true;
+                self.sync_completion(completion);
                 None
             }
+        }
+    }
+
+    /// Navigation and acceptance keys while the completion popup is open.
+    /// Returns true only when completion consumed the key.
+    fn handle_completion_key(
+        &mut self,
+        key: KeyEvent,
+        completion: &mut CompletionController,
+    ) -> bool {
+        match key.code {
+            KeyCode::Up => {
+                completion.move_selection(-1);
+                self.dirty = true;
+                true
+            }
+            KeyCode::Down => {
+                completion.move_selection(1);
+                self.dirty = true;
+                true
+            }
+            KeyCode::Enter | KeyCode::Tab if key.modifiers.is_empty() => {
+                let Some(accepted) = completion.accept() else {
+                    return false;
+                };
+                self.replace_completion_token(&accepted.replacement);
+                self.dirty = true;
+                if accepted.is_dir {
+                    self.sync_completion(completion);
+                }
+                true
+            }
+            KeyCode::Esc => {
+                completion.dismiss();
+                self.dirty = true;
+                true
+            }
+            _ => false,
+        }
+    }
+
+    fn replace_completion_token(&mut self, replacement: &str) {
+        let Some((start_col, end_col)) = self.token_span_containing_cursor() else {
+            return;
+        };
+        let (row, _) = self.editor.cursor();
+        self.editor
+            .move_cursor(CursorMove::Jump(row as u16, start_col as u16));
+        self.editor.delete_str(end_col - start_col);
+        let text = format!("@{replacement}");
+        self.editor.insert_str(text);
+    }
+
+    fn token_span_containing_cursor(&self) -> Option<(usize, usize)> {
+        self.completion_token_at_cursor()
+            .map(|(start, end, _)| (start, end))
+    }
+
+    /// Return the character-column span and text of the non-whitespace token
+    /// around the cursor when it starts with `@`.
+    fn completion_token_at_cursor(&self) -> Option<(usize, usize, String)> {
+        let (row, col) = self.editor.cursor();
+        let line = self.editor.lines().get(row)?;
+        let col = col.min(line.chars().count());
+        let at = Self::char_offset(line, col);
+        let start = line[..at]
+            .char_indices()
+            .rev()
+            .take_while(|&(_, c)| !c.is_whitespace())
+            .map(|(i, _)| i)
+            .last()?;
+        let end = line[at..]
+            .char_indices()
+            .find(|&(_, c)| c.is_whitespace())
+            .map(|(i, _)| at + i)
+            .unwrap_or(line.len());
+        let text = &line[start..end];
+        text.starts_with('@').then(|| {
+            (
+                line[..start].chars().count(),
+                line[..end].chars().count(),
+                text[1..].to_owned(),
+            )
+        })
+    }
+
+    /// Convert a character-column index (as reported by `TextArea::cursor`)
+    /// into a byte offset within `line`, clamped to the line length.
+    fn char_offset(line: &str, col: usize) -> usize {
+        line.char_indices()
+            .nth(col)
+            .map(|(i, _)| i)
+            .unwrap_or(line.len())
+    }
+
+    /// Read the `@token` at the cursor and keep the popup in step with it.
+    fn sync_completion(&mut self, completion: &mut CompletionController) {
+        let (row, col) = self.editor.cursor();
+        let token = self.editor.lines().get(row).and_then(|line| {
+            let col = col.min(line.chars().count());
+            let at = Self::char_offset(line, col);
+            let start = line[..at]
+                .char_indices()
+                .rev()
+                .take_while(|&(_, c)| !c.is_whitespace())
+                .map(|(i, _)| i)
+                .last()?;
+            let end = line[at..]
+                .char_indices()
+                .find(|&(_, c)| c.is_whitespace())
+                .map(|(i, _)| at + i)
+                .unwrap_or(line.len());
+            let text = &line[start..end];
+            text.starts_with('@').then(|| text[1..].to_owned())
+        });
+        match token {
+            Some(token) => completion.update(&token),
+            None => completion.dismiss(),
         }
     }
 
@@ -416,6 +553,18 @@ impl Default for UiState {
     }
 }
 
+#[cfg(test)]
+use crate::core::DirEntry;
+
+#[cfg(test)]
+impl UiState {
+    /// Test shim for the pre-completion call signature.
+    fn handle_editor_event_for_test(&mut self, event: Event) -> Option<Command> {
+        let mut completion = CompletionController::new();
+        self.handle_event(event, &[], &mut completion)
+    }
+}
+
 fn is_multiline_enter(key: KeyEvent) -> bool {
     matches!(key.code, KeyCode::Char('\n' | '\r'))
         || (matches!(key.code, KeyCode::Char('j' | 'm'))
@@ -533,9 +682,9 @@ mod tests {
     #[test]
     fn typing_inserts_immediately_and_escape_is_inert() {
         let mut state = UiState::new();
-        state.handle_editor_event(key(crossterm::event::KeyCode::Char('h')), &[]);
-        state.handle_editor_event(key(crossterm::event::KeyCode::Char('i')), &[]);
-        state.handle_editor_event(key(crossterm::event::KeyCode::Esc), &[]);
+        state.handle_editor_event_for_test(key(crossterm::event::KeyCode::Char('h')));
+        state.handle_editor_event_for_test(key(crossterm::event::KeyCode::Char('i')));
+        state.handle_editor_event_for_test(key(crossterm::event::KeyCode::Esc));
 
         assert_eq!(state.editor_text(), "hi");
     }
@@ -543,7 +692,7 @@ mod tests {
     #[test]
     fn bracketed_paste_inserts_multiline_text() {
         let mut state = UiState::new();
-        state.handle_editor_event(crossterm::event::Event::Paste("first\nsecond".into()), &[]);
+        state.handle_editor_event_for_test(crossterm::event::Event::Paste("first\nsecond".into()));
 
         assert_eq!(state.editor_text(), "first\nsecond");
     }
@@ -561,14 +710,14 @@ mod tests {
     fn ctrl_z_undoes_and_ctrl_r_redoes() {
         let mut state = UiState::new();
         for character in "hello".chars() {
-            state.handle_editor_event(key(crossterm::event::KeyCode::Char(character)), &[]);
+            state.handle_editor_event_for_test(key(crossterm::event::KeyCode::Char(character)));
         }
         assert_eq!(state.editor_text(), "hello");
 
-        state.handle_editor_event(ctrl('z'), &[]);
+        state.handle_editor_event_for_test(ctrl('z'));
         assert_ne!(state.editor_text(), "hello");
 
-        state.handle_editor_event(ctrl('r'), &[]);
+        state.handle_editor_event_for_test(ctrl('r'));
         assert_eq!(state.editor_text(), "hello");
     }
 
@@ -578,10 +727,10 @@ mod tests {
     fn ctrl_u_deletes_to_start_of_line() {
         let mut state = UiState::new();
         for character in "one two".chars() {
-            state.handle_editor_event(key(crossterm::event::KeyCode::Char(character)), &[]);
+            state.handle_editor_event_for_test(key(crossterm::event::KeyCode::Char(character)));
         }
 
-        state.handle_editor_event(ctrl('u'), &[]);
+        state.handle_editor_event_for_test(ctrl('u'));
 
         assert_eq!(state.editor_text(), "");
     }
@@ -592,7 +741,7 @@ mod tests {
         assert_eq!(state.editor_rows(20), 1);
 
         for character in "aaaaa bbbbb ccccc ddddd".chars() {
-            state.handle_editor_event(key(crossterm::event::KeyCode::Char(character)), &[]);
+            state.handle_editor_event_for_test(key(crossterm::event::KeyCode::Char(character)));
         }
 
         // Wrapping at width 12 needs more rows than the single logical line.
@@ -603,21 +752,19 @@ mod tests {
     #[test]
     fn shift_enter_inserts_newline_without_submitting() {
         let mut state = UiState::new();
-        state.handle_editor_event(
-            crossterm::event::Event::Key(crossterm::event::KeyEvent::new(
+        state.handle_editor_event_for_test(crossterm::event::Event::Key(
+            crossterm::event::KeyEvent::new(
                 crossterm::event::KeyCode::Char('a'),
                 crossterm::event::KeyModifiers::NONE,
-            )),
-            &[],
-        );
+            ),
+        ));
 
-        let command = state.handle_editor_event(
-            crossterm::event::Event::Key(crossterm::event::KeyEvent::new(
+        let command = state.handle_editor_event_for_test(crossterm::event::Event::Key(
+            crossterm::event::KeyEvent::new(
                 crossterm::event::KeyCode::Enter,
                 crossterm::event::KeyModifiers::SHIFT,
-            )),
-            &[],
-        );
+            ),
+        ));
 
         assert_eq!(command, None);
         assert_eq!(state.editor_text(), "a\n");
@@ -626,21 +773,19 @@ mod tests {
     #[test]
     fn zed_shift_enter_aliases_insert_newline() {
         let mut state = UiState::new();
-        state.handle_editor_event(
-            crossterm::event::Event::Key(crossterm::event::KeyEvent::new(
+        state.handle_editor_event_for_test(crossterm::event::Event::Key(
+            crossterm::event::KeyEvent::new(
                 crossterm::event::KeyCode::Char('a'),
                 crossterm::event::KeyModifiers::NONE,
-            )),
-            &[],
-        );
+            ),
+        ));
 
-        let command = state.handle_editor_event(
-            crossterm::event::Event::Key(crossterm::event::KeyEvent::new(
+        let command = state.handle_editor_event_for_test(crossterm::event::Event::Key(
+            crossterm::event::KeyEvent::new(
                 crossterm::event::KeyCode::Enter,
                 crossterm::event::KeyModifiers::ALT,
-            )),
-            &[],
-        );
+            ),
+        ));
 
         assert_eq!(command, None);
         assert_eq!(state.editor_text(), "a\n");
@@ -649,13 +794,12 @@ mod tests {
     #[test]
     fn ctrl_j_inserts_newline() {
         let mut state = UiState::new();
-        let command = state.handle_editor_event(
-            crossterm::event::Event::Key(crossterm::event::KeyEvent::new(
+        let command = state.handle_editor_event_for_test(crossterm::event::Event::Key(
+            crossterm::event::KeyEvent::new(
                 crossterm::event::KeyCode::Char('j'),
                 crossterm::event::KeyModifiers::CONTROL,
-            )),
-            &[],
-        );
+            ),
+        ));
 
         assert_eq!(command, None);
         assert_eq!(state.editor_text(), "\n");
@@ -664,13 +808,12 @@ mod tests {
     #[test]
     fn ctrl_m_inserts_newline() {
         let mut state = UiState::new();
-        let command = state.handle_editor_event(
-            crossterm::event::Event::Key(crossterm::event::KeyEvent::new(
+        let command = state.handle_editor_event_for_test(crossterm::event::Event::Key(
+            crossterm::event::KeyEvent::new(
                 crossterm::event::KeyCode::Char('m'),
                 crossterm::event::KeyModifiers::CONTROL,
-            )),
-            &[],
-        );
+            ),
+        ));
 
         assert_eq!(command, None);
         assert_eq!(state.editor_text(), "\n");
@@ -679,13 +822,12 @@ mod tests {
     #[test]
     fn control_enter_inserts_newline() {
         let mut state = UiState::new();
-        let command = state.handle_editor_event(
-            crossterm::event::Event::Key(crossterm::event::KeyEvent::new(
+        let command = state.handle_editor_event_for_test(crossterm::event::Event::Key(
+            crossterm::event::KeyEvent::new(
                 crossterm::event::KeyCode::Enter,
                 crossterm::event::KeyModifiers::CONTROL,
-            )),
-            &[],
-        );
+            ),
+        ));
 
         assert_eq!(command, None);
         assert_eq!(state.editor_text(), "\n");
@@ -696,25 +838,242 @@ mod tests {
         let mut state = UiState::new();
         assert!(state.take_dirty());
 
-        state.handle_editor_event(
-            crossterm::event::Event::Key(crossterm::event::KeyEvent::new(
+        state.handle_editor_event_for_test(crossterm::event::Event::Key(
+            crossterm::event::KeyEvent::new(
                 crossterm::event::KeyCode::Char('h'),
                 crossterm::event::KeyModifiers::NONE,
-            )),
-            &[],
-        );
+            ),
+        ));
         assert!(state.take_dirty());
         assert!(!state.take_dirty());
 
-        let command = state.handle_editor_event(
-            crossterm::event::Event::Key(crossterm::event::KeyEvent::new(
+        let command = state.handle_editor_event_for_test(crossterm::event::Event::Key(
+            crossterm::event::KeyEvent::new(
                 crossterm::event::KeyCode::Enter,
                 crossterm::event::KeyModifiers::NONE,
-            )),
-            &[],
-        );
+            ),
+        ));
 
         assert_eq!(command, Some(Command::Submit("h".into())));
         assert!(state.take_dirty());
+    }
+
+    /// Drive the editor with a real CompletionController: typing `@` opens
+    /// the popup, injected scan results appear, and accepting replaces the
+    /// token in the editor without submitting.
+    #[test]
+    fn at_completion_opens_accepts_and_replaces_token() {
+        let mut state = UiState::new();
+        let mut completion = CompletionController::new();
+
+        for character in "@som".chars() {
+            state.handle_event(
+                key(crossterm::event::KeyCode::Char(character)),
+                &[],
+                &mut completion,
+            );
+        }
+        assert!(completion.is_open());
+
+        // Stand in for the blocking scan of the project root delivering.
+        completion.inject_items(vec![DirEntry {
+            path: "something.txt".into(),
+            is_dir: false,
+        }]);
+
+        let command = state.handle_event(key(KeyCode::Enter), &[], &mut completion);
+
+        assert_eq!(command, None);
+        assert_eq!(state.editor_text(), "@something.txt");
+        assert!(!completion.is_open());
+    }
+
+    /// `TextArea::cursor()` reports the column in characters, but the token
+    /// span used to slice the line by byte offset. A multi-byte character
+    /// between `@` and the cursor used to panic with a byte-index out of
+    /// bounds. Regression test for that panic.
+    #[test]
+    fn at_completion_after_multibyte_char_does_not_panic() {
+        let mut state = UiState::new();
+        let mut completion = CompletionController::new();
+
+        // `@` preceded by other text and followed by a 2-byte character,
+        // then more text — a common mid-sentence use of `@` mentions.
+        for character in "abc @éx".chars() {
+            state.handle_event(
+                key(crossterm::event::KeyCode::Char(character)),
+                &[],
+                &mut completion,
+            );
+        }
+        assert!(completion.is_open());
+
+        // Accepting should replace the whole `@éx` token without panicking
+        // and without eating the `abc ` that precedes it.
+        completion.inject_items(vec![DirEntry {
+            path: "éx.txt".into(),
+            is_dir: false,
+        }]);
+
+        let command = state.handle_event(key(KeyCode::Enter), &[], &mut completion);
+
+        assert_eq!(command, None);
+        assert_eq!(state.editor_text(), "abc @éx.txt");
+        assert!(!completion.is_open());
+    }
+
+    #[test]
+    fn at_completion_navigation_and_escape() {
+        let mut state = UiState::new();
+        let mut completion = CompletionController::new();
+
+        state.handle_event(key(KeyCode::Char('@')), &[], &mut completion);
+        completion.inject_items(vec![
+            DirEntry {
+                path: "a.txt".into(),
+                is_dir: false,
+            },
+            DirEntry {
+                path: "b.txt".into(),
+                is_dir: false,
+            },
+        ]);
+        assert_eq!(completion.state().unwrap().selected, 0);
+
+        state.handle_event(key(KeyCode::Down), &[], &mut completion);
+        assert_eq!(completion.state().unwrap().selected, 1);
+
+        state.handle_event(key(KeyCode::Esc), &[], &mut completion);
+        assert!(!completion.is_open());
+
+        // Popup closed: Enter submits again.
+        let command = state.handle_event(key(KeyCode::Enter), &[], &mut completion);
+        assert_eq!(command, Some(Command::Submit("@".into())));
+    }
+
+    #[test]
+    fn deleting_the_at_closes_the_popup() {
+        let mut state = UiState::new();
+        let mut completion = CompletionController::new();
+
+        state.handle_event(key(KeyCode::Char('@')), &[], &mut completion);
+        assert!(completion.is_open());
+
+        state.handle_event(key(KeyCode::Backspace), &[], &mut completion);
+        assert!(!completion.is_open());
+    }
+
+    #[test]
+    fn accepting_a_directory_drills_down() {
+        let mut state = UiState::new();
+        let mut completion = CompletionController::new();
+
+        state.handle_event(key(KeyCode::Char('@')), &[], &mut completion);
+        completion.inject_items(vec![DirEntry {
+            path: "src".into(),
+            is_dir: true,
+        }]);
+
+        state.handle_event(key(KeyCode::Enter), &[], &mut completion);
+
+        assert_eq!(state.editor_text(), "@src/");
+        assert!(completion.is_open());
+    }
+
+    /// Regression: moving the cursor left inside the token before accepting
+    /// must replace the whole token, not just the prefix before the cursor.
+    ///
+    /// Accepting with the cursor at `@fo|o` used to delete only `@fo` and
+    /// insert the replacement, leaving the trailing `o` behind
+    /// (`@foobaroo`). The recorded span is now consumed at accept time.
+    #[test]
+    fn accepting_completion_with_cursor_inside_token_replaces_whole_token() {
+        let mut state = UiState::new();
+        let mut completion = CompletionController::new();
+
+        for character in "@foo".chars() {
+            state.handle_event(
+                key(crossterm::event::KeyCode::Char(character)),
+                &[],
+                &mut completion,
+            );
+        }
+        assert!(completion.is_open());
+
+        // The injected path must match the typed prefix (`foo`) to survive
+        // `refilter`, yet differ from it so a leftover suffix would show.
+        completion.inject_items(vec![DirEntry {
+            path: "foobar".into(),
+            is_dir: false,
+        }]);
+
+        // Move the cursor left twice: `@fo|o`.
+        state.handle_event(key(KeyCode::Left), &[], &mut completion);
+        state.handle_event(key(KeyCode::Left), &[], &mut completion);
+        assert_eq!(state.editor_text(), "@foo");
+
+        let command = state.handle_event(key(KeyCode::Enter), &[], &mut completion);
+
+        assert_eq!(command, None);
+        assert_eq!(state.editor_text(), "@foobar");
+        assert!(!completion.is_open());
+    }
+
+    /// Same regression, but with a multi-byte character inside the token,
+    /// where byte/character-column confusion is most likely to bite.
+    #[test]
+    fn accepting_completion_with_cursor_inside_multibyte_token() {
+        let mut state = UiState::new();
+        let mut completion = CompletionController::new();
+
+        for character in "@éfoo".chars() {
+            state.handle_event(
+                key(crossterm::event::KeyCode::Char(character)),
+                &[],
+                &mut completion,
+            );
+        }
+        assert!(completion.is_open());
+
+        completion.inject_items(vec![DirEntry {
+            path: "éfoobar".into(),
+            is_dir: false,
+        }]);
+
+        // Move the cursor left twice: `@éfo|o`.
+        state.handle_event(key(KeyCode::Left), &[], &mut completion);
+        state.handle_event(key(KeyCode::Left), &[], &mut completion);
+        assert_eq!(state.editor_text(), "@éfoo");
+
+        let command = state.handle_event(key(KeyCode::Enter), &[], &mut completion);
+
+        assert_eq!(command, None);
+        assert_eq!(state.editor_text(), "@éfoobar");
+        assert!(!completion.is_open());
+    }
+
+    /// Accepting at the end of the token (the common path) still works.
+    #[test]
+    fn accepting_completion_at_token_end_still_replaces() {
+        let mut state = UiState::new();
+        let mut completion = CompletionController::new();
+
+        for character in "@foo".chars() {
+            state.handle_event(
+                key(crossterm::event::KeyCode::Char(character)),
+                &[],
+                &mut completion,
+            );
+        }
+        completion.inject_items(vec![DirEntry {
+            path: "foobar".into(),
+            is_dir: false,
+        }]);
+
+        let command = state.handle_event(key(KeyCode::Enter), &[], &mut completion);
+
+        assert_eq!(command, None);
+        assert_eq!(state.editor_text(), "@foobar");
+        assert!(!completion.is_open());
     }
 }

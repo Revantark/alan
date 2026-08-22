@@ -2,6 +2,7 @@
 
 use super::action::Command;
 use super::chat::{ChatController, Entry};
+use super::completion::CompletionController;
 use super::login::{LoginController, LoginState};
 use agent::Agent;
 use llm::Usage;
@@ -39,6 +40,7 @@ pub enum Overlay {
 pub struct Controller {
     chat: ChatController,
     login: LoginController,
+    completion: CompletionController,
     overlay: Overlay,
 }
 
@@ -62,6 +64,7 @@ impl Controller {
         Self {
             chat: ChatController::new(agent),
             login: LoginController::new(providers, credentials),
+            completion: CompletionController::new(),
             overlay: Overlay::None,
         }
     }
@@ -94,12 +97,23 @@ impl Controller {
         matches!(self.login.state(), LoginState::Selecting { .. })
     }
 
+    pub fn completion(&self) -> &CompletionController {
+        &self.completion
+    }
+
+    pub fn completion_mut(&mut self) -> &mut CompletionController {
+        &mut self.completion
+    }
+
     pub fn overlay(&self) -> Overlay {
         self.overlay
     }
 
     pub fn poll(&mut self) -> Poll {
-        self.chat.poll().combine(self.login.poll())
+        self.chat
+            .poll()
+            .combine(self.login.poll())
+            .combine(self.completion.poll())
     }
 
     pub fn handle(&mut self, command: Command) -> bool {
