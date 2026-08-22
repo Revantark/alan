@@ -2,12 +2,14 @@
 
 pub mod action;
 pub mod chat;
+pub mod command;
 pub mod completion;
 pub mod controller;
 pub mod login;
 
 pub use action::{Action, Command};
 pub use chat::Entry;
+pub use command::SlashCommand;
 #[cfg(test)]
 pub use completion::DirEntry;
 pub use completion::{CompletionController, CompletionState, CompletionStatus};

@@ -8,7 +8,7 @@ mod components;
 pub mod selection;
 mod theme;
 
-use crate::core::{Action, Command, CompletionController, Controller, Overlay, Poll};
+use crate::core::{Action, Command, CompletionController, Controller, Overlay, Poll, SlashCommand};
 use components::{Chat, Footer, Header, LoginOverlay};
 use crossterm::event::{
     Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
@@ -20,6 +20,9 @@ use selection::{Selection, TextPosition};
 use tui_textarea::{CursorMove, CursorRenderMode, TextArea, WrapMode};
 
 use std::time::Instant;
+
+/// Only one custom highlight is ever active, so its priority is arbitrary.
+const COMMAND_HIGHLIGHT_PRIORITY: u8 = 1;
 
 pub struct UiState {
     /// Login prompt input. Main editor uses [`TextArea`].
@@ -147,7 +150,7 @@ impl UiState {
         rendered_lines: &[ratatui::text::Line<'static>],
         completion: &mut CompletionController,
     ) -> Option<Command> {
-        match event {
+        let command = match event {
             // Clear selection on Escape
             Event::Key(key) if key.code == KeyCode::Esc && self.has_active_selection() => {
                 self.selection = None;
@@ -213,7 +216,29 @@ impl UiState {
                 self.sync_completion(completion);
                 None
             }
+        };
+        self.sync_command_highlight();
+        command
+    }
+
+    fn sync_command_highlight(&mut self) {
+        // Highlights accumulate, so the previous one has to go first.
+        self.editor.clear_custom_highlight();
+        // Only the first line can be a command, so the rest of the buffer is
+        // never read. More than one line is not a command at all.
+        let [line] = self.editor.lines() else {
+            return;
+        };
+        if SlashCommand::parse(line).is_none() {
+            return;
         }
+        // `custom_highlight` ranges are byte offsets.
+        let end = line.find(char::is_whitespace).unwrap_or(line.len());
+        self.editor.custom_highlight(
+            ((0, 0), (0, end)),
+            Style::default().fg(theme::COMMAND_FG),
+            COMMAND_HIGHLIGHT_PRIORITY,
+        );
     }
 
     /// Navigation and acceptance keys while the completion popup is open.
@@ -687,6 +712,131 @@ mod tests {
         state.handle_editor_event_for_test(key(crossterm::event::KeyCode::Esc));
 
         assert_eq!(state.editor_text(), "hi");
+    }
+
+    /// Foreground colour of each cell in the editor's first rendered row.
+    ///
+    /// The widget owns the highlight list, so painting is the only way to
+    /// observe it. The area allows for wrapping: a viewport too short for the
+    /// cursor scrolls the first row out.
+    fn rendered_row(state: &UiState, width: u16) -> Vec<Option<ratatui::style::Color>> {
+        use ratatui::widgets::Widget;
+
+        let area = Rect::new(0, 0, width, theme::EDITOR_VISIBLE_LINES);
+        let mut buffer = ratatui::buffer::Buffer::empty(area);
+        (&state.editor).render(area, &mut buffer);
+        (0..width).map(|x| buffer[(x, 0)].fg.into()).collect()
+    }
+
+    fn type_text(state: &mut UiState, text: &str) {
+        for character in text.chars() {
+            state.handle_editor_event_for_test(key(crossterm::event::KeyCode::Char(character)));
+        }
+    }
+
+    #[test]
+    fn known_command_is_highlighted_up_to_its_first_space() {
+        let mut state = UiState::new();
+        type_text(&mut state, "/plan now");
+
+        let row = rendered_row(&state, 9);
+        assert!(
+            row[..5].iter().all(|fg| *fg == Some(theme::COMMAND_FG)),
+            "{row:?}"
+        );
+        assert!(
+            row[5..].iter().all(|fg| *fg != Some(theme::COMMAND_FG)),
+            "{row:?}"
+        );
+    }
+
+    /// The near misses are a leading space and a second line.
+    #[test]
+    fn highlight_matches_the_controller_on_near_misses() {
+        let mut state = UiState::new();
+        type_text(&mut state, " /plan");
+        let row = rendered_row(&state, 6);
+        assert!(
+            row.iter().all(|fg| *fg != Some(theme::COMMAND_FG)),
+            "leading space highlighted: {row:?}"
+        );
+
+        let mut state = UiState::new();
+        type_text(&mut state, "/plan");
+        state.handle_editor_event_for_test(crossterm::event::Event::Key(
+            crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Enter,
+                crossterm::event::KeyModifiers::SHIFT,
+            ),
+        ));
+        type_text(&mut state, "and this");
+        let row = rendered_row(&state, 5);
+        assert!(
+            row.iter().all(|fg| *fg != Some(theme::COMMAND_FG)),
+            "multiline highlighted: {row:?}"
+        );
+    }
+
+    #[test]
+    fn unknown_command_and_plain_text_are_not_highlighted() {
+        for text in ["/pln", "plan"] {
+            let mut state = UiState::new();
+            type_text(&mut state, text);
+
+            let row = rendered_row(&state, 4);
+            assert!(
+                row.iter().all(|fg| *fg != Some(theme::COMMAND_FG)),
+                "{text} highlighted: {row:?}"
+            );
+        }
+    }
+
+    /// The highlight range is in bytes.
+    #[test]
+    fn highlight_survives_a_wide_character_after_the_command() {
+        let mut state = UiState::new();
+        type_text(&mut state, "/plan 日本");
+
+        let row = rendered_row(&state, 20);
+        assert!(
+            row[..5].iter().all(|fg| *fg == Some(theme::COMMAND_FG)),
+            "{row:?}"
+        );
+        assert!(
+            row[5..].iter().all(|fg| *fg != Some(theme::COMMAND_FG)),
+            "{row:?}"
+        );
+    }
+
+    /// The highlight is clipped per wrapped row.
+    #[test]
+    fn highlight_survives_a_wrapped_argument() {
+        let mut state = UiState::new();
+        type_text(&mut state, "/plan aaaa bbbb cccc dddd");
+
+        let row = rendered_row(&state, 12);
+        assert!(
+            row[..5].iter().all(|fg| *fg == Some(theme::COMMAND_FG)),
+            "{row:?}"
+        );
+        assert!(
+            row[5..].iter().all(|fg| *fg != Some(theme::COMMAND_FG)),
+            "{row:?}"
+        );
+    }
+
+    /// Highlights accumulate in the widget.
+    #[test]
+    fn highlight_clears_when_the_command_is_edited_away() {
+        let mut state = UiState::new();
+        type_text(&mut state, "/plan");
+        state.handle_editor_event_for_test(key(crossterm::event::KeyCode::Backspace));
+
+        let row = rendered_row(&state, 4);
+        assert!(
+            row.iter().all(|fg| *fg != Some(theme::COMMAND_FG)),
+            "{row:?}"
+        );
     }
 
     #[test]

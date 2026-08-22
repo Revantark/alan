@@ -47,6 +47,7 @@ dependencies = [
  "providers",
  "ratatui",
  "serde_json",
+ "strum",
  "tokio",
  "tracing",
  "tracing-appender",

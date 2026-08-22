@@ -189,6 +189,13 @@ fn wrap_entry(entry: &Entry, width: usize, content_width: usize) -> Vec<Line<'st
             lines.push(Line::default());
             lines
         }
+        // Rendered as markdown so command output keeps its formatting.
+        Entry::Info(text) => {
+            let mut lines = vec![Line::default()];
+            lines.extend(wrap_markdown(text, content_width));
+            lines.push(Line::default());
+            lines
+        }
         Entry::ToolCall {
             name,
             arguments,

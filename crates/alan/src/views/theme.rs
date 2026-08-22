@@ -20,3 +20,4 @@ pub const EDITOR_VISIBLE_LINES: u16 = 7;
 pub const PROMPT_GUTTER: u16 = 4;
 pub const SELECTION_BG: Color = Color::Rgb(58, 76, 107);
 pub const SELECTION_FG: Color = Color::White;
+pub const COMMAND_FG: Color = Color::Cyan;
