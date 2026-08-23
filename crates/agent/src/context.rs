@@ -1,4 +1,6 @@
-use llm::{LlmResponse, Message, ToolCall};
+use crate::{AgentTool, Skill};
+use llm::{LlmResponse, Message, ToolCall, Usage};
+use std::collections::HashMap;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum AgentMessage {
@@ -40,6 +42,35 @@ impl AgentMessage {
                 tool_call_id,
                 content,
             } => Message::tool_result(content, tool_call_id),
+        }
+    }
+}
+
+pub struct AgentContext {
+    pub system_prompt: Option<String>,
+    pub skills: Vec<Skill>,
+    pub messages: Vec<AgentMessage>,
+    pub usage: Usage,
+    pub tools: Vec<AgentTool>,
+    pub tool_indexes: HashMap<String, usize>,
+}
+
+impl AgentContext {
+    pub fn new(system_prompt: Option<String>, skills: Vec<Skill>, tools: Vec<AgentTool>) -> Self {
+        let mut tool_indexes = HashMap::with_capacity(tools.len());
+        for (index, tool) in tools.iter().enumerate() {
+            tool_indexes
+                .entry(tool.definition.name.clone())
+                .or_insert(index);
+        }
+
+        Self {
+            system_prompt,
+            skills,
+            messages: Vec::new(),
+            usage: Usage::default(),
+            tools,
+            tool_indexes,
         }
     }
 }

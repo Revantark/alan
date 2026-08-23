@@ -1,4 +1,6 @@
-use crate::{AgentError, AgentMessage, AgentTool, Skill, build_system_prompt};
+use crate::{
+    AgentError, AgentMessage, AgentTool, Skill, build_system_prompt, context::AgentContext,
+};
 use futures_util::StreamExt;
 use llm::{
     CompletionInput, LlmEvent, LlmResponse, LlmResponseBuilder, Message, RequestOptions, ToolSpec,
@@ -6,7 +8,6 @@ use llm::{
 };
 use providers::{Model, ModelError};
 use std::{
-    collections::HashMap,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -70,35 +71,6 @@ pub enum AgentEvent {
     Finished {
         usage: Usage,
     },
-}
-
-pub struct AgentContext {
-    pub system_prompt: Option<String>,
-    pub skills: Vec<Skill>,
-    pub messages: Vec<AgentMessage>,
-    pub usage: Usage,
-    tools: Vec<AgentTool>,
-    tool_indexes: HashMap<String, usize>,
-}
-
-impl AgentContext {
-    fn new(system_prompt: Option<String>, skills: Vec<Skill>, tools: Vec<AgentTool>) -> Self {
-        let mut tool_indexes = HashMap::with_capacity(tools.len());
-        for (index, tool) in tools.iter().enumerate() {
-            tool_indexes
-                .entry(tool.definition.name.clone())
-                .or_insert(index);
-        }
-
-        Self {
-            system_prompt,
-            skills,
-            messages: Vec::new(),
-            usage: Usage::default(),
-            tools,
-            tool_indexes,
-        }
-    }
 }
 
 pub struct Agent {
