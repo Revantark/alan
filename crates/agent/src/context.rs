@@ -1,5 +1,6 @@
 use crate::{AgentTool, Skill};
 use llm::{LlmResponse, Message, ToolCall, Usage};
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -10,6 +11,79 @@ pub enum AgentMessage {
         tool_call_id: String,
         content: String,
     },
+}
+
+/// Serde representation of [`AgentMessage`].
+///
+/// Tagged explicitly with `kind` so the on-disk format does not depend on
+/// Rust enum variant names:
+///
+/// ```json
+/// {"kind":"user","content":"hello"}
+/// {"kind":"assistant","response":{...}}
+/// {"kind":"tool_result","tool_call_id":"call-1","content":"..."}
+/// ```
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum SessionMessage {
+    User {
+        content: String,
+    },
+    Assistant {
+        response: LlmResponse,
+    },
+    ToolResult {
+        tool_call_id: String,
+        content: String,
+    },
+}
+
+impl From<&AgentMessage> for SessionMessage {
+    fn from(message: &AgentMessage) -> Self {
+        match message {
+            AgentMessage::User(content) => Self::User {
+                content: content.clone(),
+            },
+            AgentMessage::Assistant(response) => Self::Assistant {
+                response: response.clone(),
+            },
+            AgentMessage::ToolResult {
+                tool_call_id,
+                content,
+            } => Self::ToolResult {
+                tool_call_id: tool_call_id.clone(),
+                content: content.clone(),
+            },
+        }
+    }
+}
+
+impl From<SessionMessage> for AgentMessage {
+    fn from(message: SessionMessage) -> Self {
+        match message {
+            SessionMessage::User { content } => Self::User(content),
+            SessionMessage::Assistant { response } => Self::Assistant(response),
+            SessionMessage::ToolResult {
+                tool_call_id,
+                content,
+            } => Self::ToolResult {
+                tool_call_id,
+                content,
+            },
+        }
+    }
+}
+
+impl Serialize for AgentMessage {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        SessionMessage::from(self).serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for AgentMessage {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        SessionMessage::deserialize(deserializer).map(Self::from)
+    }
 }
 
 impl AgentMessage {
@@ -72,6 +146,19 @@ impl AgentContext {
             tools,
             tool_indexes,
         }
+    }
+
+    /// Hydrate the persistent portions (`messages`, `usage`) of this
+    /// runtime context from a session.
+    ///
+    /// Runtime-only state (tools, system prompt, skills, tool indexes)
+    /// remains untouched; a resumed agent must rebuild it from the current
+    /// application configuration.
+    // Unused until Plan 2 wires session resume into the agent loop.
+    #[allow(dead_code)]
+    pub fn hydrate(&mut self, messages: Vec<AgentMessage>, usage: Usage) {
+        self.messages = messages;
+        self.usage = usage;
     }
 }
 

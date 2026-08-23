@@ -12,6 +12,7 @@ serde = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 tools = { path = "../tools" }
+uuid = { workspace = true }
 
 [dev-dependencies]
 futures-util = { workspace = true }
