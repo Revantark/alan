@@ -1,4 +1,4 @@
-use crate::core::{CompletionState, Controller};
+use crate::core::{CompletionStatus, Controller};
 use crate::views::UiState;
 use crate::views::component::Component;
 use crate::views::theme;
@@ -8,8 +8,10 @@ use ratatui::style::Style;
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Padding, Paragraph};
 
-/// Fixed number of rows in the completion popup.
+/// Fixed height of the completion popup, including its padding.
 const POPUP_ROWS: u16 = 7;
+/// Candidates visible inside that height.
+const VISIBLE_ROWS: usize = 5;
 
 /// Generic list popup rendered above the editor cursor. Currently used for
 /// `@`-path completion; reusable for any short list anchored at the prompt.
@@ -43,23 +45,19 @@ impl Component for PopupList {
         controller: &Controller,
         _state: &mut UiState,
     ) {
-        let Some(completion) = controller.completion().state() else {
-            return;
-        };
-        let CompletionState {
-            items,
-            selected,
-            status,
-        } = completion;
-        if area.is_empty() {
+        let completion = controller.completion();
+        if !completion.is_open() || area.is_empty() {
             return;
         }
-        if !matches!(status, crate::core::CompletionStatus::Ready) {
-            let message = match status {
-                crate::core::CompletionStatus::Loading => "Loading…".to_owned(),
-                crate::core::CompletionStatus::Error(error) => error.clone(),
-                crate::core::CompletionStatus::Ready => String::new(),
-            };
+        let message = match completion.status() {
+            CompletionStatus::Loading => Some("Loading…".to_owned()),
+            CompletionStatus::Error(error) => Some(error),
+            CompletionStatus::Ready if completion.item_count() == 0 => {
+                Some("No matches".to_owned())
+            }
+            CompletionStatus::Ready => None,
+        };
+        if let Some(message) = message {
             frame.render_widget(
                 Paragraph::new(message)
                     .style(Style::default().bg(theme::EDITOR_BG))
@@ -68,46 +66,40 @@ impl Component for PopupList {
             );
             return;
         }
-        if items.is_empty() {
-            frame.render_widget(
-                Paragraph::new("No matches")
-                    .style(Style::default().bg(theme::EDITOR_BG))
-                    .block(Block::default().padding(Padding::new(2, 2, 1, 1))),
-                area,
-            );
-            return;
-        }
 
         frame.render_widget(ratatui::widgets::Clear, area);
+        let selected = completion.selected();
         let start = selected
             .saturating_sub(2)
-            .min(items.len().saturating_sub(5));
-        let end = (start + 5).min(items.len());
+            .min(completion.item_count().saturating_sub(VISIBLE_ROWS));
 
-        let rows = items[start..end]
+        let rows = completion
+            .items(start, VISIBLE_ROWS)
             .iter()
             .enumerate()
-            .map(|(offset, entry)| {
-                let index = start + offset;
-                let (marker, marker_style) = if index == *selected {
+            .map(|(offset, item)| {
+                let (marker, marker_style) = if start + offset == selected {
                     ("› ", Style::default().fg(theme::PROMPT_FG))
                 } else {
                     ("  ", Style::default())
                 };
-                let name = if entry.is_dir {
-                    format!("{}/", entry.path)
-                } else {
-                    entry.path.clone()
-                };
-                let name_style = if entry.is_dir {
+                // Directories carry a trailing `/`.
+                let label_style = if item.display.ends_with('/') {
                     Style::default().fg(ratatui::style::Color::White)
                 } else {
                     Style::default().fg(theme::EDITOR_FG)
                 };
-                Line::from(vec![
+                let mut spans = vec![
                     Span::styled(marker, marker_style),
-                    Span::styled(name, name_style),
-                ])
+                    Span::styled(item.display.clone(), label_style),
+                ];
+                if let Some(description) = &item.description {
+                    spans.push(Span::styled(
+                        format!("  {description}"),
+                        Style::default().fg(theme::MUTED_FG),
+                    ));
+                }
+                Line::from(spans)
             })
             .collect::<Vec<_>>();
         frame.render_widget(
