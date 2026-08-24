@@ -80,7 +80,7 @@ async fn main() -> anyhow::Result<()> {
     let agent = Agent::builder(model)
         .system_prompt(ALAN_SYSTEM_PROMPT)
         .with_tools(default_tools())
-        .build();
+        .build()?;
 
     let mut app = Controller::with_runtime(agent, registry, credential_store);
     event_loop(&mut app).await

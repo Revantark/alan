@@ -137,7 +137,7 @@ impl SessionRecord {
     /// Parse one complete JSONL line. Internally tagged enums reject unknown
     /// `type` values and missing fields, so malformed lines fail loudly
     /// instead of becoming empty values.
-    pub(super) fn parse(line: &str) -> Result<Self, serde_json::Error> {
+    pub fn parse(line: &str) -> Result<Self, serde_json::Error> {
         serde_json::from_str(line)
     }
 }

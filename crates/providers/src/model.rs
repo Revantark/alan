@@ -51,6 +51,10 @@ impl Model {
         &self.info
     }
 
+    pub fn reasoning_effort(&self) -> Option<ReasoningEffort> {
+        self.reasoning_effort
+    }
+
     fn tools<'a>(&'a self, local: &'a [ToolSpec]) -> Vec<ToolSpec> {
         local
             .iter()

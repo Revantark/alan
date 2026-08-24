@@ -236,7 +236,7 @@ mod tests {
             .unwrap()
             .bind("test")
             .unwrap();
-        Controller::new(Agent::builder(model).build())
+        Controller::new(Agent::builder(model).build().unwrap())
     }
 
     #[tokio::test]
@@ -290,7 +290,7 @@ mod tests {
             .unwrap()
             .bind("test")
             .unwrap();
-        let mut controller = Controller::new(Agent::builder(model).build());
+        let mut controller = Controller::new(Agent::builder(model).build().unwrap());
 
         controller.submit("hi".into());
         tokio::time::sleep(Duration::from_millis(50)).await;
