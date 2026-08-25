@@ -73,20 +73,16 @@ impl JsonlStore {
     /// existing file is never touched.
     pub(crate) async fn create(file_path: &Path, first_line: &str) -> Result<(), StoreError> {
         // `create_new` guarantees an existing file is never overwritten.
-        drop(
-            File::create_new(file_path)
-                .await
-                .map_err(|source| {
-                    if source.kind() == ErrorKind::AlreadyExists {
-                        StoreError::AlreadyExists(file_path.to_path_buf())
-                    } else {
-                        StoreError::CreateFile {
-                            path: file_path.to_path_buf(),
-                            source,
-                        }
-                    }
-                })?,
-        );
+        drop(File::create_new(file_path).await.map_err(|source| {
+            if source.kind() == ErrorKind::AlreadyExists {
+                StoreError::AlreadyExists(file_path.to_path_buf())
+            } else {
+                StoreError::CreateFile {
+                    path: file_path.to_path_buf(),
+                    source,
+                }
+            }
+        })?);
         if let Err(error) = set_permissions(file_path, false).await {
             remove_created_file(file_path).await;
             return Err(error);
@@ -127,7 +123,6 @@ impl JsonlStore {
             }
         })
     }
-
 }
 
 fn line_with_newline(line: &str) -> Cow<'_, str> {
@@ -233,16 +228,14 @@ fn write_and_sync(file: &mut std::fs::File, path: &Path, line: &str) -> Result<(
             path: path.to_path_buf(),
             source,
         })?;
-    file.flush()
-        .map_err(|source| StoreError::WriteFile {
-            path: path.to_path_buf(),
-            source,
-        })?;
-    file.sync_data()
-        .map_err(|source| StoreError::WriteFile {
-            path: path.to_path_buf(),
-            source,
-        })
+    file.flush().map_err(|source| StoreError::WriteFile {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    file.sync_data().map_err(|source| StoreError::WriteFile {
+        path: path.to_path_buf(),
+        source,
+    })
 }
 
 #[cfg(test)]
@@ -335,10 +328,7 @@ mod tests {
         let path = file(&root, "k", "f");
 
         JsonlStore::create(&path, "x\n").await.expect("create");
-        let file_mode = std::fs::metadata(&path)
-            .unwrap()
-            .permissions()
-            .mode();
+        let file_mode = std::fs::metadata(&path).unwrap().permissions().mode();
         assert_eq!(file_mode & 0o777, 0o600, "file mode");
         cleanup(&root);
     }
