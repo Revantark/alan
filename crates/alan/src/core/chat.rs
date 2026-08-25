@@ -55,6 +55,58 @@ impl ChatController {
         }
     }
 
+    pub async fn session_id(&self) -> Option<String> {
+        self.agent.session_id().await
+    }
+
+    pub async fn restore_session_history(&mut self) {
+        let messages = self.agent.messages().await;
+        self.usage = self.agent.usage().await;
+        self.entries.clear();
+
+        for message in messages {
+            match message {
+                agent::AgentMessage::User(text) => self.entries.push(Entry::Prompt(text)),
+                agent::AgentMessage::Assistant(response) => {
+                    if let Some(reasoning) = response.reasoning.as_deref()
+                        && !reasoning.is_empty()
+                    {
+                        self.entries.push(Entry::Reasoning(reasoning.to_owned()));
+                    }
+                    for call in response.tool_calls() {
+                        self.entries.push(Entry::ToolCall {
+                            id: call.id.clone(),
+                            name: call.name.clone(),
+                            arguments: call.arguments.clone(),
+                            output: String::new(),
+                            status: ToolStatus::Completed,
+                        });
+                    }
+                    let text = response.text();
+                    if !text.is_empty() {
+                        self.entries.push(Entry::Response(text));
+                    }
+                }
+                agent::AgentMessage::ToolResult {
+                    tool_call_id,
+                    content,
+                } => {
+                    if let Some(Entry::ToolCall { output, .. }) = self
+                        .entries
+                        .iter_mut()
+                        .rev()
+                        .find(|entry| {
+                            matches!(entry, Entry::ToolCall { id, .. } if id == &tool_call_id)
+                        })
+                    {
+                        *output = content;
+                    }
+                }
+            }
+        }
+        self.revision = self.revision.wrapping_add(1);
+    }
+
     pub fn entries(&self) -> &[Entry] {
         &self.entries
     }

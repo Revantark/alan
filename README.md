@@ -12,10 +12,14 @@ Alan is a minimal coding agent written in Rust. It runs in your terminal and use
 - Optional OpenRouter web search and web fetch tools
 - Tool-call execution with configurable round limits
 - Plan mode toggled with `/plan` or `Shift+Tab`
-- Interactive provider login overlay
-- File/folder path completion in the prompt (`@`)
-- Configurable reasoning effort
-- Session history persisted under `~/.alan/sessions`
+- Session history is stored under `$ALAN_HOME/.alan/sessions` (or
+  `$HOME/.alan/sessions` when `ALAN_HOME` is unset). Each working directory
+  gets its own hashed subdirectory, containing append-only JSONL session files.
+  Sessions are created on the first non-empty prompt.
+- To resume a session, set `ALAN_SESSION` to the session ID (the filename
+  without `.jsonl`) and start Alan from the same working directory. For
+  example: `ALAN_SESSION=018f... cargo run -p alan`. The configured model and
+  provider must match the stored session.
 
 ## Requirements
 
@@ -60,7 +64,8 @@ All variables are optional:
 | Variable | Purpose | Default |
 |---|---|---|
 | `ALAN_MODEL` | Model id | `openai/gpt-4o-mini` |
-| `ALAN_HOME` | Alan home directory | `$HOME` |
+| `ALAN_HOME` | Alan home directory (Alan uses `$ALAN_HOME/.alan/`) | `$HOME` |
+| `ALAN_SESSION` | Resume this session ID from the current working directory | unset |
 | `ALAN_REASONING_EFFORT` | `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max` | unset |
 | `ALAN_OPENROUTER_WEB_SEARCH` | Enable web search tool (`1`, `true`, `yes`, `on`) | off |
 | `ALAN_OPENROUTER_WEB_FETCH` | Enable web fetch tool (`1`, `true`, `yes`, `on`) | off |
