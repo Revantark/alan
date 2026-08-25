@@ -14,7 +14,7 @@ use llm::ServerTool;
 use std::io::stdout;
 use std::time::Duration;
 
-use agent::{Agent, default_tools};
+use agent::{Agent, SessionManager, default_tools};
 use futures_util::StreamExt;
 use llm::ReasoningEffort;
 use providers::{
@@ -77,13 +77,33 @@ async fn main() -> anyhow::Result<()> {
         },
     )?;
     let registry = ProviderRegistry::new([Arc::new(provider) as Arc<dyn Provider>]);
-    let agent = Agent::builder(model)
+    let session_manager = Arc::new(SessionManager::new(sessions_path()?));
+    let resumed_session = if let Some(session_id) = configured_session_id()? {
+        let cwd = std::env::current_dir()?;
+        Some(session_manager.get_session(&session_id, &cwd).await?)
+    } else {
+        None
+    };
+
+    let was_resumed = resumed_session.is_some();
+    let mut agent_builder = Agent::builder(model)
         .system_prompt(ALAN_SYSTEM_PROMPT)
         .with_tools(default_tools())
-        .build()?;
+        .session_manager(session_manager);
+    if let Some(session) = resumed_session {
+        agent_builder = agent_builder.resume_session(session);
+    }
+    let agent = agent_builder.build()?;
 
     let mut app = Controller::with_runtime(agent, registry, credential_store);
-    event_loop(&mut app).await
+    if was_resumed {
+        app.restore_session_history().await;
+    }
+    let result = event_loop(&mut app).await;
+    if let Some(session_id) = app.session_id().await {
+        println!("\nSession saved. Resume it with:\n\nALAN_SESSION={session_id} alan");
+    }
+    result
 }
 
 fn enabled_server_tools(provider: &OpenRouterProvider) -> anyhow::Result<Vec<ServerTool>> {
@@ -133,10 +153,29 @@ fn configured_reasoning_effort() -> anyhow::Result<Option<ReasoningEffort>> {
     }
 }
 fn auth_path() -> anyhow::Result<PathBuf> {
+    Ok(alan_data_dir()?.join("auth.json"))
+}
+
+fn sessions_path() -> anyhow::Result<PathBuf> {
+    Ok(alan_data_dir()?.join("sessions"))
+}
+
+fn alan_data_dir() -> anyhow::Result<PathBuf> {
     let home = std::env::var_os("ALAN_HOME")
         .or_else(|| std::env::var_os("HOME"))
         .ok_or_else(|| anyhow::anyhow!("cannot determine Alan home directory"))?;
-    Ok(PathBuf::from(home).join(".alan").join("auth.json"))
+    Ok(PathBuf::from(home).join(".alan"))
+}
+
+fn configured_session_id() -> anyhow::Result<Option<String>> {
+    let Some(id) = std::env::var_os("ALAN_SESSION") else {
+        return Ok(None);
+    };
+    let id = id.to_string_lossy().trim().to_owned();
+    if id.is_empty() {
+        return Err(anyhow::anyhow!("ALAN_SESSION must not be empty"));
+    }
+    Ok(Some(id))
 }
 
 async fn event_loop(app: &mut Controller) -> anyhow::Result<()> {

@@ -14,6 +14,7 @@ thiserror = { workspace = true }
 tokio = { workspace = true }
 tools = { path = "../tools" }
 uuid = { workspace = true }
+fs2 = { workspace = true }
 
 [dev-dependencies]
 futures-util = { workspace = true }

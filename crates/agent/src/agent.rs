@@ -14,7 +14,6 @@ use std::{
         Arc,
         atomic::{AtomicBool, Ordering},
     },
-    time::{SystemTime, UNIX_EPOCH},
 };
 use tokio::sync::{
     Mutex,
@@ -114,9 +113,7 @@ impl Agent {
 
         self.ensure_session(&model).await?;
 
-        context.messages.push(user_msg);
-        self.persist_message(&context.messages.last().unwrap())
-            .await?;
+        self.append_context_message(&mut context, user_msg).await?;
 
         let (_cancellation, mut cancellation_receiver) = watch::channel(false);
         let mut partial = String::new();
@@ -131,8 +128,8 @@ impl Agent {
             .await;
         if result.is_err() && !partial.is_empty() {
             let partial_msg = AgentMessage::Assistant(partial_response(&partial));
-            context.messages.push(partial_msg.clone());
-            self.persist_message(&partial_msg).await?;
+            self.append_context_message(&mut context, partial_msg)
+                .await?;
         }
         result
     }
@@ -158,6 +155,14 @@ impl Agent {
         }
     }
 
+    pub async fn session_id(&self) -> Option<String> {
+        self.active_session
+            .lock()
+            .await
+            .as_ref()
+            .map(|session| session.id.clone())
+    }
+
     pub async fn set_model(&self, model: Model) {
         *self.model.lock().await = model;
     }
@@ -172,6 +177,10 @@ impl Agent {
 
     pub async fn messages(&self) -> Vec<AgentMessage> {
         self.context.lock().await.messages.clone()
+    }
+
+    pub async fn usage(&self) -> Usage {
+        self.context.lock().await.usage.clone()
     }
 
     async fn run_prompt(
@@ -193,9 +202,7 @@ impl Agent {
 
         self.ensure_session(&model).await?;
 
-        context.messages.push(user_msg);
-        self.persist_message(&context.messages.last().unwrap())
-            .await?;
+        self.append_context_message(&mut context, user_msg).await?;
 
         let mut partial = String::new();
         let result = self
@@ -209,8 +216,8 @@ impl Agent {
             .await;
         if result.is_err() && !partial.is_empty() {
             let partial_msg = AgentMessage::Assistant(partial_response(&partial));
-            context.messages.push(partial_msg.clone());
-            self.persist_message(&partial_msg).await?;
+            self.append_context_message(&mut context, partial_msg)
+                .await?;
         }
         result
     }
@@ -245,6 +252,8 @@ impl Agent {
             }
 
             if calls.is_empty() {
+                let msg = AgentMessage::Assistant(response.clone());
+                self.append_context_message(context, msg).await?;
                 if let Some(events) = events {
                     Self::send_event(
                         events,
@@ -255,15 +264,11 @@ impl Agent {
                     )
                     .await?;
                 }
-                let msg = AgentMessage::Assistant(response.clone());
-                context.messages.push(msg.clone());
-                self.persist_message(&msg).await?;
                 return Ok(response);
             }
 
             let assistant_msg = AgentMessage::Assistant(response);
-            context.messages.push(assistant_msg.clone());
-            self.persist_message(&assistant_msg).await?;
+            self.append_context_message(context, assistant_msg).await?;
 
             for call in calls {
                 Self::check_cancelled(cancellation)?;
@@ -296,8 +301,7 @@ impl Agent {
                             tool_call_id: call_id.clone(),
                             content: result.clone(),
                         };
-                        context.messages.push(msg.clone());
-                        self.persist_message(&msg).await?;
+                        self.append_context_message(context, msg).await?;
 
                         if let Some(events) = events {
                             Self::send_event(
@@ -318,8 +322,7 @@ impl Agent {
                             tool_call_id: call_id.clone(),
                             content: error.clone(),
                         };
-                        context.messages.push(msg.clone());
-                        self.persist_message(&msg).await?;
+                        self.append_context_message(context, msg).await?;
 
                         if let Some(events) = events {
                             Self::send_event(
@@ -478,10 +481,22 @@ impl Agent {
         Ok(())
     }
 
+    async fn append_context_message(
+        &self,
+        context: &mut AgentContext,
+        message: AgentMessage,
+    ) -> Result<(), AgentError> {
+        self.persist_message(&message).await?;
+        context.messages.push(message);
+        Ok(())
+    }
+
     async fn persist_message(&self, message: &AgentMessage) -> Result<(), AgentError> {
         let active_session = self.active_session.lock().await;
         if let (Some(manager), Some(session)) = (&self.session_manager, &*active_session) {
-            manager.append_message(session, message).await?;
+            manager
+                .append_message(&session.id, &session.pwd, message)
+                .await?;
         }
         Ok(())
     }
@@ -489,7 +504,9 @@ impl Agent {
     async fn persist_usage(&self, usage: &Usage) -> Result<(), AgentError> {
         let active_session = self.active_session.lock().await;
         if let (Some(manager), Some(session)) = (&self.session_manager, &*active_session) {
-            manager.save_usage(session, usage).await?;
+            manager
+                .append_usage(&session.id, &session.pwd, usage)
+                .await?;
         }
         Ok(())
     }
@@ -567,17 +584,7 @@ impl AgentBuilder {
     }
 
     pub fn build(self) -> Result<Agent, AgentError> {
-        let name = &self.model.info().name;
-        let model_name = name
-            .split_once('/')
-            .map_or_else(|| name.clone(), |(_, model)| model.to_owned());
-        let timestamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("system clock is before Unix epoch")
-            .as_nanos()
-            .to_string();
-
-        let mut session_id = format!("{}_{}", model_name, timestamp);
+        let mut session_id = uuid::Uuid::new_v4().to_string();
         let mut messages = Vec::new();
         let mut usage = Usage::default();
         let mut active_session = None;
@@ -621,7 +628,7 @@ impl AgentBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::session::{Session, SessionManager, SessionRecord};
+    use crate::session::{SessionManager, SessionRecord};
     use async_trait::async_trait;
     use llm::{ContentBlock, LlmApi, LlmError, LlmEvent, StopReason};
     use providers::{
@@ -934,11 +941,6 @@ mod tests {
                     reasoning: None,
                     reasoning_details: Vec::new(),
                 };
-                let tool_calls = vec![llm::ToolCall {
-                    id: "call-1".into(),
-                    name: "bash".into(),
-                    arguments: serde_json::json!({"command": "echo hi"}).to_string(),
-                }];
                 Ok(Box::pin(futures_util::stream::iter([
                     Ok(LlmEvent::ToolCallDelta {
                         index: 0,
@@ -985,7 +987,7 @@ mod tests {
         let root = std::env::temp_dir().join(format!("alan-plan3-build-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&root).unwrap();
         let manager = Arc::new(SessionManager::new(&root));
-        let agent = Agent::builder(model())
+        let _agent = Agent::builder(model())
             .session_manager(manager)
             .build()
             .unwrap();
@@ -1202,7 +1204,7 @@ mod tests {
                 panic!("expected session header");
             };
             manager
-                .load(&std::env::current_dir().unwrap(), &id)
+                .get_session(&id, &std::env::current_dir().unwrap())
                 .await
                 .expect("load session for usage check")
         };
@@ -1225,11 +1227,15 @@ mod tests {
             .await
             .expect("create session");
         manager
-            .append_message(&session, &AgentMessage::user("restored message"))
+            .append_message(
+                &session.id,
+                &session.pwd,
+                &AgentMessage::user("restored message"),
+            )
             .await
             .expect("append message");
         let session = manager
-            .load(&root, &session.id)
+            .get_session(&session.id, &root)
             .await
             .expect("load session with restored message");
 

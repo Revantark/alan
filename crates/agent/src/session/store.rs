@@ -1,7 +1,8 @@
+use std::borrow::Cow;
+use std::io::{ErrorKind, Write};
 use std::path::{Path, PathBuf};
 use thiserror::Error;
-use tokio::fs::{self, File, OpenOptions};
-use tokio::io::AsyncWriteExt;
+use tokio::fs::{self, File};
 
 /// Errors from the raw JSONL store.
 #[derive(Debug, Error)]
@@ -38,156 +39,135 @@ pub enum StoreError {
         #[source]
         source: std::io::Error,
     },
+    #[error("failed to read directory {}: {source}", path.display())]
+    ReadDir {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("failed to set permissions on {}: {source}", path.display())]
+    SetPermissions {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
     #[error("file not found: {0}")]
     NotFound(PathBuf),
     #[error("file is locked by another writer: {0}")]
     Locked(PathBuf),
 }
 
-/// Append-only JSONL store over a two-level layout:
-/// `<root>/<key>/<name>.jsonl`.
-pub(crate) struct JsonlStore {
-    root: PathBuf,
-}
+/// Stateless append-only JSONL store.
+///
+/// Each method operates on a single file identified by an explicit path.
+/// The struct carries no state — it exists to group the three core
+/// operations and keep them behind a single, testable type.
+pub(crate) struct JsonlStore;
 
 impl JsonlStore {
-    pub(crate) fn new(root: impl Into<PathBuf>) -> Self {
-        Self { root: root.into() }
+    /// Exclusively create the file at `file_path` and write `first_line`
+    /// as its first record.
+    ///
+    /// The parent directory must already exist. Returns
+    /// [`StoreError::AlreadyExists`] if the file already exists; the
+    /// existing file is never touched.
+    pub(crate) async fn create(file_path: &Path, first_line: &str) -> Result<(), StoreError> {
+        // `create_new` guarantees an existing file is never overwritten.
+        drop(
+            File::create_new(file_path)
+                .await
+                .map_err(|source| {
+                    if source.kind() == ErrorKind::AlreadyExists {
+                        StoreError::AlreadyExists(file_path.to_path_buf())
+                    } else {
+                        StoreError::CreateFile {
+                            path: file_path.to_path_buf(),
+                            source,
+                        }
+                    }
+                })?,
+        );
+        if let Err(error) = set_permissions(file_path, false).await {
+            remove_created_file(file_path).await;
+            return Err(error);
+        }
+        if let Err(error) = Self::append(file_path, first_line).await {
+            remove_created_file(file_path).await;
+            return Err(error);
+        }
+        Ok(())
     }
 
-    /// Exclusively create `<root>/<key>/<name>.jsonl`, creating the key
-    /// directory if needed, and write `first_line` as its first record.
+    /// Append one newline-terminated record under an exclusive advisory lock.
     ///
-    /// Returns [`StoreError::AlreadyExists`] if the file already exists; the
-    /// existing file is never touched.
-    pub(crate) async fn create_file(
-        &self,
-        key: &str,
-        name: &str,
-        first_line: &str,
-    ) -> Result<(), StoreError> {
-        let dir = self.key_dir(key);
-        fs::create_dir_all(&dir)
+    /// The lock is held on the session file itself. This avoids stale sidecar
+    /// lock files and lets the operating system release the lock if a writer
+    /// exits unexpectedly.
+    pub(crate) async fn append(file_path: &Path, line: &str) -> Result<(), StoreError> {
+        let path = file_path.to_path_buf();
+        let line = line.to_owned();
+        tokio::task::spawn_blocking(move || append_locked(&path, &line))
             .await
-            .map_err(|source| StoreError::CreateDir {
-                dir: dir.clone(),
-                source,
-            })?;
-        set_permissions(&dir, true).await;
+            .map_err(|source| StoreError::OpenFile {
+                path: file_path.to_path_buf(),
+                source: std::io::Error::other(source),
+            })?
+    }
 
-        let path = self.file_path(key, name);
-        // `create_new` guarantees an existing file is never overwritten.
-        let mut file = File::create_new(&path).await.map_err(|source| {
-            if source.kind() == std::io::ErrorKind::AlreadyExists {
-                StoreError::AlreadyExists(path.clone())
+    /// Read the whole file at `file_path` as text.
+    pub(crate) async fn read(file_path: &Path) -> Result<String, StoreError> {
+        fs::read_to_string(file_path).await.map_err(|source| {
+            if source.kind() == ErrorKind::NotFound {
+                StoreError::NotFound(file_path.to_path_buf())
             } else {
-                StoreError::CreateFile {
-                    path: path.clone(),
+                StoreError::ReadFile {
+                    path: file_path.to_path_buf(),
                     source,
                 }
             }
-        })?;
-        set_permissions(&path, false).await;
-
-        Self::write_line(&path, &mut file, first_line).await
-    }
-
-    /// Append one newline-terminated record under an exclusive sidecar lock.
-    pub(crate) async fn append(&self, key: &str, name: &str, line: &str) -> Result<(), StoreError> {
-        let path = self.file_path(key, name);
-        if !path.is_file() {
-            return Err(StoreError::NotFound(path));
-        }
-
-        let _lock = FileLock::acquire(self.lock_path(key, name)).await?;
-
-        let mut file = OpenOptions::new()
-            .append(true)
-            .open(&path)
-            .await
-            .map_err(|source| StoreError::OpenFile {
-                path: path.clone(),
-                source,
-            })?;
-        Self::write_line(&path, &mut file, line).await
-    }
-
-    /// Read the whole file as text.
-    pub(crate) async fn read(&self, key: &str, name: &str) -> Result<String, StoreError> {
-        let path = self.file_path(key, name);
-        if !path.is_file() {
-            return Err(StoreError::NotFound(path));
-        }
-        fs::read_to_string(&path)
-            .await
-            .map_err(|source| StoreError::ReadFile { path, source })
-    }
-
-    /// Paths of every `.jsonl` file stored under `key`, unsorted.
-    ///
-    /// Missing directories yield an empty list: no files yet.
-    pub(crate) async fn files(&self, key: &str) -> Result<Vec<PathBuf>, StoreError> {
-        let dir = self.key_dir(key);
-        let read_dir = match fs::read_dir(&dir).await {
-            Ok(entries) => entries,
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-            Err(source) => return Err(StoreError::ReadFile { path: dir, source }),
-        };
-
-        let mut paths = Vec::new();
-        let mut entries = read_dir;
-        loop {
-            match entries.next_entry().await {
-                Ok(Some(entry)) => {
-                    let path = entry.path();
-                    if path.extension().and_then(|ext| ext.to_str()) == Some(JSONL_EXTENSION) {
-                        paths.push(path);
-                    }
-                }
-                Ok(None) => break,
-                Err(source) => {
-                    return Err(StoreError::ReadFile {
-                        path: dir.clone(),
-                        source,
-                    });
-                }
-            }
-        }
-        Ok(paths)
-    }
-
-    /// Directory holding all files for `key`.
-    pub(crate) fn key_dir(&self, key: &str) -> PathBuf {
-        self.root.join(key)
-    }
-
-    /// Full path of one stored file.
-    pub(crate) fn file_path(&self, key: &str, name: &str) -> PathBuf {
-        self.key_dir(key).join(format!("{name}.{JSONL_EXTENSION}"))
-    }
-
-    /// Sidecar lock path used by [`JsonlStore::append`].
-    pub(crate) fn lock_path(&self, key: &str, name: &str) -> PathBuf {
-        self.key_dir(key)
-            .join(format!("{name}.{JSONL_EXTENSION}{LOCK_SUFFIX}"))
-    }
-
-    async fn write_line(path: &Path, file: &mut File, line: &str) -> Result<(), StoreError> {
-        file.write_all(line.as_bytes())
-            .await
-            .map_err(|source| StoreError::WriteFile {
-                path: path.to_path_buf(),
-                source,
-            })?;
-        file.flush().await.map_err(|source| StoreError::WriteFile {
-            path: path.to_path_buf(),
-            source,
         })
+    }
+
+}
+
+fn line_with_newline(line: &str) -> Cow<'_, str> {
+    if line.ends_with('\n') {
+        Cow::Borrowed(line)
+    } else {
+        Cow::Owned(format!("{line}\n"))
     }
 }
 
+async fn remove_created_file(path: &Path) {
+    let _ = fs::remove_file(path).await;
+}
+
 pub(crate) const JSONL_EXTENSION: &str = "jsonl";
-const LOCK_SUFFIX: &str = ".lock";
+
+/// Set restrictive Unix permissions on `path`.
+///
+/// Directories get `0o700`, files get `0o600`. On non-Unix platforms this is
+/// a no-op.
+pub(crate) async fn set_permissions(path: &Path, is_dir: bool) -> Result<(), StoreError> {
+    #[cfg(unix)]
+    {
+        use std::fs::Permissions;
+        use std::os::unix::fs::PermissionsExt;
+
+        let mode = if is_dir { 0o700 } else { 0o600 };
+        fs::set_permissions(path, Permissions::from_mode(mode))
+            .await
+            .map_err(|source| StoreError::SetPermissions {
+                path: path.to_path_buf(),
+                source,
+            })
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (path, is_dir);
+        Ok(())
+    }
+}
 
 /// Yield `(line, is_complete)` pairs from raw file contents.
 ///
@@ -202,7 +182,6 @@ pub(crate) fn split_complete_lines(content: &str) -> impl Iterator<Item = (&str,
             Some(body) => (body, None),
             None => match content.rsplit_once('\n') {
                 Some((body, tail)) => (body, Some(tail)),
-                // No newline at all: single truncated line.
                 None => ("", Some(content)),
             },
         }
@@ -213,42 +192,57 @@ pub(crate) fn split_complete_lines(content: &str) -> impl Iterator<Item = (&str,
         .chain(truncated_tail.map(|tail| (tail, false)))
 }
 
-/// Exclusive, self-removing sidecar lock guard around appends.
-struct FileLock {
-    path: PathBuf,
-}
-
-impl FileLock {
-    async fn acquire(path: PathBuf) -> Result<Self, StoreError> {
-        File::create_new(&path).await.map_err(|source| {
-            if source.kind() == std::io::ErrorKind::AlreadyExists {
-                StoreError::Locked(path.clone())
+fn append_locked(path: &Path, line: &str) -> Result<(), StoreError> {
+    let mut file = std::fs::OpenOptions::new()
+        .read(true)
+        .append(true)
+        .open(path)
+        .map_err(|source| {
+            if source.kind() == ErrorKind::NotFound {
+                StoreError::NotFound(path.to_path_buf())
             } else {
-                StoreError::CreateFile {
-                    path: path.clone(),
+                StoreError::OpenFile {
+                    path: path.to_path_buf(),
                     source,
                 }
             }
         })?;
-        Ok(Self { path })
-    }
+
+    fs2::FileExt::try_lock_exclusive(&file).map_err(|source| {
+        if source.kind() == ErrorKind::WouldBlock
+            || source.raw_os_error() == fs2::lock_contended_error().raw_os_error()
+        {
+            StoreError::Locked(path.to_path_buf())
+        } else {
+            StoreError::OpenFile {
+                path: path.to_path_buf(),
+                source,
+            }
+        }
+    })?;
+
+    let result = write_and_sync(&mut file, path, line);
+    let _ = fs2::FileExt::unlock(&file);
+    result
 }
 
-impl Drop for FileLock {
-    fn drop(&mut self) {
-        // Use blocking remove_file in Drop; this is fine because Drop is
-        // synchronous and file removal is a fast operation.
-        let _ = std::fs::remove_file(&self.path);
-    }
-}
-
-#[cfg(unix)]
-async fn set_permissions(path: &Path, is_dir: bool) {
-    use std::fs::Permissions;
-    use std::os::unix::fs::PermissionsExt;
-
-    let mode = if is_dir { 0o700 } else { 0o600 };
-    let _ = fs::set_permissions(path, Permissions::from_mode(mode)).await;
+fn write_and_sync(file: &mut std::fs::File, path: &Path, line: &str) -> Result<(), StoreError> {
+    let line = line_with_newline(line);
+    file.write_all(line.as_bytes())
+        .map_err(|source| StoreError::WriteFile {
+            path: path.to_path_buf(),
+            source,
+        })?;
+    file.flush()
+        .map_err(|source| StoreError::WriteFile {
+            path: path.to_path_buf(),
+            source,
+        })?;
+    file.sync_data()
+        .map_err(|source| StoreError::WriteFile {
+            path: path.to_path_buf(),
+            source,
+        })
 }
 
 #[cfg(test)]
@@ -265,33 +259,26 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
-    #[tokio::test]
-    async fn constructing_store_creates_nothing() {
-        let root =
-            std::env::temp_dir().join(format!("alan-store-construct-{}", uuid::Uuid::new_v4()));
-        let _store = JsonlStore::new(&root);
-        assert!(!root.exists(), "store construction must not create files");
+    fn file(root: &Path, key: &str, name: &str) -> PathBuf {
+        let dir = root.join(key);
+        std::fs::create_dir_all(&dir).expect("create key dir");
+        dir.join(format!("{name}.{JSONL_EXTENSION}"))
     }
 
     #[tokio::test]
-    async fn create_file_writes_first_line_and_refuses_overwrite() {
+    async fn create_writes_first_line_and_refuses_overwrite() {
         let root = temp_root("create");
-        let store = JsonlStore::new(&root);
+        let path = file(&root, "key-a", "one");
 
-        store
-            .create_file("key-a", "one", "{\"first\":true}\n")
+        JsonlStore::create(&path, "{\"first\":true}\n")
             .await
             .expect("create");
-
-        let path = store.file_path("key-a", "one");
         assert_eq!(
             std::fs::read_to_string(&path).unwrap(),
             "{\"first\":true}\n"
         );
 
-        // Exclusive creation refuses to truncate or touch the existing file.
-        let err = store
-            .create_file("key-a", "one", "{\"second\":true}\n")
+        let err = JsonlStore::create(&path, "{\"second\":true}\n")
             .await
             .expect_err("second create refused");
         assert!(matches!(err, StoreError::AlreadyExists(_)));
@@ -303,28 +290,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn create_file_creates_key_directory() {
-        let root = temp_root("mkdir");
-        let store = JsonlStore::new(&root);
-
-        store
-            .create_file("key-x", "f", "x\n")
-            .await
-            .expect("create");
-        assert!(store.key_dir("key-x").is_dir());
-        cleanup(&root);
-    }
-
-    #[tokio::test]
     async fn append_produces_newline_terminated_records_in_order() {
         let root = temp_root("append");
-        let store = JsonlStore::new(&root);
-        store.create_file("k", "f", "a\n").await.expect("create");
+        let path = file(&root, "k", "f");
 
-        store.append("k", "f", "b\n").await.expect("append b");
-        store.append("k", "f", "c\n").await.expect("append c");
-
-        assert_eq!(store.read("k", "f").await.unwrap(), "a\nb\nc\n");
+        JsonlStore::create(&path, "a\n").await.expect("create");
+        JsonlStore::append(&path, "b\n").await.expect("append b");
+        JsonlStore::append(&path, "c\n").await.expect("append c");
+        assert_eq!(JsonlStore::read(&path).await.unwrap(), "a\nb\nc\n");
         cleanup(&root);
     }
 
@@ -332,13 +305,10 @@ mod tests {
     fn split_lines_flags_truncated_tail_only() {
         let complete: Vec<_> = split_complete_lines("a\nb\n").collect();
         assert_eq!(complete, vec![("a", true), ("b", true)]);
-
         let truncated: Vec<_> = split_complete_lines("a\nb").collect();
         assert_eq!(truncated, vec![("a", true), ("b", false)]);
-
         let none: Vec<_> = split_complete_lines("").collect();
         assert!(none.is_empty());
-
         let only_truncated: Vec<_> = split_complete_lines("abc").collect();
         assert_eq!(only_truncated, vec![("abc", false)]);
     }
@@ -346,95 +316,57 @@ mod tests {
     #[tokio::test]
     async fn read_missing_and_append_missing_are_not_found() {
         let root = temp_root("missing");
-        let store = JsonlStore::new(&root);
+        let path = file(&root, "nope", "f");
 
-        let err = store.read("nope", "f").await.expect_err("read missing");
+        let err = JsonlStore::read(&path).await.expect_err("read missing");
         assert!(matches!(err, StoreError::NotFound(_)));
-
-        let err = store
-            .append("nope", "f", "x\n")
+        let err = JsonlStore::append(&path, "x\n")
             .await
             .expect_err("append missing");
         assert!(matches!(err, StoreError::NotFound(_)));
         cleanup(&root);
     }
 
-    #[tokio::test]
-    async fn files_lists_only_jsonl_entries() {
-        let root = temp_root("files");
-        let store = JsonlStore::new(&root);
-        store
-            .create_file("k", "one", "1\n")
-            .await
-            .expect("create one");
-        store
-            .create_file("k", "two", "2\n")
-            .await
-            .expect("create two");
-
-        let mut names: Vec<_> = store
-            .files("k")
-            .await
-            .expect("files")
-            .iter()
-            .map(|path| path.file_name().unwrap().to_string_lossy().into_owned())
-            .collect();
-        names.sort();
-        assert_eq!(names, vec!["one.jsonl", "two.jsonl"]);
-
-        // Lock sidecars are not listed, and unknown keys list empty.
-        tokio::fs::write(store.lock_path("k", "one"), "")
-            .await
-            .unwrap();
-        assert_eq!(store.files("k").await.unwrap().len(), 2);
-        assert!(store.files("absent").await.unwrap().is_empty());
-        cleanup(&root);
-    }
-
     #[cfg(unix)]
     #[tokio::test]
-    async fn unix_permissions_are_restrictive() {
+    async fn unix_file_permissions_are_restrictive() {
         use std::os::unix::fs::PermissionsExt;
-
         let root = temp_root("perms");
-        let store = JsonlStore::new(&root);
-        store.create_file("k", "f", "x\n").await.expect("create");
+        let path = file(&root, "k", "f");
 
-        let dir_mode = std::fs::metadata(store.key_dir("k"))
+        JsonlStore::create(&path, "x\n").await.expect("create");
+        let file_mode = std::fs::metadata(&path)
             .unwrap()
             .permissions()
             .mode();
-        let file_mode = std::fs::metadata(store.file_path("k", "f"))
-            .unwrap()
-            .permissions()
-            .mode();
-        assert_eq!(dir_mode & 0o777, 0o700, "directory mode");
         assert_eq!(file_mode & 0o777, 0o600, "file mode");
         cleanup(&root);
     }
 
     #[tokio::test]
-    async fn locked_while_sidecar_lock_held() {
+    async fn locked_while_session_file_is_held() {
         let root = temp_root("locked");
-        let store = JsonlStore::new(&root);
-        store.create_file("k", "f", "x\n").await.expect("create");
+        let path = file(&root, "k", "f");
 
-        let lock = FileLock::acquire(store.lock_path("k", "f"))
-            .await
-            .expect("acquire lock");
-        let err = store
-            .append("k", "f", "y\n")
+        JsonlStore::create(&path, "x\n").await.expect("create");
+
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .expect("open session");
+        fs2::FileExt::try_lock_exclusive(&file).expect("acquire lock");
+        let err = JsonlStore::append(&path, "y\n")
             .await
             .expect_err("append blocked");
         assert!(matches!(err, StoreError::Locked(_)));
 
-        drop(lock); // Lock removed on drop.
-        store
-            .append("k", "f", "y\n")
+        fs2::FileExt::unlock(&file).expect("unlock session");
+        drop(file);
+        JsonlStore::append(&path, "y\n")
             .await
             .expect("append after unlock");
-        assert_eq!(store.read("k", "f").await.unwrap(), "x\ny\n");
-        assert!(!store.lock_path("k", "f").exists(), "lock removed on drop");
+        assert_eq!(JsonlStore::read(&path).await.unwrap(), "x\ny\n");
         cleanup(&root);
     }
 }

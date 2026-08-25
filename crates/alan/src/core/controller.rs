@@ -90,6 +90,14 @@ impl Controller {
         self.chat.usage()
     }
 
+    pub async fn restore_session_history(&mut self) {
+        self.chat.restore_session_history().await;
+    }
+
+    pub async fn session_id(&self) -> Option<String> {
+        self.chat.session_id().await
+    }
+
     pub fn login_state(&self) -> &LoginState {
         self.login.state()
     }

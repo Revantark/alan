@@ -35,6 +35,7 @@ impl Session {
         model: impl Into<String>,
         thinking_level: Option<ReasoningEffort>,
     ) -> Self {
+        let now = now_ms();
         Self {
             version: SESSION_SCHEMA_VERSION,
             id: uuid::Uuid::new_v4().to_string(),
@@ -44,8 +45,8 @@ impl Session {
             thinking_level,
             messages: Vec::new(),
             usage: Usage::default(),
-            created_at_ms: now_ms(),
-            updated_at_ms: now_ms(),
+            created_at_ms: now,
+            updated_at_ms: now,
         }
     }
 
@@ -65,27 +66,14 @@ impl Session {
 
     /// Apply one replayed record to this in-memory session.
     pub fn record(&mut self, record: SessionRecord) {
+        let timestamp_ms = record.timestamp_ms();
         match record {
             SessionRecord::Session { .. } => {}
             SessionRecord::Message { message, .. } => self.messages.push(message),
             SessionRecord::Usage { usage, .. } => self.usage = usage,
         }
-        self.updated_at_ms = self.updated_at_ms.max(now_ms());
+        self.updated_at_ms = self.updated_at_ms.max(timestamp_ms);
     }
-}
-
-/// Lightweight session description built from the header record and replayed
-/// usage snapshots; message bodies are not loaded.
-#[derive(Debug, Clone, PartialEq)]
-pub struct SessionSummary {
-    pub id: String,
-    pub pwd: PathBuf,
-    pub provider: String,
-    pub model: String,
-    pub thinking_level: Option<ReasoningEffort>,
-    pub created_at_ms: u64,
-    pub updated_at_ms: u64,
-    pub usage: Usage,
 }
 
 /// One JSONL record in a session file.

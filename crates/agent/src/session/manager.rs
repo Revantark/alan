@@ -1,29 +1,32 @@
 use super::error::SessionError;
-use super::record::{SESSION_SCHEMA_VERSION, Session, SessionRecord, SessionSummary, now_ms};
+use super::record::{SESSION_SCHEMA_VERSION, Session, SessionRecord, now_ms};
 use super::store::StoreError;
-use super::store::{JsonlStore, split_complete_lines};
+use super::store::{JSONL_EXTENSION, JsonlStore, set_permissions, split_complete_lines};
 use crate::context::AgentMessage;
 use crate::session::dir::pwd_key;
 use llm::{ReasoningEffort, Usage};
 use std::path::{Path, PathBuf};
 
-/// Normalize a pwd, mapping I/O failure into the store error shape.
 fn normalize(pwd: PathBuf) -> Result<PathBuf, SessionError> {
     let dir = pwd.clone();
     super::dir::normalize_pwd(pwd)
         .map_err(|source| SessionError::Store(StoreError::CreateDir { dir, source }))
 }
 
-/// Filesystem-backed session store over [`JsonlStore`].
+/// Filesystem-backed, append-only sessions.
 pub struct SessionManager {
-    store: JsonlStore,
+    root: PathBuf,
 }
 
 impl SessionManager {
     pub fn new(root: impl Into<PathBuf>) -> Self {
-        Self {
-            store: JsonlStore::new(root),
-        }
+        Self { root: root.into() }
+    }
+
+    fn file_path(&self, key: &str, name: &str) -> PathBuf {
+        self.root
+            .join(key)
+            .join(format!("{name}.{JSONL_EXTENSION}"))
     }
 
     /// Create a new session and write its header record immediately.
@@ -40,56 +43,72 @@ impl SessionManager {
         let pwd = normalize(pwd.into())?;
         let key = pwd_key(&pwd);
         let session = Session::new(pwd, provider, model, thinking_level);
+        validate_session_id(&session.id)?;
+        let path = self.file_path(&key, &session.id);
+        // `file_path` always builds `root/key/name.jsonl`, so parent is
+        // the key directory.
+        let dir = match path.parent() {
+            Some(dir) => dir.to_path_buf(),
+            None => unreachable!("file_path always builds root/key/name.jsonl"),
+        };
 
-        // Serialize fully before writing; exclusive creation refuses to
-        // overwrite an existing session with the same id.
+        set_permissions(&self.root, true).await?;
+        tokio::fs::create_dir_all(&dir).await.map_err(|source| {
+            SessionError::Store(StoreError::CreateDir {
+                dir: dir.clone(),
+                source,
+            })
+        })?;
+        set_permissions(&dir, true).await?;
+
         let header =
             session
                 .header_record()
                 .to_jsonl()
                 .map_err(|source| SessionError::Serialize {
-                    path: self.store.file_path(&key, &session.id),
+                    path: path.clone(),
                     source,
                 })?;
-        self.store.create_file(&key, &session.id, &header).await?;
+        JsonlStore::create(&path, &header).await?;
 
         Ok(session)
     }
 
-    /// Append exactly one message record to the session file.
     pub async fn append_message(
         &self,
-        session: &Session,
+        session_id: &str,
+        pwd: &Path,
         message: &AgentMessage,
     ) -> Result<(), SessionError> {
         let record = SessionRecord::Message {
             message: message.clone(),
             timestamp_ms: now_ms(),
         };
-        self.append_record(session, &record).await
+        self.append_record(session_id, pwd, &record).await
     }
 
-    /// Append an aggregate usage snapshot. Loading replaces (never sums)
-    /// `Session.usage` with the newest snapshot.
-    pub async fn save_usage(&self, session: &Session, usage: &Usage) -> Result<(), SessionError> {
+    pub async fn append_usage(
+        &self,
+        session_id: &str,
+        pwd: &Path,
+        usage: &Usage,
+    ) -> Result<(), SessionError> {
         let record = SessionRecord::Usage {
             usage: usage.clone(),
             timestamp_ms: now_ms(),
         };
-        self.append_record(session, &record).await
+        self.append_record(session_id, pwd, &record).await
     }
 
-    /// Reconstruct a complete session by replaying its records.
-    pub async fn load(&self, pwd: &Path, id: &str) -> Result<Session, SessionError> {
-        validate_session_id(id)?;
+    pub async fn get_session(&self, session_id: &str, pwd: &Path) -> Result<Session, SessionError> {
+        validate_session_id(session_id)?;
         let normalized = normalize(pwd.to_path_buf())?;
-        let key = pwd_key(&normalized);
-        let content = self.store.read(&key, id).await?;
+        let path = self.file_path(&pwd_key(&normalized), session_id);
+        let content = JsonlStore::read(&path).await?;
 
         let mut lines = split_complete_lines(&content);
-        let path = self.store.file_path(&key, id);
 
-        let header_line =
+        let first_line =
             lines
                 .next()
                 .map(|(line, _)| line)
@@ -97,64 +116,14 @@ impl SessionManager {
                     path: path.clone(),
                     reason: "file is empty".into(),
                 })?;
-        let record =
-            SessionRecord::parse(header_line).map_err(|err| SessionError::InvalidHeader {
-                path: path.clone(),
-                reason: err.to_string(),
-            })?;
-        let SessionRecord::Session {
-            id: header_id,
-            version,
-            pwd: header_pwd,
-            provider,
-            model,
-            thinking_level,
-            created_at_ms,
-            updated_at_ms,
-        } = record
-        else {
-            return Err(SessionError::InvalidHeader {
-                path: path.clone(),
-                reason: "first record is not a session header".into(),
-            });
-        };
+        let mut session = parse_header(first_line, &path, session_id, &normalized)?;
 
-        if version > SESSION_SCHEMA_VERSION {
-            return Err(SessionError::UnsupportedVersion {
-                version,
-                supported: SESSION_SCHEMA_VERSION,
-                path: path.clone(),
-            });
-        }
-        if header_id != id {
-            return Err(SessionError::InvalidHeader {
-                path: path.clone(),
-                reason: format!("header id {header_id:?} does not match requested id {id:?}"),
-            });
-        }
-        if normalize(header_pwd.clone())? != normalized {
-            return Err(SessionError::InvalidHeader {
-                path: path.clone(),
-                reason: format!(
-                    "header pwd {:?} does not match requested pwd {:?}",
-                    header_pwd.display(),
-                    normalized.display()
-                ),
-            });
-        }
-
-        let mut session = Session {
-            id: header_id,
-            version,
-            pwd: header_pwd,
-            provider,
-            model,
-            thinking_level,
-            messages: Vec::new(),
-            usage: Usage::default(),
-            created_at_ms,
-            updated_at_ms: updated_at_ms.max(created_at_ms),
-        };
+        let capacity = content
+            .bytes()
+            .filter(|b| *b == b'\n')
+            .count()
+            .saturating_sub(1);
+        session.messages.reserve(capacity);
 
         for (line, complete) in lines {
             if !complete {
@@ -165,125 +134,34 @@ impl SessionManager {
                     path: path.clone(),
                     reason: err.to_string(),
                 })?;
-            let timestamp_ms = record.timestamp_ms();
-            match record {
-                SessionRecord::Session { .. } => {
-                    return Err(SessionError::MalformedRecord {
-                        path: path.clone(),
-                        reason: "unexpected session header inside file".into(),
-                    });
-                }
-                SessionRecord::Message { message, .. } => session.messages.push(message),
-                SessionRecord::Usage { usage, .. } => session.usage = usage,
+            if matches!(&record, SessionRecord::Session { .. }) {
+                return Err(SessionError::MalformedRecord {
+                    path: path.clone(),
+                    reason: "unexpected session header inside file".into(),
+                });
             }
-            session.updated_at_ms = session.updated_at_ms.max(timestamp_ms);
+            session.record(record);
         }
 
         Ok(session)
     }
 
-    /// Summaries for every session recorded under `pwd`, newest first.
-    ///
-    /// Only headers and usage snapshots are read; message bodies are skipped.
-    /// Unreadable or corrupt files are skipped rather than failing the whole
-    /// listing.
-    pub async fn list(&self, pwd: &Path) -> Result<Vec<SessionSummary>, SessionError> {
-        let normalized = normalize(pwd.to_path_buf())?;
-        let key = pwd_key(&normalized);
-
-        let files = self.store.files(&key).await?;
-        let mut summaries: Vec<SessionSummary> = Vec::with_capacity(files.len());
-        for path in files {
-            if let Ok(summary) = self.summarize(&path).await {
-                summaries.push(summary);
-            }
-        }
-
-        summaries.sort_by_key(|summary| std::cmp::Reverse(summary.updated_at_ms));
-        Ok(summaries)
-    }
-
-    async fn summarize(&self, path: &Path) -> Result<SessionSummary, SessionError> {
-        let content = tokio::fs::read_to_string(path).await.map_err(|source| {
-            SessionError::Store(StoreError::ReadFile {
-                path: path.to_path_buf(),
-                source,
-            })
-        })?;
-        let mut lines = split_complete_lines(&content);
-
-        let (header_line, _) = lines.next().ok_or_else(|| SessionError::InvalidHeader {
-            path: path.to_path_buf(),
-            reason: "file is empty".into(),
-        })?;
-        let record =
-            SessionRecord::parse(header_line).map_err(|err| SessionError::InvalidHeader {
-                path: path.to_path_buf(),
-                reason: err.to_string(),
-            })?;
-        let SessionRecord::Session {
-            id,
-            version,
-            pwd,
-            provider,
-            model,
-            thinking_level,
-            created_at_ms,
-            updated_at_ms,
-        } = record
-        else {
-            return Err(SessionError::InvalidHeader {
-                path: path.to_path_buf(),
-                reason: "first record is not a session header".into(),
-            });
-        };
-        if version > SESSION_SCHEMA_VERSION {
-            return Err(SessionError::UnsupportedVersion {
-                version,
-                supported: SESSION_SCHEMA_VERSION,
-                path: path.to_path_buf(),
-            });
-        }
-
-        let mut latest_usage = Usage::default();
-        let mut max_updated_at_ms = updated_at_ms.max(created_at_ms);
-        for (line, complete) in lines {
-            if !complete {
-                continue;
-            }
-            if let Ok(record) = SessionRecord::parse(line) {
-                max_updated_at_ms = max_updated_at_ms.max(record.timestamp_ms());
-                if let SessionRecord::Usage { usage, .. } = record {
-                    latest_usage = usage;
-                }
-            }
-        }
-
-        Ok(SessionSummary {
-            id,
-            pwd,
-            provider,
-            model,
-            thinking_level,
-            created_at_ms,
-            updated_at_ms: max_updated_at_ms,
-            usage: latest_usage,
-        })
-    }
-
     async fn append_record(
         &self,
-        session: &Session,
+        session_id: &str,
+        pwd: &Path,
         record: &SessionRecord,
     ) -> Result<(), SessionError> {
-        let key = pwd_key(&session.pwd);
+        validate_session_id(session_id)?;
+        let key = pwd_key(pwd);
+        let path = self.file_path(&key, session_id);
         let line = record
             .to_jsonl()
             .map_err(|source| SessionError::Serialize {
-                path: self.store.file_path(&key, &session.id),
+                path: path.clone(),
                 source,
             })?;
-        Ok(self.store.append(&key, &session.id, &line).await?)
+        Ok(JsonlStore::append(&path, &line).await?)
     }
 }
 
@@ -303,11 +181,79 @@ fn validate_session_id(id: &str) -> Result<(), SessionError> {
     }
 }
 
+/// Parse the first JSONL line as a session header and validate it matches the
+/// expected id and pwd. Returns a ready-to-use [`Session`] with an empty
+/// messages vec.
+fn parse_header(
+    line: &str,
+    path: &Path,
+    expected_id: &str,
+    normalized_pwd: &Path,
+) -> Result<Session, SessionError> {
+    let record = SessionRecord::parse(line).map_err(|err| SessionError::InvalidHeader {
+        path: path.to_path_buf(),
+        reason: err.to_string(),
+    })?;
+
+    let SessionRecord::Session {
+        id,
+        version,
+        pwd,
+        provider,
+        model,
+        thinking_level,
+        created_at_ms,
+        updated_at_ms,
+    } = record
+    else {
+        return Err(SessionError::InvalidHeader {
+            path: path.to_path_buf(),
+            reason: "first record is not a session header".into(),
+        });
+    };
+
+    if version > SESSION_SCHEMA_VERSION {
+        return Err(SessionError::UnsupportedVersion {
+            version,
+            supported: SESSION_SCHEMA_VERSION,
+            path: path.to_path_buf(),
+        });
+    }
+    if id != expected_id {
+        return Err(SessionError::InvalidHeader {
+            path: path.to_path_buf(),
+            reason: format!("header id {id:?} does not match requested id {expected_id:?}"),
+        });
+    }
+    if normalize(pwd.clone())? != normalized_pwd {
+        return Err(SessionError::InvalidHeader {
+            path: path.to_path_buf(),
+            reason: format!(
+                "header pwd {:?} does not match requested pwd {:?}",
+                pwd.display(),
+                normalized_pwd.display()
+            ),
+        });
+    }
+
+    Ok(Session {
+        id,
+        version,
+        pwd,
+        provider,
+        model,
+        thinking_level,
+        messages: Vec::new(),
+        usage: Usage::default(),
+        created_at_ms,
+        updated_at_ms: updated_at_ms.max(created_at_ms),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::context::AgentMessage;
-    use crate::session::store::JSONL_EXTENSION;
 
     fn temp_root(name: &str) -> PathBuf {
         let dir =
@@ -331,14 +277,6 @@ mod tests {
     fn session_file(root: &Path, pwd: &str, id: &str) -> PathBuf {
         root.join(pwd_key(Path::new(pwd)))
             .join(format!("{id}.{JSONL_EXTENSION}"))
-    }
-
-    #[tokio::test]
-    async fn constructing_manager_creates_nothing() {
-        let root =
-            std::env::temp_dir().join(format!("alan-session-construct-{}", uuid::Uuid::new_v4()));
-        let _manager = SessionManager::new(&root);
-        assert!(!root.exists(), "manager construction must not create files");
     }
 
     #[tokio::test]
@@ -399,24 +337,24 @@ mod tests {
             .expect("create");
 
         manager
-            .append_message(&session, &AgentMessage::user("hello"))
+            .append_message(&session.id, &session.pwd, &AgentMessage::user("hello"))
             .await
             .expect("append user");
         manager
-            .append_message(&session, &AgentMessage::user("second"))
+            .append_message(&session.id, &session.pwd, &AgentMessage::user("second"))
             .await
             .expect("append second");
         manager
-            .save_usage(&session, &usage(10, 5))
+            .append_usage(&session.id, &session.pwd, &usage(10, 5))
             .await
             .expect("usage 1");
         manager
-            .save_usage(&session, &usage(25, 8))
+            .append_usage(&session.id, &session.pwd, &usage(25, 8))
             .await
             .expect("usage 2");
 
         let loaded = manager
-            .load(Path::new("/tmp/project"), &session.id)
+            .get_session(&session.id, Path::new("/tmp/project"))
             .await
             .expect("load");
 
@@ -445,16 +383,16 @@ mod tests {
             .expect("create");
 
         manager
-            .save_usage(&session, &usage(10, 5))
+            .append_usage(&session.id, &session.pwd, &usage(10, 5))
             .await
             .expect("usage 1");
         manager
-            .save_usage(&session, &usage(20, 7))
+            .append_usage(&session.id, &session.pwd, &usage(20, 7))
             .await
             .expect("usage 2");
 
         let loaded = manager
-            .load(Path::new("/tmp/p"), &session.id)
+            .get_session(&session.id, Path::new("/tmp/p"))
             .await
             .expect("load");
         assert_eq!(loaded.usage, usage(20, 7));
@@ -481,7 +419,7 @@ mod tests {
         std::fs::write(&path, &content).unwrap();
 
         let loaded = manager
-            .load(Path::new("/tmp/p"), &session.id)
+            .get_session(&session.id, Path::new("/tmp/p"))
             .await
             .expect("truncated tail tolerated");
         assert_eq!(loaded.messages.len(), 1);
@@ -491,7 +429,7 @@ mod tests {
         std::fs::write(&path, &content).unwrap();
 
         let err = manager
-            .load(Path::new("/tmp/p"), &session.id)
+            .get_session(&session.id, Path::new("/tmp/p"))
             .await
             .expect_err("malformed complete line rejected");
         assert!(matches!(err, SessionError::MalformedRecord { .. }));
@@ -508,13 +446,13 @@ mod tests {
             .expect("create");
 
         let err = manager
-            .load(Path::new("/tmp/other"), &session.id)
+            .get_session(&session.id, Path::new("/tmp/other"))
             .await
             .expect_err("wrong pwd must not load");
         assert!(matches!(err, SessionError::Store(StoreError::NotFound(_))));
 
         let err = manager
-            .load(Path::new("/tmp/p"), "not-a-real-id")
+            .get_session("not-a-real-id", Path::new("/tmp/p"))
             .await
             .expect_err("wrong id must not load");
         assert!(matches!(err, SessionError::Store(StoreError::NotFound(_))));
@@ -569,7 +507,7 @@ mod tests {
         )
         .unwrap();
         let err = manager
-            .load(Path::new(pwd), &session.id)
+            .get_session(&session.id, Path::new(pwd))
             .await
             .expect_err("unsupported version rejected");
         assert!(matches!(err, SessionError::UnsupportedVersion { .. }));
@@ -580,7 +518,7 @@ mod tests {
         let content = std::fs::read_to_string(&path).unwrap();
         std::fs::write(&path, content.replace(&session.id, "other-id")).unwrap();
         let err = manager
-            .load(Path::new(pwd), &session.id)
+            .get_session(&session.id, Path::new(pwd))
             .await
             .expect_err("mismatched header id rejected");
         assert!(matches!(err, SessionError::InvalidHeader { .. }));
@@ -591,63 +529,10 @@ mod tests {
         let content = std::fs::read_to_string(&path).unwrap();
         std::fs::write(&path, content.replace(pwd, "/elsewhere")).unwrap();
         let err = manager
-            .load(Path::new(pwd), &session.id)
+            .get_session(&session.id, Path::new(pwd))
             .await
             .expect_err("mismatched header pwd rejected");
         assert!(matches!(err, SessionError::InvalidHeader { .. }));
-        cleanup(&root);
-    }
-
-    #[tokio::test]
-    async fn list_returns_summaries_without_loading_messages() {
-        let root = temp_root("list");
-        let manager = SessionManager::new(&root);
-
-        let older = manager
-            .create("/tmp/p", "openrouter", "m", Some(ReasoningEffort::Low))
-            .await
-            .expect("older");
-        manager
-            .append_message(&older, &AgentMessage::user("hi"))
-            .await
-            .expect("append");
-        manager
-            .save_usage(&older, &usage(3, 4))
-            .await
-            .expect("usage");
-
-        let newer = manager
-            .create("/tmp/p", "openrouter", "m2", None)
-            .await
-            .expect("newer");
-
-        let summaries = manager.list(Path::new("/tmp/p")).await.expect("list");
-        assert_eq!(summaries.len(), 2);
-        // Newest first; ids break ties deterministically for same-ms creates.
-        assert!(
-            (summaries[0].updated_at_ms, summaries[1].id.clone())
-                >= (summaries[1].updated_at_ms, summaries[0].id.clone())
-        );
-
-        let summary = summaries
-            .iter()
-            .find(|summary| summary.id == older.id)
-            .expect("older summary");
-        assert_eq!(summary.pwd, older.pwd);
-        assert_eq!(summary.provider, "openrouter");
-        assert_eq!(summary.model, "m");
-        assert_eq!(summary.thinking_level, Some(ReasoningEffort::Low));
-        assert_eq!(summary.created_at_ms, older.created_at_ms);
-        assert_eq!(summary.usage, usage(3, 4));
-
-        let _ = newer;
-        assert!(
-            manager
-                .list(Path::new("/tmp/none"))
-                .await
-                .expect("list")
-                .is_empty()
-        );
         cleanup(&root);
     }
 
@@ -658,7 +543,7 @@ mod tests {
         let session = Session::new("/tmp/p", "o", "m", None);
 
         let err = manager
-            .append_message(&session, &AgentMessage::user("hi"))
+            .append_message(&session.id, &session.pwd, &AgentMessage::user("hi"))
             .await
             .expect_err("append without create fails");
         assert!(matches!(err, SessionError::Store(StoreError::NotFound(_))));
@@ -693,15 +578,17 @@ mod tests {
     impl SessionManager {
         async fn write_session_file_for_test(&self, session: &Session) -> Result<(), SessionError> {
             let key = pwd_key(&session.pwd);
+            let path = self.file_path(&key, &session.id);
             let header =
                 session
                     .header_record()
                     .to_jsonl()
                     .map_err(|source| SessionError::Serialize {
-                        path: self.store.file_path(&key, &session.id),
+                        path: path.clone(),
                         source,
                     })?;
-            Ok(self.store.create_file(&key, &session.id, &header).await?)
+            set_permissions(&self.root, true).await?;
+            Ok(JsonlStore::create(&path, &header).await?)
         }
     }
 }
