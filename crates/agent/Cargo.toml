@@ -9,11 +9,12 @@ futures-util = { workspace = true }
 llm = { workspace = true }
 providers = { path = "../providers" }
 serde = { workspace = true }
+serde_json = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 tools = { path = "../tools" }
 uuid = { workspace = true }
+fs2 = { workspace = true }
 
 [dev-dependencies]
 futures-util = { workspace = true }
-serde_json = { workspace = true }

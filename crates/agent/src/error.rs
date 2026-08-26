@@ -16,4 +16,6 @@ pub enum AgentError {
     EventStreamClosed,
     #[error(transparent)]
     Tool(#[from] ToolError),
+    #[error(transparent)]
+    Session(#[from] crate::session::SessionError),
 }

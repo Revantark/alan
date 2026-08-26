@@ -11,6 +11,15 @@ Alan is a minimal coding agent written in Rust. It runs in your terminal and use
 - File read, file write, file edit, and shell tools
 - Optional OpenRouter web search and web fetch tools
 - Tool-call execution with configurable round limits
+- Plan mode toggled with `/plan` or `Shift+Tab`
+- Session history is stored under `$ALAN_HOME/.alan/sessions` (or
+  `$HOME/.alan/sessions` when `ALAN_HOME` is unset). Each working directory
+  gets its own hashed subdirectory, containing append-only JSONL session files.
+  Sessions are created on the first non-empty prompt.
+- To resume a session, set `ALAN_SESSION` to the session ID (the filename
+  without `.jsonl`) and start Alan from the same working directory. For
+  example: `ALAN_SESSION=018f... cargo run -p alan`. The configured model and
+  provider must match the stored session.
 
 ## Requirements
 
@@ -31,16 +40,40 @@ ALAN_MODEL=openai/gpt-4o-mini \
 cargo run -p alan
 ```
 
-Alan stores credentials at `~/.alan/auth.json` by default. Set `ALAN_HOME` to change its home directory.
+Alan stores credentials at `~/.alan/auth.json` by default. Set `ALAN_HOME` to change its home directory. You can also run `/login` inside Alan to authenticate interactively.
 
-## Optional server tools
+## Usage
 
-Enable OpenRouter web tools with boolean environment variables:
+- Type a prompt and press `Enter` to run it. Use `Shift+Enter`, `Alt+Enter`,
+  `Ctrl+J`, or `Ctrl+M` for a newline.
+- Type `@` in the prompt to complete file and folder paths (`@popup.rs`
+  matches anywhere; `@src/co` matches by directory).
+- Slash commands:
+  - `/login` — sign in to a provider interactively
+  - `/plan` — toggle plan mode (also `Shift+Tab`)
+  - `/help` — list available commands
+- Key bindings: `Esc` clears input/selection, `Ctrl+C` interrupts the agent,
+  `Ctrl+U` deletes to line start, `Ctrl+Z` undoes an edit,
+  `Up`/`Down`/`PageUp`/`PageDown` scroll the transcript or navigate the
+  completion popup. Mouse scrolling and bracketed paste are supported.
 
-```bash
-ALAN_OPENROUTER_WEB_SEARCH=true
-ALAN_OPENROUTER_WEB_FETCH=true
-```
+## Configuration
+
+All variables are optional:
+
+| Variable | Purpose | Default |
+|---|---|---|
+| `ALAN_MODEL` | Model id | `openai/gpt-4o-mini` |
+| `ALAN_HOME` | Alan home directory (Alan uses `$ALAN_HOME/.alan/`) | `$HOME` |
+| `ALAN_SESSION` | Resume this session ID from the current working directory | unset |
+| `ALAN_REASONING_EFFORT` | `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max` | unset |
+| `ALAN_OPENROUTER_WEB_SEARCH` | Enable web search tool (`1`, `true`, `yes`, `on`) | off |
+| `ALAN_OPENROUTER_WEB_FETCH` | Enable web fetch tool (`1`, `true`, `yes`, `on`) | off |
+| `ALAN_LOG` | Log filter (falls back to `RUST_LOG`) | unset |
+| `ALAN_LOG_DIR` | Where daily log files go | `$ALAN_HOME/.alan/logs` |
+
+Files live under `$ALAN_HOME/.alan/`: `auth.json` (credentials),
+`sessions/` (conversation history), and `logs/`.
 
 ## Development
 

@@ -90,6 +90,14 @@ impl Controller {
         self.chat.usage()
     }
 
+    pub async fn restore_session_history(&mut self) {
+        self.chat.restore_session_history().await;
+    }
+
+    pub async fn session_id(&self) -> Option<String> {
+        self.chat.session_id().await
+    }
+
     pub fn login_state(&self) -> &LoginState {
         self.login.state()
     }
@@ -236,7 +244,7 @@ mod tests {
             .unwrap()
             .bind("test")
             .unwrap();
-        Controller::new(Agent::builder(model).build())
+        Controller::new(Agent::builder(model).build().unwrap())
     }
 
     #[tokio::test]
@@ -290,7 +298,7 @@ mod tests {
             .unwrap()
             .bind("test")
             .unwrap();
-        let mut controller = Controller::new(Agent::builder(model).build());
+        let mut controller = Controller::new(Agent::builder(model).build().unwrap());
 
         controller.submit("hi".into());
         tokio::time::sleep(Duration::from_millis(50)).await;
