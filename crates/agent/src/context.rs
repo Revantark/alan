@@ -5,7 +5,10 @@ use std::collections::HashMap;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum AgentMessage {
-    User(String),
+    User {
+        text: String,
+        images: Vec<llm::ImageUrl>,
+    },
     Assistant(LlmResponse),
     ToolResult {
         tool_call_id: String,
@@ -28,6 +31,8 @@ pub enum AgentMessage {
 enum SessionMessage {
     User {
         content: String,
+        #[serde(default)]
+        images: Vec<llm::ImageUrl>,
     },
     Assistant {
         response: LlmResponse,
@@ -41,8 +46,9 @@ enum SessionMessage {
 impl From<&AgentMessage> for SessionMessage {
     fn from(message: &AgentMessage) -> Self {
         match message {
-            AgentMessage::User(content) => Self::User {
-                content: content.clone(),
+            AgentMessage::User { text, images } => Self::User {
+                content: text.clone(),
+                images: images.clone(),
             },
             AgentMessage::Assistant(response) => Self::Assistant {
                 response: response.clone(),
@@ -61,7 +67,10 @@ impl From<&AgentMessage> for SessionMessage {
 impl From<SessionMessage> for AgentMessage {
     fn from(message: SessionMessage) -> Self {
         match message {
-            SessionMessage::User { content } => Self::User(content),
+            SessionMessage::User { content, images } => Self::User {
+                text: content,
+                images,
+            },
             SessionMessage::Assistant { response } => Self::Assistant(response),
             SessionMessage::ToolResult {
                 tool_call_id,
@@ -88,12 +97,34 @@ impl<'de> Deserialize<'de> for AgentMessage {
 
 impl AgentMessage {
     pub fn user(content: impl Into<String>) -> Self {
-        Self::User(content.into())
+        Self::User {
+            text: content.into(),
+            images: Vec::new(),
+        }
+    }
+
+    pub fn user_with_images(text: impl Into<String>, images: Vec<llm::ImageUrl>) -> Self {
+        Self::User {
+            text: text.into(),
+            images,
+        }
     }
 
     pub fn to_llm(&self) -> Message {
         match self {
-            Self::User(content) => Message::user(content),
+            Self::User { text, images } => {
+                if images.is_empty() {
+                    Message::user(text)
+                } else {
+                    let mut parts = vec![llm::ContentPart::Text { text: text.clone() }];
+                    for image in images {
+                        parts.push(llm::ContentPart::Image {
+                            image_url: image.clone(),
+                        });
+                    }
+                    Message::user_with_parts(parts)
+                }
+            }
             Self::Assistant(message) => {
                 let text = message.text();
                 let calls: Vec<ToolCall> = message.tool_calls().cloned().collect();

@@ -5,7 +5,7 @@ mod session;
 mod skill;
 mod tool;
 
-pub use agent::{Agent, AgentBuilder, AgentEvent, AgentStream};
+pub use agent::{Agent, AgentBuilder, AgentEvent, AgentStream, PromptBuilder};
 pub use context::AgentMessage;
 pub use error::AgentError;
 pub use session::{SESSION_SCHEMA_VERSION, Session, SessionError, SessionManager, SessionRecord};

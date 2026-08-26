@@ -66,7 +66,7 @@ impl ChatController {
 
         for message in messages {
             match message {
-                agent::AgentMessage::User(text) => self.entries.push(Entry::Prompt(text)),
+                agent::AgentMessage::User { text, .. } => self.entries.push(Entry::Prompt(text)),
                 agent::AgentMessage::Assistant(response) => {
                     if let Some(reasoning) = response.reasoning.as_deref()
                         && !reasoning.is_empty()
@@ -146,7 +146,12 @@ impl ChatController {
         self.entries.push(Entry::Prompt(text.to_owned()));
         self.revision = self.revision.wrapping_add(1);
         self.busy = true;
-        self.stream = Some(self.agent.prompt_stream(text.to_owned()));
+        let builder = self.agent.prompt().content(text.to_owned()).stream(true);
+        self.stream = Some(
+            self.agent
+                .ask(builder)
+                .expect("prompt was already validated"),
+        );
     }
 
     pub fn abort(&mut self) {
@@ -216,7 +221,7 @@ impl ChatController {
                                 ToolStatus::Failed(error),
                             );
                         }
-                        AgentEvent::Finished { usage } => {
+                        AgentEvent::Finished { usage, .. } => {
                             changed |= Self::append_delta(&mut self.entries, &pending_text);
                             pending_text.clear();
                             changed |= Self::ensure_response_entry(&mut self.entries);
