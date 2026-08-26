@@ -946,6 +946,24 @@ fn legacy_session_without_images_field_loads() {
 }
 
 #[test]
+fn legacy_tool_result_without_content_parts_loads() {
+    let legacy = r#"{"kind":"tool_result","tool_call_id":"call-1","content":"output"}"#;
+    let msg: AgentMessage = serde_json::from_str(legacy).expect("legacy format deserializes");
+    match msg {
+        AgentMessage::ToolResult {
+            tool_call_id,
+            content,
+            content_parts,
+        } => {
+            assert_eq!(tool_call_id, "call-1");
+            assert_eq!(content, "output");
+            assert!(content_parts.is_empty());
+        }
+        other => panic!("expected ToolResult, got {other:?}"),
+    }
+}
+
+#[test]
 fn to_llm_user_with_no_images_is_plain_user_message() {
     let msg = AgentMessage::user("hello");
     let llm_msg = msg.to_llm();
@@ -983,4 +1001,41 @@ fn user_constructor_has_empty_images() {
         }
         _ => panic!("expected User"),
     }
+}
+
+#[test]
+fn to_llm_tool_result_with_parts_uses_content_parts() {
+    use llm::ContentPart;
+    let msg = AgentMessage::tool_result_with_parts(
+        "call-1",
+        "[image/png image, 100 bytes base64]",
+        vec![ContentPart::Image {
+            image_url: llm::ImageUrl {
+                url: "data:image/png;base64,iVBOR".into(),
+            },
+        }],
+    );
+    let llm_msg = msg.to_llm();
+    assert_eq!(llm_msg.role, llm::Role::Tool);
+    assert_eq!(llm_msg.tool_call_id.as_deref(), Some("call-1"));
+    assert!(llm_msg.content.is_none());
+    let parts = llm_msg.content_parts.unwrap();
+    assert_eq!(parts.len(), 1);
+    assert!(
+        matches!(&parts[0], ContentPart::Image { image_url } if image_url.url == "data:image/png;base64,iVBOR")
+    );
+}
+
+#[test]
+fn to_llm_tool_result_without_parts_uses_plain_content() {
+    let msg = AgentMessage::ToolResult {
+        tool_call_id: "call-2".into(),
+        content: "all good".into(),
+        content_parts: vec![],
+    };
+    let llm_msg = msg.to_llm();
+    assert_eq!(llm_msg.role, llm::Role::Tool);
+    assert_eq!(llm_msg.tool_call_id.as_deref(), Some("call-2"));
+    assert_eq!(llm_msg.content.as_deref(), Some("all good"));
+    assert!(llm_msg.content_parts.is_none());
 }

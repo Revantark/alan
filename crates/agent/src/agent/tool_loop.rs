@@ -3,6 +3,7 @@ use crate::AgentMessage;
 use crate::context::AgentContext;
 use llm::LlmResponse;
 use providers::Model;
+use tools::ToolOutput;
 
 use super::Agent;
 use super::event::{AgentEvent, emit_event};
@@ -115,13 +116,28 @@ async fn handle_tool_calls(
 
         match context.tools[tool_index].executor.execute(&call).await {
             Ok(output) => {
+                let (output_text, content_parts) = match output {
+                    ToolOutput::Text(text) => (text, vec![]),
+                    ToolOutput::Image { mime_type, data } => {
+                        let description =
+                            format!("[{mime_type} image, {} bytes base64]", data.len());
+                        let data_uri = format!("data:{mime_type};base64,{data}");
+                        (
+                            description,
+                            vec![llm::ContentPart::Image {
+                                image_url: llm::ImageUrl { url: data_uri },
+                            }],
+                        )
+                    }
+                };
                 super::persistence::append_context_message(
                     agent,
                     context,
-                    AgentMessage::ToolResult {
-                        tool_call_id: call_id.clone(),
-                        content: output.clone(),
-                    },
+                    AgentMessage::tool_result_with_parts(
+                        &call_id,
+                        &output_text,
+                        content_parts,
+                    ),
                 )
                 .await?;
 
@@ -129,7 +145,7 @@ async fn handle_tool_calls(
                     cx.events,
                     AgentEvent::ToolCallFinished {
                         id: call_id,
-                        output: tail_lines(&output, 5),
+                        output: tail_lines(&output_text, 5),
                     },
                     cx.cancellation,
                 )
@@ -143,6 +159,7 @@ async fn handle_tool_calls(
                     AgentMessage::ToolResult {
                         tool_call_id: call_id.clone(),
                         content: error.clone(),
+                        content_parts: vec![],
                     },
                 )
                 .await?;

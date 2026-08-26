@@ -1,5 +1,5 @@
 use crate::args::{optional_u64, parse, required_string};
-use crate::tool::{ToolError, ToolExecutor};
+use crate::tool::{ToolError, ToolExecutor, ToolOutput};
 use async_trait::async_trait;
 use llm::{ToolCall, ToolDefinition};
 use serde_json::json;
@@ -43,7 +43,7 @@ struct CommandOutput {
 
 #[async_trait]
 impl ToolExecutor for BashExecutor {
-    async fn execute(&self, call: &ToolCall) -> Result<String, ToolError> {
+    async fn execute(&self, call: &ToolCall) -> Result<ToolOutput, ToolError> {
         let args = parse(call)?;
         let command = required_string(&args, "command")?;
         let timeout_seconds = optional_u64(&args, "timeout_seconds", DEFAULT_TIMEOUT_SECONDS)?;
@@ -98,7 +98,7 @@ impl ToolExecutor for BashExecutor {
         let output = combine_output(&result.stdout, &result.stderr);
 
         if result.status.success() {
-            Ok(output)
+            Ok(ToolOutput::Text(output))
         } else {
             Err(ToolError(format!(
                 "command failed (exit {}): {output}",

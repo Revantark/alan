@@ -111,6 +111,23 @@ impl Message {
         }
     }
 
+    /// Create a tool result message with structured content parts
+    /// (e.g. images).
+    pub fn tool_result_with_parts(
+        parts: Vec<ContentPart>,
+        tool_call_id: impl Into<String>,
+    ) -> Self {
+        Self {
+            role: Role::Tool,
+            content: None,
+            content_parts: (!parts.is_empty()).then_some(parts),
+            tool_calls: None,
+            tool_call_id: Some(tool_call_id.into()),
+            reasoning: None,
+            reasoning_details: None,
+        }
+    }
+
     fn text(role: Role, content: impl Into<String>) -> Self {
         Self {
             role,

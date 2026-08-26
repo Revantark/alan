@@ -1,5 +1,5 @@
 use crate::{AgentTool, Skill};
-use llm::{LlmResponse, Message, ToolCall, Usage};
+use llm::{ContentPart, LlmResponse, Message, ToolCall, Usage};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -13,9 +13,9 @@ pub enum AgentMessage {
     ToolResult {
         tool_call_id: String,
         content: String,
+        content_parts: Vec<ContentPart>,
     },
 }
-
 /// Serde representation of [`AgentMessage`].
 ///
 /// Tagged explicitly with `kind` so the on-disk format does not depend on
@@ -40,6 +40,8 @@ enum SessionMessage {
     ToolResult {
         tool_call_id: String,
         content: String,
+        #[serde(default)]
+        content_parts: Vec<ContentPart>,
     },
 }
 
@@ -56,9 +58,11 @@ impl From<&AgentMessage> for SessionMessage {
             AgentMessage::ToolResult {
                 tool_call_id,
                 content,
+                content_parts,
             } => Self::ToolResult {
                 tool_call_id: tool_call_id.clone(),
                 content: content.clone(),
+                content_parts: content_parts.clone(),
             },
         }
     }
@@ -75,9 +79,11 @@ impl From<SessionMessage> for AgentMessage {
             SessionMessage::ToolResult {
                 tool_call_id,
                 content,
+                content_parts,
             } => Self::ToolResult {
                 tool_call_id,
                 content,
+                content_parts,
             },
         }
     }
@@ -107,6 +113,19 @@ impl AgentMessage {
         Self::User {
             text: text.into(),
             images,
+        }
+    }
+
+    /// Create a tool result with structured content parts (e.g. images).
+    pub fn tool_result_with_parts(
+        tool_call_id: impl Into<String>,
+        content: impl Into<String>,
+        content_parts: Vec<ContentPart>,
+    ) -> Self {
+        Self::ToolResult {
+            tool_call_id: tool_call_id.into(),
+            content: content.into(),
+            content_parts,
         }
     }
 
@@ -146,7 +165,14 @@ impl AgentMessage {
             Self::ToolResult {
                 tool_call_id,
                 content,
-            } => Message::tool_result(content, tool_call_id),
+                content_parts,
+            } => {
+                if content_parts.is_empty() {
+                    Message::tool_result(content, tool_call_id)
+                } else {
+                    Message::tool_result_with_parts(content_parts.clone(), tool_call_id)
+                }
+            }
         }
     }
 }

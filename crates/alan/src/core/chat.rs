@@ -90,6 +90,7 @@ impl ChatController {
                 agent::AgentMessage::ToolResult {
                     tool_call_id,
                     content,
+                    ..
                 } => {
                     if let Some(Entry::ToolCall { output, .. }) = self
                         .entries
