@@ -12,9 +12,29 @@ pub enum Role {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ImageUrl {
+    pub url: String,
+}
+
+/// A single content part within a multi-part message.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ContentPart {
+    Text {
+        text: String,
+    },
+    #[serde(rename = "image_url")]
+    Image {
+        image_url: ImageUrl,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Message {
     pub role: Role,
     pub content: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content_parts: Option<Vec<ContentPart>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_calls: Option<Vec<ToolCall>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -34,6 +54,18 @@ impl Message {
         Self::text(Role::User, content)
     }
 
+    pub fn user_with_parts(parts: Vec<ContentPart>) -> Self {
+        Self {
+            role: Role::User,
+            content: None,
+            content_parts: (!parts.is_empty()).then_some(parts),
+            tool_calls: None,
+            tool_call_id: None,
+            reasoning: None,
+            reasoning_details: None,
+        }
+    }
+
     pub fn assistant_with_reasoning(
         content: Option<String>,
         reasoning: Option<String>,
@@ -42,6 +74,7 @@ impl Message {
         Self {
             role: Role::Assistant,
             content,
+            content_parts: None,
             tool_calls: None,
             tool_call_id: None,
             reasoning,
@@ -58,6 +91,7 @@ impl Message {
         Self {
             role: Role::Assistant,
             content,
+            content_parts: None,
             tool_calls: Some(tool_calls),
             tool_call_id: None,
             reasoning,
@@ -69,6 +103,7 @@ impl Message {
         Self {
             role: Role::Tool,
             content: Some(content.into()),
+            content_parts: None,
             tool_calls: None,
             tool_call_id: Some(tool_call_id.into()),
             reasoning: None,
@@ -80,6 +115,7 @@ impl Message {
         Self {
             role,
             content: Some(content.into()),
+            content_parts: None,
             tool_calls: None,
             tool_call_id: None,
             reasoning: None,
