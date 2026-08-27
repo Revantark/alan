@@ -1,5 +1,5 @@
 use crate::args::{optional_u64, parse, required_string};
-use crate::tool::{ToolError, ToolExecutor};
+use crate::tool::{ToolError, ToolExecutor, ToolOutput};
 use async_trait::async_trait;
 use llm::{ToolCall, ToolDefinition};
 use serde_json::json;
@@ -11,7 +11,7 @@ const MAX_FILE_SIZE: usize = 1024 * 1024;
 pub fn file_read_definition() -> ToolDefinition {
     ToolDefinition {
         name: "read".into(),
-        description: "Read a file, optionally limited to an inclusive line range".into(),
+        description: "Read a file/image, optionally limited to an inclusive line range".into(),
         parameters: json!({
             "type": "object",
             "properties": {
@@ -86,9 +86,14 @@ pub struct FileReadExecutor;
 
 #[async_trait]
 impl ToolExecutor for FileReadExecutor {
-    async fn execute(&self, call: &ToolCall) -> Result<String, ToolError> {
+    async fn execute(&self, call: &ToolCall) -> Result<ToolOutput, ToolError> {
         let args = parse(call)?;
         let path = required_string(&args, "path")?;
+
+        if let Some(mime_type) = image_mime_type(&path) {
+            return read_image(&path, mime_type).await;
+        }
+
         let line_start = optional_u64(&args, "line_start", 1)?;
         let line_end = args
             .get("line_end")
@@ -146,15 +151,48 @@ impl ToolExecutor for FileReadExecutor {
             line_number = line_number.saturating_add(1);
         }
 
-        Ok(content)
+        Ok(ToolOutput::Text(content))
     }
+}
+
+/// Return the MIME type for supported image extensions, or `None` for
+/// non-image files.
+fn image_mime_type(path: &str) -> Option<&'static str> {
+    let ext = Path::new(path).extension()?.to_str()?.to_ascii_lowercase();
+    match ext.as_str() {
+        "png" => Some("image/png"),
+        "jpg" | "jpeg" => Some("image/jpeg"),
+        "webp" => Some("image/webp"),
+        "gif" => Some("image/gif"),
+        _ => None,
+    }
+}
+
+/// Read an image file and return it as base64-encoded `ToolOutput::Image`.
+async fn read_image(path: &str, mime_type: &str) -> Result<ToolOutput, ToolError> {
+    let bytes = tokio::fs::read(path)
+        .await
+        .map_err(|e| ToolError(format!("failed to read file {path}: {e}")))?;
+
+    if bytes.len() > MAX_FILE_SIZE {
+        return Err(ToolError(format!(
+            "file content exceeds {MAX_FILE_SIZE} byte limit"
+        )));
+    }
+
+    use base64::Engine;
+    let data = base64::engine::general_purpose::STANDARD.encode(&bytes);
+    Ok(ToolOutput::Image {
+        mime_type: mime_type.to_owned(),
+        data,
+    })
 }
 
 pub struct FileEditExecutor;
 
 #[async_trait]
 impl ToolExecutor for FileEditExecutor {
-    async fn execute(&self, call: &ToolCall) -> Result<String, ToolError> {
+    async fn execute(&self, call: &ToolCall) -> Result<ToolOutput, ToolError> {
         let args = parse(call)?;
         let path = required_string(&args, "path")?;
         let old_text = required_string(&args, "old_text")?;
@@ -199,7 +237,7 @@ impl ToolExecutor for FileEditExecutor {
             .await
             .map_err(|e| ToolError(format!("failed to edit file {}: {e}", path)))?;
 
-        Ok(format!("File edited: {}", path))
+        Ok(ToolOutput::Text(format!("File edited: {}", path)))
     }
 }
 
@@ -234,7 +272,7 @@ pub struct FileWriteExecutor;
 
 #[async_trait]
 impl ToolExecutor for FileWriteExecutor {
-    async fn execute(&self, call: &ToolCall) -> Result<String, ToolError> {
+    async fn execute(&self, call: &ToolCall) -> Result<ToolOutput, ToolError> {
         let args = parse(call)?;
         let path = required_string(&args, "path")?;
         let content = required_string(&args, "content")?;
@@ -257,7 +295,7 @@ impl ToolExecutor for FileWriteExecutor {
             .await
             .map_err(|e| ToolError(format!("failed to write file {}: {e}", path)))?;
 
-        Ok(format!("File written: {}", path))
+        Ok(ToolOutput::Text(format!("File written: {}", path)))
     }
 }
 
@@ -294,6 +332,30 @@ mod tests {
         ))
     }
 
+    fn temp_path_with_ext(ext: &str) -> std::path::PathBuf {
+        static NEXT_ID: AtomicU64 = AtomicU64::new(0);
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock before Unix epoch")
+            .as_nanos();
+        let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+        std::env::temp_dir().join(format!(
+            "alan-file-test-{}-{timestamp}-{id}.{ext}",
+            std::process::id()
+        ))
+    }
+
+    /// Minimal 1x1 white PNG (67 bytes).
+    const MINIMAL_PNG: &[u8] = &[
+        0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, // PNG signature
+        0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44, 0x52, // IHDR chunk
+        0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x02, 0x00, 0x00, 0x00, 0x90, 0x77,
+        0x53, 0xDE, 0x00, 0x00, 0x00, 0x0C, 0x49, 0x44, 0x41, // IDAT chunk
+        0x54, 0x08, 0xD7, 0x63, 0xF8, 0xCF, 0xC0, 0x00, 0x00, 0x00, 0x02, 0x00, 0x01, 0xE2, 0x21,
+        0xBC, 0x33, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, // IEND chunk
+        0x44, 0xAE, 0x42, 0x60, 0x82,
+    ];
+
     #[tokio::test]
     async fn reads_selected_inclusive_line_range() {
         let path = temp_path();
@@ -304,7 +366,7 @@ mod tests {
         let call = tool_call(&path, r#""line_start":2,"line_end":3"#);
         let result = FileReadExecutor.execute(&call).await.unwrap();
 
-        assert_eq!(result, "two\nthree\n");
+        assert_eq!(result, ToolOutput::Text("two\nthree\n".into()));
         tokio::fs::remove_file(path).await.unwrap();
     }
 
@@ -318,7 +380,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(result, "one\ntwo\n");
+        assert_eq!(result, ToolOutput::Text("one\ntwo\n".into()));
         tokio::fs::remove_file(path).await.unwrap();
     }
 
@@ -356,7 +418,10 @@ mod tests {
         let call = edit_call(&path, "two", "TWO");
         let result = FileEditExecutor.execute(&call).await.unwrap();
 
-        assert_eq!(result, format!("File edited: {}", path.display()));
+        assert_eq!(
+            result,
+            ToolOutput::Text(format!("File edited: {}", path.display()))
+        );
         assert_eq!(
             tokio::fs::read_to_string(&path).await.unwrap(),
             "one\nTWO\nthree\n"
@@ -380,6 +445,100 @@ mod tests {
             tokio::fs::read_to_string(&path).await.unwrap(),
             "same\nsame\n"
         );
+        tokio::fs::remove_file(path).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn reads_png_as_image() {
+        let path = temp_path_with_ext("png");
+        tokio::fs::write(&path, MINIMAL_PNG).await.unwrap();
+
+        let result = FileReadExecutor
+            .execute(&tool_call(&path, ""))
+            .await
+            .unwrap();
+
+        match &result {
+            ToolOutput::Image { mime_type, data } => {
+                assert_eq!(mime_type, "image/png");
+                assert!(!data.is_empty());
+                // Verify it's valid base64 that decodes back to the original bytes.
+                use base64::Engine;
+                let decoded = base64::engine::general_purpose::STANDARD
+                    .decode(data)
+                    .unwrap();
+                assert_eq!(decoded, MINIMAL_PNG);
+            }
+            other => panic!("expected Image, got {other:?}"),
+        }
+        tokio::fs::remove_file(path).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn reads_jpg_extension_as_jpeg_image() {
+        let path = temp_path_with_ext("jpg");
+        tokio::fs::write(&path, b"not-really-jpg").await.unwrap();
+
+        let result = FileReadExecutor
+            .execute(&tool_call(&path, ""))
+            .await
+            .unwrap();
+
+        match result {
+            ToolOutput::Image { mime_type, .. } => assert_eq!(mime_type, "image/jpeg"),
+            other => panic!("expected Image, got {other:?}"),
+        }
+        tokio::fs::remove_file(path).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn reads_jpeg_extension_as_jpeg_image() {
+        let path = temp_path_with_ext("jpeg");
+        tokio::fs::write(&path, b"not-really-jpeg").await.unwrap();
+
+        let result = FileReadExecutor
+            .execute(&tool_call(&path, ""))
+            .await
+            .unwrap();
+
+        match result {
+            ToolOutput::Image { mime_type, .. } => assert_eq!(mime_type, "image/jpeg"),
+            other => panic!("expected Image, got {other:?}"),
+        }
+        tokio::fs::remove_file(path).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn reads_webp_as_image() {
+        let path = temp_path_with_ext("webp");
+        tokio::fs::write(&path, b"not-really-webp").await.unwrap();
+
+        let result = FileReadExecutor
+            .execute(&tool_call(&path, ""))
+            .await
+            .unwrap();
+
+        match result {
+            ToolOutput::Image { mime_type, .. } => assert_eq!(mime_type, "image/webp"),
+            other => panic!("expected Image, got {other:?}"),
+        }
+        tokio::fs::remove_file(path).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn reads_gif_as_image() {
+        let path = temp_path_with_ext("gif");
+        tokio::fs::write(&path, b"not-really-gif").await.unwrap();
+
+        let result = FileReadExecutor
+            .execute(&tool_call(&path, ""))
+            .await
+            .unwrap();
+
+        match result {
+            ToolOutput::Image { mime_type, .. } => assert_eq!(mime_type, "image/gif"),
+            other => panic!("expected Image, got {other:?}"),
+        }
         tokio::fs::remove_file(path).await.unwrap();
     }
 }

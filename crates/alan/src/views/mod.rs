@@ -8,7 +8,10 @@ mod components;
 pub mod selection;
 mod theme;
 
-use crate::core::{Action, Command, CompletionController, Controller, Overlay, Poll, SlashCommand};
+use crate::core::{
+    Action, Command, CompletionController, Controller, ImageAttachment, Overlay, Poll, SlashCommand,
+};
+use base64::Engine;
 use components::{Chat, Footer, Header, LoginOverlay};
 use crossterm::event::{
     Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
@@ -46,6 +49,8 @@ pub struct UiState {
     last_click: Option<(Instant, u16, u16)>,
     /// True when something changed since last draw and a redraw is needed.
     dirty: bool,
+    /// Images attached to the next prompt via clipboard paste.
+    attachments: Vec<ImageAttachment>,
 }
 
 impl UiState {
@@ -64,6 +69,7 @@ impl UiState {
             selection: None,
             last_click: None,
             dirty: true,
+            attachments: Vec::new(),
         }
     }
 
@@ -78,10 +84,15 @@ impl UiState {
             Action::Submit => {
                 self.follow_output = true;
                 self.scroll_target = self.max_scroll;
-                Some(Command::Submit(std::mem::take(&mut self.input)))
+                let images = std::mem::take(&mut self.attachments);
+                Some(Command::Submit {
+                    text: std::mem::take(&mut self.input),
+                    images,
+                })
             }
             Action::ClearInput => {
                 self.input.clear();
+                self.attachments.clear();
                 Some(Command::Cancel)
             }
             Action::Backspace => {
@@ -95,6 +106,17 @@ impl UiState {
             Action::Paste(text) => {
                 self.input.push_str(&text);
                 None
+            }
+            Action::PasteOrAttachImage => {
+                if self.try_clipboard_image() {
+                    None
+                } else {
+                    // No image on the clipboard: fall back to pasting text.
+                    match arboard::Clipboard::new().and_then(|mut c| c.get_text()) {
+                        Ok(text) if !text.is_empty() => self.apply(Action::Paste(text), false),
+                        _ => None,
+                    }
+                }
             }
             Action::ScrollUp => {
                 if login_selection_active {
@@ -186,6 +208,25 @@ impl UiState {
                 Some(Command::Interrupt)
             }
             Event::Key(key)
+                if key.code == KeyCode::Char('v')
+                    && key.modifiers.contains(KeyModifiers::CONTROL) =>
+            {
+                // Bracketed paste only delivers text; images never arrive as
+                // an `Event::Paste`, so attaching needs an explicit trigger.
+                if !self.try_clipboard_image() {
+                    // No image on the clipboard: fall back to pasting text.
+                    let text = arboard::Clipboard::new().and_then(|mut c| c.get_text());
+                    if let Ok(text) = text
+                        && !text.is_empty()
+                    {
+                        self.editor.insert_str(text);
+                        self.dirty = true;
+                        self.sync_completion(completion);
+                    }
+                }
+                None
+            }
+            Event::Key(key)
                 if key.code == KeyCode::Char('u')
                     && key.modifiers.contains(KeyModifiers::CONTROL) =>
             {
@@ -205,9 +246,9 @@ impl UiState {
             }
             Event::Mouse(mouse) => self.handle_mouse_event(mouse, rendered_lines),
             Event::Paste(text) => {
-                self.editor.insert_str(text);
                 self.dirty = true;
                 self.sync_completion(completion);
+                self.editor.insert_str(text);
                 None
             }
             event => {
@@ -218,6 +259,7 @@ impl UiState {
             }
         };
         self.sync_command_highlight();
+
         command
     }
 
@@ -450,9 +492,10 @@ impl UiState {
         self.follow_output = true;
         self.scroll_target = self.max_scroll;
         let text = self.editor_text();
+        let images = std::mem::take(&mut self.attachments);
         self.editor = Self::new_editor();
         self.dirty = true;
-        Some(Command::Submit(text))
+        Some(Command::Submit { text, images })
     }
 
     /// The prompt soft-wraps at word boundaries and grows up to
@@ -549,6 +592,61 @@ impl UiState {
     pub fn take_dirty(&mut self) -> bool {
         std::mem::take(&mut self.dirty)
     }
+
+    /// Check the system clipboard for an image and add it as an attachment.
+    /// Returns true when an image was attached.
+    fn try_clipboard_image(&mut self) -> bool {
+        let img = match arboard::Clipboard::new().and_then(|mut clipboard| clipboard.get_image()) {
+            Ok(img) => img,
+            Err(error) => {
+                tracing::debug!(%error, "clipboard: no readable image");
+                return false;
+            }
+        };
+        if img.width == 0 || img.height == 0 {
+            tracing::debug!("clipboard: ignoring zero-size image");
+            return false;
+        }
+        let (w, h) = (img.width, img.height);
+        let raw = img.into_owned_bytes();
+
+        let Some(rgba) = image::RgbaImage::from_raw(w as u32, h as u32, raw.into_owned()) else {
+            tracing::debug!(width = w, height = h, "clipboard: invalid image data");
+            return false;
+        };
+        let mut png_buf = std::io::Cursor::new(Vec::new());
+        if let Err(error) =
+            image::DynamicImage::ImageRgba8(rgba).write_to(&mut png_buf, image::ImageFormat::Png)
+        {
+            tracing::debug!(%error, "clipboard: PNG encoding failed");
+            return false;
+        }
+        let data = base64::engine::general_purpose::STANDARD.encode(png_buf.get_ref());
+
+        self.attachments.push(ImageAttachment {
+            name: format!("image-{}", self.attachments.len() + 1),
+            mime_type: "image/png".into(),
+            base64_data: data,
+        });
+        tracing::debug!(
+            name = self.attachments.last().unwrap().name,
+            "clipboard: image attached"
+        );
+        self.dirty = true;
+        true
+    }
+
+    pub fn attachments(&self) -> &[ImageAttachment] {
+        &self.attachments
+    }
+
+    pub fn attachment_height(&self) -> u16 {
+        if self.attachments.is_empty() {
+            0
+        } else {
+            3 + self.attachments.len() as u16
+        }
+    }
 }
 
 impl Default for UiState {
@@ -613,7 +711,7 @@ impl AppView {
         let [header_area, chat_area, footer_area] = Layout::vertical([
             Constraint::Length(1),
             Constraint::Min(1),
-            Constraint::Length(4 + state.editor_rows(editor_width)),
+            Constraint::Length(4 + state.editor_rows(editor_width) + state.attachment_height()),
         ])
         .areas(frame.area());
 
@@ -988,7 +1086,13 @@ mod tests {
             ),
         ));
 
-        assert_eq!(command, Some(Command::Submit("h".into())));
+        assert_eq!(
+            command,
+            Some(Command::Submit {
+                text: "h".into(),
+                images: vec![]
+            })
+        );
         assert!(state.take_dirty());
     }
 
@@ -1059,7 +1163,13 @@ mod tests {
 
         // Popup closed: Enter submits again.
         let command = state.handle_event(key(KeyCode::Enter), &[], &mut completion);
-        assert_eq!(command, Some(Command::Submit("@".into())));
+        assert_eq!(
+            command,
+            Some(Command::Submit {
+                text: "@".into(),
+                images: vec![]
+            })
+        );
     }
 
     #[test]

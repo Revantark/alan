@@ -19,3 +19,4 @@ tracing = "0.1.44"
 tracing-appender = "0.2"
 fs2 = "0.4"
 uuid = { version = "1", features = ["v4"] }
+base64 = "0.22"

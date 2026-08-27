@@ -7,7 +7,7 @@ pub mod completion;
 pub mod controller;
 pub mod login;
 
-pub use action::{Action, Command};
+pub use action::{Action, Command, ImageAttachment};
 pub use chat::Entry;
 pub use command::SlashCommand;
 pub use completion::{CompletionController, CompletionItem, CompletionStatus};

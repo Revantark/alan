@@ -6,7 +6,18 @@ use thiserror::Error;
 #[error("tool execution failed: {0}")]
 pub struct ToolError(pub String);
 
+/// The output produced by a tool executor.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ToolOutput {
+    Text(String),
+    Image {
+        mime_type: String,
+        /// Raw base64-encoded image data (no `data:` prefix).
+        data: String,
+    },
+}
+
 #[async_trait]
 pub trait ToolExecutor: Send + Sync {
-    async fn execute(&self, call: &ToolCall) -> Result<String, ToolError>;
+    async fn execute(&self, call: &ToolCall) -> Result<ToolOutput, ToolError>;
 }

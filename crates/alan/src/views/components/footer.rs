@@ -28,12 +28,14 @@ impl Component for Footer {
         frame.render_widget(background, area);
 
         let [
+            attachment_area,
             _top_padding,
             status_area,
             _status_editor_gap,
             editor_area,
             _bottom_padding,
         ] = Layout::vertical([
+            Constraint::Length(state.attachment_height()),
             Constraint::Length(1),
             Constraint::Length(1),
             Constraint::Length(1),
@@ -41,6 +43,26 @@ impl Component for Footer {
             Constraint::Length(1),
         ])
         .areas(area);
+
+        // Render attachment section when there are pending images.
+        if !state.attachments().is_empty() {
+            let mut lines: Vec<Line<'static>> = vec![
+                Line::from("\n"),
+                Line::from(Span::styled(
+                    "  Attachments",
+                    Style::default().fg(theme::ATTACHMENT_FG).bold(),
+                )),
+            ];
+            for attachment in state.attachments() {
+                lines.push(Line::from(Span::styled(
+                    format!("   - {}", attachment.name),
+                    Style::default().fg(theme::ATTACHMENT_FG),
+                )));
+            }
+            let attachments =
+                Paragraph::new(Text::from(lines)).style(Style::default().bg(theme::ATTACHMENT_BG));
+            frame.render_widget(attachments, attachment_area);
+        }
 
         let (indicator, indicator_style, shortcuts) = if controller.is_busy() {
             (

@@ -42,9 +42,11 @@ dependencies = [
  "anyhow",
  "arboard",
  "async-trait",
+ "base64",
  "crossterm",
  "futures-util",
  "ignore",
+ "image",
  "llm",
  "providers",
  "ratatui",
@@ -2707,6 +2709,7 @@ name = "tools"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "base64",
  "llm",
  "serde_json",
  "thiserror",
