@@ -1,26 +1,27 @@
 //! Completion for the prompt editor.
 //!
-//! A [`CompletionBackend`] decides for itself whether a request is its own.
-//! Ranking is not its concern: [`matcher`] orders every backend the same way.
+//! The character a token starts with picks the backend, so no backend parses
+//! the line itself. Ranking is not their concern either: [`matcher`] orders
+//! every backend the same way.
 
 mod paths;
+mod token;
 
 use super::Poll;
 use super::matcher;
+pub use paths::Paths;
+use std::collections::HashMap;
 use std::ops::Range;
 
-pub use paths::Paths;
+/// How many matches one keystroke turns into popup items. Unlike the index
+/// this costs nothing to miss: narrowing the pattern surfaces the rest.
+const MAX_SUGGESTIONS: usize = 100;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompletionRequest {
     pub line: String,
-    /// Byte offset of the cursor within `line`.
-    pub cursor: usize,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Backend {
-    FilePath,
+    /// The token under the cursor, after its trigger character.
+    pub token: Range<usize>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -29,8 +30,6 @@ pub struct CompletionItem {
     /// Text substituted for [`CompletionResult::range`].
     pub replacement: String,
     pub description: Option<String>,
-    /// Directories keep the popup open so the user can drill deeper.
-    pub stay_open: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -42,7 +41,6 @@ pub enum CompletionStatus {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompletionResult {
-    pub backend: Backend,
     /// Bytes of the line that accepting overwrites.
     pub range: Range<usize>,
     pub status: CompletionStatus,
@@ -51,8 +49,12 @@ pub struct CompletionResult {
 }
 
 pub trait CompletionBackend {
-    /// The completion offered at the cursor, or `None` when this backend has
-    /// nothing to do with the request.
+    /// The character a token must start with for this backend to answer.
+    fn trigger(&self) -> char;
+
+    /// The completion offered at the cursor. `None` when the trigger matched
+    /// but this backend still does not apply, which closes the popup rather
+    /// than showing an empty one.
     fn complete(&self, request: &CompletionRequest) -> Option<CompletionResult>;
 
     /// Called when this backend becomes the active one.
@@ -64,51 +66,73 @@ pub trait CompletionBackend {
 }
 
 struct Active {
+    /// Trigger of the backend that claimed the request, and so the key it is
+    /// filed under.
+    trigger: char,
     request: CompletionRequest,
     result: CompletionResult,
     selected: usize,
 }
 
 pub struct CompletionController {
-    paths: Paths,
+    backends: HashMap<char, Box<dyn CompletionBackend>>,
     active: Option<Active>,
 }
 
 impl CompletionController {
-    pub fn new() -> Self {
-        Self {
-            paths: Paths::new(),
-            active: None,
+    /// Keyed by each backend's own [`CompletionBackend::trigger`], so the key
+    /// can never disagree with the backend filed under it.
+    ///
+    /// # Panics
+    ///
+    /// If two backends share a trigger. The list is written in source, so a
+    /// clash is a programming error with no sensible recovery: dropping one
+    /// silently would make completion mysteriously dead for that character.
+    pub fn new(backends: Vec<Box<dyn CompletionBackend>>) -> Self {
+        let mut keyed = HashMap::with_capacity(backends.len());
+        for backend in backends {
+            let trigger = backend.trigger();
+            let clash = keyed.insert(trigger, backend).is_some();
+            assert!(
+                !clash,
+                "two completion backends claim the trigger {trigger:?}"
+            );
         }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn with_paths(index: Vec<String>) -> Self {
         Self {
-            paths: Paths::with_index(index),
+            backends: keyed,
             active: None,
         }
     }
 
     /// Re-evaluate after every editor change.
     pub fn sync(&mut self, line: &str, cursor: usize) {
+        self.active = self.claim(line, cursor);
+    }
+
+    /// Any step failing means no completion applies here: no token under the
+    /// cursor, no backend for its trigger, or the backend declining.
+    fn claim(&mut self, line: &str, cursor: usize) -> Option<Active> {
+        let token = token::at(line, cursor)?;
+        // Read before the backend is borrowed mutably.
+        let switching = self.active.as_ref().map(|active| active.trigger) != Some(token.trigger);
+        let backend = self.backends.get_mut(&token.trigger)?;
+        // Becoming active is the one moment a backend's data is worth reading.
+        if switching {
+            backend.refresh();
+        }
+
         let request = CompletionRequest {
             line: line.to_owned(),
-            cursor,
+            token: token.range,
         };
-        let Some(result) = self.paths.complete(&request) else {
-            self.active = None;
-            return;
-        };
-        // Becoming active is the one moment a backend's data is worth reading.
-        if self.active.as_ref().map(|active| active.result.backend) != Some(result.backend) {
-            self.paths.refresh();
-        }
-        self.active = Some(Active {
+
+        let result = backend.complete(&request)?;
+        Some(Active {
+            trigger: token.trigger,
             request,
             result,
             selected: 0,
-        });
+        })
     }
 
     pub fn is_open(&self) -> bool {
@@ -163,26 +187,38 @@ impl CompletionController {
         let active = self.active.as_ref()?;
         let item = active.result.items.get(active.selected)?.clone();
         let range = active.result.range.clone();
-        if !item.stay_open {
-            self.active = None;
-        }
+        self.active = None;
         Some((item, range))
     }
 
     pub fn poll(&mut self) -> Poll {
-        let poll = self.paths.poll();
+        let poll = self
+            .backends
+            .values_mut()
+            .fold(Poll::Idle, |poll, backend| poll.combine(backend.poll()));
+
         if poll == Poll::Changed {
             self.recompute();
         }
         poll
     }
 
-    /// A backend whose data changed under an open popup answers again.
+    /// A backend whose data changed under an open popup answers again. The
+    /// request is unchanged, so the backend that claimed it still owns it.
     fn recompute(&mut self) {
-        let Some(request) = self.active.as_ref().map(|active| active.request.clone()) else {
+        let Some((trigger, request)) = self
+            .active
+            .as_ref()
+            .map(|active| (active.trigger, active.request.clone()))
+        else {
             return;
         };
-        let Some(result) = self.paths.complete(&request) else {
+
+        let Some(result) = self
+            .backends
+            .get(&trigger)
+            .and_then(|backend| backend.complete(&request))
+        else {
             self.active = None;
             return;
         };
@@ -196,11 +232,12 @@ impl CompletionController {
 /// Shared so no backend can invent its own ordering.
 fn ranked_items<F>(pattern: &str, candidates: &[String], item: F) -> Vec<CompletionItem>
 where
-    F: Fn(usize, &str) -> CompletionItem,
+    F: Fn(&str) -> CompletionItem,
 {
-    matcher::match_all(pattern, candidates)
+    matcher::rank_all(pattern, candidates)
         .into_iter()
-        .map(|index| item(index, &candidates[index]))
+        .take(MAX_SUGGESTIONS)
+        .map(|index| item(&candidates[index]))
         .collect()
 }
 
@@ -209,7 +246,9 @@ mod tests {
     use super::*;
 
     fn engine(index: &[&str]) -> CompletionController {
-        CompletionController::with_paths(index.iter().map(|path| (*path).to_owned()).collect())
+        CompletionController::new(vec![Box::new(Paths::with_index(
+            index.iter().map(|path| (*path).to_owned()).collect(),
+        ))])
     }
 
     fn displayed(engine: &CompletionController) -> Vec<String> {
@@ -218,6 +257,25 @@ mod tests {
             .iter()
             .map(|item| item.display.clone())
             .collect()
+    }
+
+    /// A trigger no backend is filed under closes the popup, exactly as if
+    /// there were no token at all.
+    #[test]
+    fn an_unclaimed_trigger_opens_nothing() {
+        let mut engine = engine(&["src/main.rs"]);
+        engine.sync("/help", 5);
+
+        assert!(!engine.is_open());
+    }
+
+    #[test]
+    #[should_panic(expected = "two completion backends claim the trigger")]
+    fn two_backends_cannot_share_a_trigger() {
+        CompletionController::new(vec![
+            Box::new(Paths::with_index(Vec::new())),
+            Box::new(Paths::with_index(Vec::new())),
+        ]);
     }
 
     #[test]
@@ -263,14 +321,30 @@ mod tests {
         assert!(!engine.is_open());
     }
 
+    /// A directory is a reference in its own right, so accepting one finishes.
     #[test]
-    fn accepting_a_directory_keeps_the_popup_open() {
-        let mut engine = engine(&["crates/"]);
+    fn accepting_a_directory_closes_the_popup() {
+        let mut engine = engine(&["crates/", "crates/alan/"]);
         engine.sync("@crat", 5);
 
-        let (item, _) = engine.accept().unwrap();
-        assert!(item.stay_open);
+        let (item, range) = engine.accept().unwrap();
+        assert_eq!(item.replacement, "crates/");
+        assert_eq!(range, 1..5);
+        assert!(!engine.is_open());
+    }
+
+    /// Typing past the directory reopens the popup against the deeper paths.
+    #[test]
+    fn typing_past_a_directory_reopens_the_popup() {
+        let mut engine = engine(&["crates/", "crates/alan/main.rs"]);
+        engine.sync("@crates/", 8);
+        engine.accept();
+        assert!(!engine.is_open());
+
+        engine.sync("@crates/m", 9);
+
         assert!(engine.is_open());
+        assert_eq!(displayed(&engine), ["crates/alan/main.rs"]);
     }
 
     #[test]

@@ -1,21 +1,41 @@
-//! Pattern matching for completion candidates.
+//! Ranking candidates against a typed pattern.
+//!
+//! A pattern is a path fragment. Its `/`-separated parts must appear in the
+//! candidate in order, but may skip whole directories, so `crates/main.rs`
+//! finds `crates/alan/src/main.rs`. Matching ignores ASCII case.
 
-/// Quality of a match. The derived ordering is the ranking, so reordering
-/// these variants reorders every completion popup.
+/// How good a match is. Lower sorts first, and the field order is the
+/// tie-break order, so rearranging either reorders every completion popup.
+#[derive(PartialEq, Eq, PartialOrd, Ord, Clone, Copy)]
+struct Rank {
+    kind: Kind,
+    /// Byte offset of the match. Earlier beats later.
+    at: usize,
+    /// Length of the candidate. Shorter wins an otherwise equal match.
+    length: usize,
+}
+
+/// Where in the candidate the match landed.
 #[derive(PartialEq, Eq, PartialOrd, Ord, Clone, Copy)]
 enum Kind {
+    /// The candidate is the pattern.
     Exact,
+    /// The candidate begins with it.
     Prefix,
-    Segment,
+    /// The candidate's own name begins with it: `main` in `src/main.rs`.
+    Name,
+    /// Anywhere else.
     Contains,
 }
 
 /// Indexes into `candidates` of everything matching `pattern`, best first.
-pub fn match_all<S: AsRef<str>>(pattern: &str, candidates: &[S]) -> Vec<usize> {
+///
+/// Every function here takes the pattern before the text it is matched against.
+pub fn rank_all<S: AsRef<str>>(pattern: &str, candidates: &[S]) -> Vec<usize> {
     if pattern.is_empty() {
         return (0..candidates.len()).collect();
     }
-    let mut matched: Vec<(usize, (Kind, usize, usize))> = candidates
+    let mut matched: Vec<(usize, Rank)> = candidates
         .iter()
         .enumerate()
         .filter_map(|(index, candidate)| Some((index, rank(pattern, candidate.as_ref())?)))
@@ -24,37 +44,59 @@ pub fn match_all<S: AsRef<str>>(pattern: &str, candidates: &[S]) -> Vec<usize> {
     matched.into_iter().map(|(index, _)| index).collect()
 }
 
-/// Smaller is better in every field, so the tuple sorts best first.
-fn rank(pattern: &str, candidate: &str) -> Option<(Kind, usize, usize)> {
-    let at = find(candidate, pattern)?;
-    // An exact match also starts at zero, so it has to be tested first.
-    let kind = if candidate.len() == pattern.len() {
+fn rank(pattern: &str, candidate: &str) -> Option<Rank> {
+    // Where the candidate's own name starts, a directory's trailing `/` aside.
+    let name = candidate
+        .trim_end_matches('/')
+        .rfind('/')
+        .map_or(0, |slash| slash + 1);
+
+    // What was typed is usually the name, so a match there beats one in the
+    // directories above it: `tool` means `tools/src/tool.rs`, not `tools/`.
+    let at = match match_start(pattern, &candidate[name..]) {
+        Some(offset) => name + offset,
+        None => match_start(pattern, candidate)?,
+    };
+
+    // Equal lengths do not imply equal text, since a pattern may skip segments.
+    let kind = if candidate.eq_ignore_ascii_case(pattern) {
         Kind::Exact
     } else if at == 0 {
         Kind::Prefix
-    } else if at == segment_start(candidate) {
-        Kind::Segment
+    } else if at == name {
+        Kind::Name
     } else {
         Kind::Contains
     };
-    Some((kind, at, candidate.len()))
+    Some(Rank {
+        kind,
+        at,
+        length: candidate.len(),
+    })
 }
 
-/// Byte-wise search is safe for UTF-8: an ASCII needle cannot match inside a
-/// multi-byte sequence, whose bytes are all `>= 0x80`.
-fn find(haystack: &str, needle: &str) -> Option<usize> {
-    let (haystack, needle) = (haystack.as_bytes(), needle.as_bytes());
-    if needle.is_empty() {
-        // `windows(0)` panics.
-        return Some(0);
+/// Byte offset in `candidate` where the first of `pattern`'s parts matches,
+/// once every part has been found in order. `None` if any part is missing.
+fn match_start(pattern: &str, candidate: &str) -> Option<usize> {
+    let mut start = None;
+    let mut from = 0;
+    for part in pattern.split('/').filter(|part| !part.is_empty()) {
+        let at = find_from(part, candidate, from)?;
+        start.get_or_insert(at);
+        from = at + part.len();
     }
-    haystack
-        .windows(needle.len())
-        .position(|window| window.eq_ignore_ascii_case(needle))
+    start
 }
 
-fn segment_start(candidate: &str) -> usize {
-    candidate.rfind('/').map_or(0, |slash| slash + 1)
+/// Byte offset of `part` in `candidate` at or after `from`, ignoring ASCII
+/// case. Byte-wise because lowercasing both sides would allocate for every
+/// candidate on every keystroke, and slicing bytes cannot land off a `char`
+/// boundary.
+fn find_from(part: &str, candidate: &str, from: usize) -> Option<usize> {
+    candidate.as_bytes()[from..]
+        .windows(part.len())
+        .position(|window| window.eq_ignore_ascii_case(part.as_bytes()))
+        .map(|at| from + at)
 }
 
 #[cfg(test)]
@@ -62,7 +104,7 @@ mod tests {
     use super::*;
 
     fn ranked<'a>(pattern: &str, candidates: &[&'a str]) -> Vec<&'a str> {
-        match_all(pattern, candidates)
+        rank_all(pattern, candidates)
             .into_iter()
             .map(|index| candidates[index])
             .collect()
@@ -79,7 +121,7 @@ mod tests {
     }
 
     #[test]
-    fn ranks_exact_then_prefix_then_segment_then_substring() {
+    fn ranks_exact_then_prefix_then_name_then_anywhere() {
         let candidates = ["x/help", "helper", "help", "unhelpful"];
         assert_eq!(
             ranked("help", &candidates),
@@ -95,7 +137,7 @@ mod tests {
         assert_eq!(ranked("a", &candidates), [long_segment.as_str(), "ba"]);
     }
 
-    /// All three are segment matches, so only the tie-breaks separate them.
+    /// All three match on the name, so only the tie-breaks separate them.
     #[test]
     fn tie_breaks_on_position_then_length() {
         let candidates = ["crates/x/main.rs", "b/main_helper.rs", "a/main.rs"];
@@ -108,5 +150,50 @@ mod tests {
     #[test]
     fn ignores_ascii_case() {
         assert_eq!(ranked("HeLp", &["/help"]), ["/help"]);
+    }
+
+    /// A path typed from memory skips the segments in between.
+    #[test]
+    fn pattern_segments_may_skip_directories() {
+        let candidates = ["crates/alan/src/main.rs", "crates/agent/src/lib.rs"];
+
+        assert_eq!(
+            ranked("crates/main.rs", &candidates),
+            ["crates/alan/src/main.rs"]
+        );
+        assert_eq!(
+            ranked("alan/main", &candidates),
+            ["crates/alan/src/main.rs"]
+        );
+    }
+
+    /// Skipping segments is not the same as ignoring their order.
+    #[test]
+    fn pattern_segments_must_appear_in_order() {
+        let candidates = ["crates/alan/src/main.rs"];
+
+        assert_eq!(ranked("main/crates", &candidates), Vec::<&str>::new());
+    }
+
+    /// The name is what was typed, not the directory it happens to repeat in.
+    #[test]
+    fn a_name_match_outranks_the_same_text_in_the_directory_path() {
+        let candidates = ["crates/tools/src/fs.rs", "crates/tools/src/tool.rs"];
+
+        assert_eq!(
+            ranked("tool", &candidates),
+            ["crates/tools/src/tool.rs", "crates/tools/src/fs.rs"]
+        );
+    }
+
+    /// A directory's own name is its last segment, trailing slash aside.
+    #[test]
+    fn a_directory_matches_on_its_own_name() {
+        let candidates = ["crates/tools/", "crates/tools/src/args.rs"];
+
+        assert_eq!(
+            ranked("tools", &candidates),
+            ["crates/tools/", "crates/tools/src/args.rs"]
+        );
     }
 }
