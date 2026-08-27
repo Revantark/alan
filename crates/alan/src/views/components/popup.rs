@@ -1,3 +1,4 @@
+use crate::core::completion::CompletionItem;
 use crate::core::{CompletionStatus, Controller};
 use crate::views::UiState;
 use crate::views::component::Component;
@@ -73,42 +74,44 @@ impl Component for PopupList {
             .saturating_sub(2)
             .min(completion.item_count().saturating_sub(VISIBLE_ROWS));
 
-        let rows = completion
+        let lines = completion
             .items(start, VISIBLE_ROWS)
             .iter()
             .enumerate()
-            .map(|(offset, item)| {
-                let (marker, marker_style) = if start + offset == selected {
-                    ("› ", Style::default().fg(theme::PROMPT_FG))
-                } else {
-                    ("  ", Style::default())
-                };
-                // Directories carry a trailing `/`.
-                let label_style = if item.display.ends_with('/') {
-                    Style::default().fg(ratatui::style::Color::White)
-                } else {
-                    Style::default().fg(theme::EDITOR_FG)
-                };
-                let mut spans = vec![
-                    Span::styled(marker, marker_style),
-                    Span::styled(item.display.clone(), label_style),
-                ];
-                if let Some(description) = &item.description {
-                    spans.push(Span::styled(
-                        format!("  {description}"),
-                        Style::default().fg(theme::MUTED_FG),
-                    ));
-                }
-                Line::from(spans)
-            })
+            .map(|(offset, item)| item_line(item, start + offset == selected))
             .collect::<Vec<_>>();
         frame.render_widget(
-            Paragraph::new(Text::from(rows))
+            Paragraph::new(Text::from(lines))
                 .style(Style::default().bg(theme::EDITOR_BG))
                 .block(Block::default().padding(Padding::new(2, 2, 1, 1))),
             area,
         );
     }
+}
+
+/// One popup line: selection marker, candidate, and its description.
+///
+/// Brightness marks what the next Enter will take, so a trailing `/` is left
+/// to say on its own that an entry is a directory.
+fn item_line(item: &CompletionItem, is_selected: bool) -> Line<'static> {
+    // The marker is blank unless selected, so it can always carry the accent.
+    let (marker, label) = if is_selected {
+        ("› ", theme::SELECTION_FG)
+    } else {
+        ("  ", theme::EDITOR_FG)
+    };
+
+    let mut spans = vec![
+        Span::styled(marker, Style::default().fg(theme::PROMPT_FG)),
+        Span::styled(item.display.clone(), Style::default().fg(label)),
+    ];
+    if let Some(description) = &item.description {
+        spans.push(Span::styled(
+            format!("  {description}"),
+            Style::default().fg(theme::MUTED_FG),
+        ));
+    }
+    Line::from(spans)
 }
 
 #[cfg(test)]
