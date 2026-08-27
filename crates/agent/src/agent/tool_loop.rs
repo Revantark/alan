@@ -133,11 +133,7 @@ async fn handle_tool_calls(
                 super::persistence::append_context_message(
                     agent,
                     context,
-                    AgentMessage::tool_result_with_parts(
-                        &call_id,
-                        &output_text,
-                        content_parts,
-                    ),
+                    AgentMessage::tool_result_with_parts(&call_id, &output_text, content_parts),
                 )
                 .await?;
 

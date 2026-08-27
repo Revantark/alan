@@ -1,7 +1,7 @@
 //! Chat feature state and agent stream coordination.
 
-use super::action::ImageAttachment;
 use super::Poll;
+use super::action::ImageAttachment;
 use agent::{Agent, AgentEvent, AgentStream};
 use llm::Usage;
 use std::sync::Arc;
