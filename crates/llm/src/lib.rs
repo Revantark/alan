@@ -15,7 +15,7 @@ pub use api::LlmApi;
 pub use apis::ChatCompletionsApi;
 pub use error::LlmError;
 pub use event::{LlmEvent, LlmStream};
-pub use message::{Message, Role};
+pub use message::{ContentPart, ImageUrl, Message, Role};
 pub use request::{
     CompletionInput, Credential, LlmRequest, PromptCacheControl, PromptCacheControlType,
     PromptCacheTtl, ReasoningEffort, RequestOptions,

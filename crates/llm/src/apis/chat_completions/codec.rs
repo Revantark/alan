@@ -25,7 +25,7 @@ struct Request<'a> {
 #[derive(Serialize)]
 struct WireMessage {
     role: &'static str,
-    content: Option<String>,
+    content: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_calls: Option<Vec<WireToolCall>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -303,9 +303,17 @@ pub(crate) fn stop_reason_for_finish_reason(reason: Option<&str>) -> Option<Stop
 }
 
 fn wire_message(message: &Message) -> WireMessage {
+    let content = if let Some(parts) = &message.content_parts {
+        Some(serde_json::to_value(parts).expect("content parts must serialize"))
+    } else {
+        message
+            .content
+            .as_ref()
+            .map(|s| serde_json::Value::String(s.clone()))
+    };
     WireMessage {
         role: role(message.role),
-        content: message.content.clone(),
+        content,
         tool_calls: message.tool_calls.as_ref().map(|calls| {
             calls
                 .iter()
@@ -490,5 +498,79 @@ mod tests {
         ] {
             assert_eq!(stop_reason_for_finish_reason(Some(reason)), Some(expected));
         }
+    }
+
+    #[test]
+    fn serializes_image_url_with_direct_url() {
+        use crate::{ContentPart, ImageUrl};
+
+        let messages = [Message::user_with_parts(vec![
+            ContentPart::Text {
+                text: "What's in this image?".into(),
+            },
+            ContentPart::Image {
+                image_url: ImageUrl {
+                    url: "https://example.com/photo.jpg".into(),
+                },
+            },
+        ])];
+        let options = RequestOptions::default();
+        let body = serialize_request(&request("model-a", &messages, &[], &options)).unwrap();
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+
+        let content = &json["messages"][0]["content"];
+        assert!(content.is_array(), "content must be an array of parts");
+        let parts = content.as_array().unwrap();
+        assert_eq!(parts.len(), 2);
+        assert_eq!(parts[0]["type"], "text");
+        assert_eq!(parts[0]["text"], "What's in this image?");
+        assert_eq!(parts[1]["type"], "image_url");
+        assert_eq!(
+            parts[1]["image_url"]["url"],
+            "https://example.com/photo.jpg"
+        );
+    }
+
+    #[test]
+    fn serializes_image_url_with_base64_data_uri() {
+        use crate::{ContentPart, ImageUrl};
+
+        let data_uri = "data:image/jpeg;base64,/9j/4AAQSkZJRg==";
+        let messages = [Message::user_with_parts(vec![
+            ContentPart::Text {
+                text: "Describe this local image".into(),
+            },
+            ContentPart::Image {
+                image_url: ImageUrl {
+                    url: data_uri.into(),
+                },
+            },
+        ])];
+        let options = RequestOptions::default();
+        let body = serialize_request(&request("model-a", &messages, &[], &options)).unwrap();
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+
+        let content = &json["messages"][0]["content"];
+        let parts = content.as_array().unwrap();
+        assert_eq!(parts[1]["image_url"]["url"], data_uri);
+    }
+
+    #[test]
+    fn serializes_text_only_content_parts_as_array() {
+        use crate::ContentPart;
+
+        let messages = [Message::user_with_parts(vec![ContentPart::Text {
+            text: "hello".into(),
+        }])];
+        let options = RequestOptions::default();
+        let body = serialize_request(&request("model-a", &messages, &[], &options)).unwrap();
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+
+        let content = &json["messages"][0]["content"];
+        assert!(content.is_array());
+        let parts = content.as_array().unwrap();
+        assert_eq!(parts.len(), 1);
+        assert_eq!(parts[0]["type"], "text");
+        assert_eq!(parts[0]["text"], "hello");
     }
 }

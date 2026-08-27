@@ -156,13 +156,18 @@ fn wrap_entry(entry: &Entry, width: usize, content_width: usize) -> Vec<Line<'st
         Entry::Prompt(text) => {
             let mut lines = Vec::new();
             lines.push(background_line("", width, theme::USER_FG, theme::USER_BG));
-            for line in wrap_text(text, content_width) {
-                lines.push(background_line(
-                    &line,
-                    width,
-                    theme::USER_FG,
-                    theme::USER_BG,
-                ));
+            if text.is_empty() {
+                // Image-only submission: no text accompanied the attachment.
+                lines.push(indented_line("(attachment)", theme::MUTED_FG));
+            } else {
+                for line in wrap_text(text, content_width) {
+                    lines.push(background_line(
+                        &line,
+                        width,
+                        theme::USER_FG,
+                        theme::USER_BG,
+                    ));
+                }
             }
             lines.push(background_line("", width, theme::USER_FG, theme::USER_BG));
             lines

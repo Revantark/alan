@@ -1,6 +1,6 @@
 //! UI-independent application coordinator.
 
-use super::action::Command;
+use super::action::{Command, ImageAttachment};
 use super::chat::{ChatController, Entry};
 use super::command::SlashCommand;
 use super::completion::CompletionController;
@@ -134,8 +134,8 @@ impl Controller {
                 }
                 false
             }
-            Command::Submit(text) => {
-                self.submit(text);
+            Command::Submit { text, images } => {
+                self.submit(text, images);
                 false
             }
             Command::MoveLoginSelection(delta) => {
@@ -161,7 +161,7 @@ impl Controller {
         true
     }
 
-    pub fn submit(&mut self, text: String) {
+    pub fn submit(&mut self, text: String, images: Vec<ImageAttachment>) {
         if self.overlay == Overlay::Login {
             self.login.submit(text);
             return;
@@ -178,11 +178,11 @@ impl Controller {
         }
 
         let text = text.trim();
-        if text.is_empty() || self.chat.is_busy() {
+        if (text.is_empty() && images.is_empty()) || self.chat.is_busy() {
             return;
         }
 
-        self.chat.submit(text.to_owned());
+        self.chat.submit(text.to_owned(), images);
     }
 
     pub fn open_login(&mut self) {
@@ -250,7 +250,7 @@ mod tests {
     #[tokio::test]
     async fn submit_streams_incremental_text() {
         let mut controller = make_controller();
-        controller.submit("hi".into());
+        controller.submit("hi".into(), vec![]);
         tokio::time::sleep(Duration::from_millis(50)).await;
         assert_eq!(controller.poll(), Poll::Finished);
         assert_eq!(controller.chat().len(), 2);
@@ -300,7 +300,7 @@ mod tests {
             .unwrap();
         let mut controller = Controller::new(Agent::builder(model).build().unwrap());
 
-        controller.submit("hi".into());
+        controller.submit("hi".into(), vec![]);
         tokio::time::sleep(Duration::from_millis(50)).await;
         assert_eq!(controller.poll(), Poll::Finished);
         assert_eq!(controller.chat().len(), 3);
@@ -313,7 +313,7 @@ mod tests {
     #[test]
     fn submit_ignores_empty_and_busy() {
         let mut controller = make_controller();
-        controller.submit("   ".into());
+        controller.submit("   ".into(), vec![]);
         assert!(controller.chat().is_empty());
         assert!(!controller.is_busy());
     }
@@ -321,7 +321,7 @@ mod tests {
     #[test]
     fn help_writes_to_the_transcript_without_reaching_the_agent() {
         let mut controller = make_controller();
-        controller.submit("/help".into());
+        controller.submit("/help".into(), vec![]);
 
         assert_eq!(controller.chat().len(), 1);
         assert!(matches!(
@@ -337,8 +337,8 @@ mod tests {
     #[tokio::test]
     async fn info_is_not_absorbed_by_a_streaming_response() {
         let mut controller = make_controller();
-        controller.submit("hi".into());
-        controller.submit("/help".into());
+        controller.submit("hi".into(), vec![]);
+        controller.submit("/help".into(), vec![]);
         tokio::time::sleep(Duration::from_millis(50)).await;
         controller.poll();
 
@@ -353,10 +353,10 @@ mod tests {
         let mut controller = make_controller();
         assert!(!controller.plan_mode());
 
-        controller.submit("/plan".into());
+        controller.submit("/plan".into(), vec![]);
         assert!(controller.plan_mode());
 
-        controller.submit("/plan".into());
+        controller.submit("/plan".into(), vec![]);
         assert!(!controller.plan_mode());
     }
 
@@ -364,7 +364,7 @@ mod tests {
     #[tokio::test]
     async fn unknown_slash_text_is_sent_as_a_prompt() {
         let mut controller = make_controller();
-        controller.submit("/logn".into());
+        controller.submit("/logn".into(), vec![]);
 
         assert!(matches!(&controller.chat()[0], Entry::Prompt(text) if text == "/logn"));
     }

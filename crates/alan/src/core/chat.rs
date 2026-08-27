@@ -1,6 +1,7 @@
 //! Chat feature state and agent stream coordination.
 
 use super::Poll;
+use super::action::ImageAttachment;
 use agent::{Agent, AgentEvent, AgentStream};
 use llm::Usage;
 use std::sync::Arc;
@@ -66,7 +67,7 @@ impl ChatController {
 
         for message in messages {
             match message {
-                agent::AgentMessage::User(text) => self.entries.push(Entry::Prompt(text)),
+                agent::AgentMessage::User { text, .. } => self.entries.push(Entry::Prompt(text)),
                 agent::AgentMessage::Assistant(response) => {
                     if let Some(reasoning) = response.reasoning.as_deref()
                         && !reasoning.is_empty()
@@ -90,6 +91,7 @@ impl ChatController {
                 agent::AgentMessage::ToolResult {
                     tool_call_id,
                     content,
+                    ..
                 } => {
                     if let Some(Entry::ToolCall { output, .. }) = self
                         .entries
@@ -136,17 +138,41 @@ impl ChatController {
         self.revision = self.revision.wrapping_add(1);
     }
 
-    pub fn submit(&mut self, text: impl Into<String>) {
+    pub fn submit(&mut self, text: impl Into<String>, images: Vec<ImageAttachment>) {
         let text = text.into();
         let text = text.trim();
-        if text.is_empty() || self.busy {
+        if (text.is_empty() && images.is_empty()) || self.busy {
             return;
         }
 
         self.entries.push(Entry::Prompt(text.to_owned()));
         self.revision = self.revision.wrapping_add(1);
-        self.busy = true;
-        self.stream = Some(self.agent.prompt_stream(text.to_owned()));
+        let image_urls: Vec<llm::ImageUrl> = images
+            .into_iter()
+            .map(|img| llm::ImageUrl {
+                url: format!("data:{};base64,{}", img.mime_type, img.base64_data),
+            })
+            .collect();
+        let builder = self
+            .agent
+            .prompt()
+            .content(text.to_owned())
+            .images(image_urls)
+            .stream(true);
+
+        match self.agent.ask(builder) {
+            Ok(stream) => {
+                self.busy = true;
+                self.stream = Some(stream);
+            }
+            Err(error) => {
+                // Replace the placeholder prompt with the failure so a
+                // validation mismatch between crates can never panic.
+                self.entries.pop();
+                self.entries.push(Entry::Error(error.to_string()));
+                self.revision = self.revision.wrapping_add(1);
+            }
+        }
     }
 
     pub fn abort(&mut self) {
@@ -216,7 +242,7 @@ impl ChatController {
                                 ToolStatus::Failed(error),
                             );
                         }
-                        AgentEvent::Finished { usage } => {
+                        AgentEvent::Finished { usage, .. } => {
                             changed |= Self::append_delta(&mut self.entries, &pending_text);
                             pending_text.clear();
                             changed |= Self::ensure_response_entry(&mut self.entries);
