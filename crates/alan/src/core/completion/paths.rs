@@ -90,11 +90,10 @@ impl CompletionBackend for Paths {
     /// Always answers: the trigger was the only condition, and the controller
     /// has already checked it.
     fn complete(&self, request: &CompletionRequest) -> Option<CompletionResult> {
-        let pattern = &request.line[request.token.clone()];
         Some(CompletionResult {
-            range: request.token.clone(),
+            range: request.range.clone(),
             status: self.status.clone(),
-            items: ranked_items(pattern, &self.index, |path| CompletionItem {
+            items: ranked_items(&request.pattern, &self.index, |path| CompletionItem {
                 display: path.to_owned(),
                 replacement: path.to_owned(),
             }),
@@ -414,19 +413,19 @@ mod tests {
         let _ = fs::remove_dir_all(&root);
     }
 
-    fn request(line: &str, token: std::ops::Range<usize>) -> CompletionRequest {
+    fn request(pattern: &str, range: std::ops::Range<usize>) -> CompletionRequest {
         CompletionRequest {
-            line: line.to_owned(),
-            token,
+            pattern: pattern.to_owned(),
+            range,
         }
     }
 
-    /// Finding the token is the controller's job, so this backend answers
-    /// whatever range it is handed and overwrites exactly that.
+    /// Locating the token is the controller's job, so this backend ranks the
+    /// pattern it is handed and overwrites exactly the range it came with.
     #[test]
-    fn the_handed_token_is_what_gets_replaced() {
+    fn the_handed_range_is_what_gets_replaced() {
         let paths = Paths::with_index(vec!["src/main.rs".into()]);
-        let result = paths.complete(&request("explain @mai", 9..12)).unwrap();
+        let result = paths.complete(&request("mai", 9..12)).unwrap();
 
         assert_eq!(result.range, 9..12);
         assert_eq!(result.items[0].replacement, "src/main.rs");

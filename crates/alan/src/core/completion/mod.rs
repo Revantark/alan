@@ -19,9 +19,10 @@ const MAX_SUGGESTIONS: usize = 100;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompletionRequest {
-    pub line: String,
-    /// The token under the cursor, after its trigger character.
-    pub token: Range<usize>,
+    /// What was typed after the trigger character.
+    pub pattern: String,
+    /// Bytes of the line the pattern occupies, which accepting overwrites.
+    pub range: Range<usize>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -120,9 +121,10 @@ impl CompletionController {
             backend.refresh();
         }
 
+        // Slicing the line happens here, once, rather than in every backend.
         let request = CompletionRequest {
-            line: line.to_owned(),
-            token: token.range,
+            pattern: line[token.range.clone()].to_owned(),
+            range: token.range,
         };
 
         let result = backend.complete(&request)?;

@@ -246,9 +246,9 @@ impl UiState {
             }
             Event::Mouse(mouse) => self.handle_mouse_event(mouse, rendered_lines),
             Event::Paste(text) => {
+                self.editor.insert_str(text);
                 self.dirty = true;
                 self.sync_completion(completion);
-                self.editor.insert_str(text);
                 None
             }
             event => {
@@ -929,6 +929,18 @@ mod tests {
         state.handle_editor_event_for_test(crossterm::event::Event::Paste("first\nsecond".into()));
 
         assert_eq!(state.editor_text(), "first\nsecond");
+    }
+
+    /// Completion syncs against the text after the paste, not before it.
+    #[test]
+    fn pasting_a_mention_opens_the_popup() {
+        let mut state = UiState::new();
+        let mut completion = completion_with(&["alpha.txt"]);
+
+        state.handle_event(Event::Paste("@alp".into()), &[], &mut completion);
+
+        assert_eq!(state.editor_text(), "@alp");
+        assert!(completion.is_open());
     }
 
     fn ctrl(code: char) -> crossterm::event::Event {
