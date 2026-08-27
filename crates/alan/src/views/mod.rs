@@ -300,8 +300,16 @@ impl UiState {
         let Some(line) = self.editor.lines().get(row) else {
             return;
         };
-        let start_col = line[..range.start].chars().count();
-        let chars = line[range].chars().count();
+        // The range was measured against this line, so it fits. Bail rather
+        // than panic if that ever stops being true.
+        let Some(before) = line.get(..range.start) else {
+            return;
+        };
+        let Some(replaced) = line.get(range) else {
+            return;
+        };
+        let start_col = before.chars().count();
+        let chars = replaced.chars().count();
         self.editor
             .move_cursor(CursorMove::Jump(row as u16, start_col as u16));
         self.editor.delete_str(chars);

@@ -4,11 +4,11 @@
 //! the line itself. Ranking is not their concern either: [`matcher`] orders
 //! every backend the same way.
 
+mod matcher;
 mod paths;
 mod token;
 
 use super::Poll;
-use super::matcher;
 pub use paths::Paths;
 use std::collections::HashMap;
 use std::ops::Range;
@@ -29,7 +29,6 @@ pub struct CompletionItem {
     pub display: String,
     /// Text substituted for [`CompletionResult::range`].
     pub replacement: String,
-    pub description: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -97,7 +97,6 @@ impl CompletionBackend for Paths {
             items: ranked_items(pattern, &self.index, |path| CompletionItem {
                 display: path.to_owned(),
                 replacement: path.to_owned(),
-                description: None,
             }),
         })
     }

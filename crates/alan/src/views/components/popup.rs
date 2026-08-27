@@ -1,5 +1,4 @@
-use crate::core::completion::CompletionItem;
-use crate::core::{CompletionStatus, Controller};
+use crate::core::{CompletionItem, CompletionStatus, Controller};
 use crate::views::UiState;
 use crate::views::component::Component;
 use crate::views::theme;
@@ -89,7 +88,7 @@ impl Component for PopupList {
     }
 }
 
-/// One popup line: selection marker, candidate, and its description.
+/// One popup line: the selection marker and the candidate.
 ///
 /// Brightness marks what the next Enter will take, so a trailing `/` is left
 /// to say on its own that an entry is a directory.
@@ -101,17 +100,10 @@ fn item_line(item: &CompletionItem, is_selected: bool) -> Line<'static> {
         ("  ", theme::EDITOR_FG)
     };
 
-    let mut spans = vec![
+    Line::from(vec![
         Span::styled(marker, Style::default().fg(theme::PROMPT_FG)),
         Span::styled(item.display.clone(), Style::default().fg(label)),
-    ];
-    if let Some(description) = &item.description {
-        spans.push(Span::styled(
-            format!("  {description}"),
-            Style::default().fg(theme::MUTED_FG),
-        ));
-    }
-    Line::from(spans)
+    ])
 }
 
 #[cfg(test)]
