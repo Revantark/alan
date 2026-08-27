@@ -213,9 +213,10 @@ fn prompt_content(content: impl Into<String>, plan_mode: bool) -> String {
     }
 }
 
-/// Validate that a user-facing prompt is non-empty.
-pub(super) fn validate_not_empty(text: &str) -> Result<(), AgentError> {
-    if text.trim().is_empty() {
+/// Validate that a prompt carries content: either non-empty text or at
+/// least one attached image.
+pub(super) fn validate_prompt(text: &str, images: &[llm::ImageUrl]) -> Result<(), AgentError> {
+    if text.trim().is_empty() && images.is_empty() {
         return Err(AgentError::Model(ModelError::Llm(
             llm::LlmError::Configuration("empty prompt".into()),
         )));
@@ -225,8 +226,8 @@ pub(super) fn validate_not_empty(text: &str) -> Result<(), AgentError> {
 
 /// Validate a user message (used by the streaming path after plan-mode suffix).
 fn validate_prompt_message(message: &AgentMessage) -> Result<(), AgentError> {
-    if let AgentMessage::User { text, .. } = message {
-        validate_not_empty(text)?;
+    if let AgentMessage::User { text, images } = message {
+        validate_prompt(text, images)?;
     }
     Ok(())
 }

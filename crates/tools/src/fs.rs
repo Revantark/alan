@@ -11,7 +11,7 @@ const MAX_FILE_SIZE: usize = 1024 * 1024;
 pub fn file_read_definition() -> ToolDefinition {
     ToolDefinition {
         name: "read".into(),
-        description: "Read a file, optionally limited to an inclusive line range".into(),
+        description: "Read a file/image, optionally limited to an inclusive line range".into(),
         parameters: json!({
             "type": "object",
             "properties": {

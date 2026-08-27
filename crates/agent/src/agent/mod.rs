@@ -73,7 +73,7 @@ impl Agent {
                 "empty prompt".into(),
             )))
         })?;
-        prompt::validate_not_empty(&content)?;
+        prompt::validate_prompt(&content, &builder.images)?;
         Ok(prompt::spawn_prompt_task(
             self,
             content,
