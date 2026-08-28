@@ -371,8 +371,8 @@ impl UiState {
     fn sync_completion(&mut self, completion: &mut CompletionController) {
         let (row, col) = self.editor.cursor();
         let line = self.editor.lines().get(row).map_or("", String::as_str);
-        let cursor = Self::char_offset(&line, col.min(line.chars().count()));
-        completion.sync(&line, cursor);
+        let cursor = Self::char_offset(line, col.min(line.chars().count()));
+        completion.sync(line, cursor);
     }
 
     fn handle_mouse_event(
