@@ -45,25 +45,24 @@ pub fn rank_all<S: AsRef<str>>(pattern: &str, candidates: &[S]) -> Vec<usize> {
 }
 
 fn rank(pattern: &str, candidate: &str) -> Option<Rank> {
+    let at = match_start(pattern, candidate)?;
+
     // Where the candidate's own name starts, a directory's trailing `/` aside.
     let name = candidate
         .trim_end_matches('/')
         .rfind('/')
         .map_or(0, |slash| slash + 1);
-
-    // What was typed is usually the name, so a match there beats one in the
-    // directories above it: `tool` means `tools/src/tool.rs`, not `tools/`.
-    let at = match match_start(pattern, &candidate[name..]) {
-        Some(offset) => name + offset,
-        None => match_start(pattern, candidate)?,
-    };
+    // The last part is the name being typed; the parts before it only say where
+    // to look. `src/s` means a name starting with `s`, not any path under `src`
+    // that happens to contain one.
+    let typed = pattern.rsplit('/').find(|part| !part.is_empty())?;
 
     // Equal lengths do not imply equal text, since a pattern may skip segments.
     let kind = if candidate.eq_ignore_ascii_case(pattern) {
         Kind::Exact
     } else if at == 0 {
         Kind::Prefix
-    } else if at == name {
+    } else if starts_ignoring_case(&candidate[name..], typed) {
         Kind::Name
     } else {
         Kind::Contains
@@ -73,6 +72,11 @@ fn rank(pattern: &str, candidate: &str) -> Option<Rank> {
         at,
         length: candidate.len(),
     })
+}
+
+fn starts_ignoring_case(text: &str, prefix: &str) -> bool {
+    text.len() >= prefix.len()
+        && text.as_bytes()[..prefix.len()].eq_ignore_ascii_case(prefix.as_bytes())
 }
 
 /// Byte offset in `candidate` where the first of `pattern`'s parts matches,
@@ -173,6 +177,18 @@ mod tests {
         let candidates = ["crates/alan/src/main.rs"];
 
         assert_eq!(ranked("main/crates", &candidates), Vec::<&str>::new());
+    }
+
+    /// The last part is the name being typed; the parts before it only locate
+    /// it. Every `.rs` file ends in `s`, which must not count as a name match.
+    #[test]
+    fn the_last_pattern_part_ranks_against_the_name() {
+        let candidates = ["crates/llm/src/lib.rs", "crates/agent/src/skill.rs"];
+
+        assert_eq!(
+            ranked("src/s", &candidates),
+            ["crates/agent/src/skill.rs", "crates/llm/src/lib.rs"]
+        );
     }
 
     /// The name is what was typed, not the directory it happens to repeat in.
