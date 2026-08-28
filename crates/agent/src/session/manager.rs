@@ -52,13 +52,15 @@ impl SessionManager {
             None => unreachable!("file_path always builds root/key/name.jsonl"),
         };
 
-        set_permissions(&self.root, true).await?;
+        // Builds the root as well as the key directory, so both have to be
+        // narrowed afterwards rather than before.
         tokio::fs::create_dir_all(&dir).await.map_err(|source| {
             SessionError::Store(StoreError::CreateDir {
                 dir: dir.clone(),
                 source,
             })
         })?;
+        set_permissions(&self.root, true).await?;
         set_permissions(&dir, true).await?;
 
         let header =
@@ -299,6 +301,34 @@ mod tests {
         let first = content.lines().next().expect("header line");
         let record: SessionRecord = serde_json::from_str(first).expect("valid header json");
         assert!(matches!(record, SessionRecord::Session { .. }));
+        cleanup(&root);
+    }
+
+    /// The root is created on demand, so the first session on a machine that
+    /// has never run one starts without it.
+    #[tokio::test]
+    async fn create_makes_a_missing_root() {
+        let root =
+            std::env::temp_dir().join(format!("alan-session-fresh-{}", uuid::Uuid::new_v4()));
+        assert!(!root.exists(), "root must not exist yet");
+        let manager = SessionManager::new(&root);
+
+        manager
+            .create("/tmp/project", "openrouter", "test-model", None)
+            .await
+            .expect("create session without a pre-existing root");
+
+        assert!(root.is_dir(), "create built the root");
+        // Narrowing it is the reason the call exists, so a root built here
+        // has to end up as private as one that already existed.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&root)
+                .expect("root metadata")
+                .permissions();
+            assert_eq!(mode.mode() & 0o777, 0o700, "root mode");
+        }
         cleanup(&root);
     }
 
