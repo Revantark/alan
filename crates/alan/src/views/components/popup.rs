@@ -13,23 +13,24 @@ const POPUP_ROWS: u16 = 7;
 /// Candidates visible inside that height.
 const VISIBLE_ROWS: usize = 5;
 
-/// Generic list popup rendered above the editor cursor. Currently used for
+/// Generic list popup rendered above the prompt. Currently used for
 /// `@`-path completion; reusable for any short list anchored at the prompt.
 #[derive(Debug, Default)]
 pub struct PopupList;
 
 impl PopupList {
-    /// Popup area whose bottom edge sits directly above `cursor`, spanning
-    /// the editor column (the frame minus the prompt gutter). Returns `None`
-    /// when there is no room to show it.
-    pub fn area_above_cursor(cursor: Rect, frame_area: Rect) -> Option<Rect> {
-        let top = cursor.y.checked_sub(POPUP_ROWS)?;
-        if top < frame_area.y || cursor.y >= frame_area.bottom() {
+    /// Popup area sitting directly above `prompt`, spanning the frame width.
+    ///
+    /// Anchored to the prompt rather than the cursor so it never covers the
+    /// status line, which is what describes the keys the popup has taken.
+    /// Returns `None` when there is no room above.
+    pub fn area_above(prompt: Rect, frame_area: Rect) -> Option<Rect> {
+        let top = prompt.y.checked_sub(POPUP_ROWS)?;
+        if top < frame_area.y || prompt.y > frame_area.bottom() {
             return None;
         }
-        let x = frame_area.x;
         Some(Rect {
-            x,
+            x: frame_area.x,
             y: top,
             width: frame_area.width,
             height: POPUP_ROWS,
@@ -110,22 +111,27 @@ fn item_line(item: &CompletionItem, is_selected: bool) -> Line<'static> {
 mod tests {
     use super::*;
 
+    /// Anchoring above the prompt is what keeps the status line, which sits
+    /// inside the prompt area, out from under the popup.
     #[test]
-    fn popup_sits_directly_above_cursor() {
+    fn popup_sits_directly_above_the_prompt() {
         let frame = Rect::new(0, 0, 80, 24);
-        let cursor = Rect::new(0, 20, 1, 1);
-        let area = PopupList::area_above_cursor(cursor, frame).unwrap();
+        let prompt = Rect::new(0, 16, 80, 8);
+
+        let area = PopupList::area_above(prompt, frame).unwrap();
+
         assert_eq!(area.height, POPUP_ROWS);
-        assert_eq!(area.bottom(), cursor.y);
+        assert_eq!(area.bottom(), prompt.y);
+        assert!(area.bottom() <= prompt.y, "overlaps the prompt");
     }
 
     #[test]
-    fn no_room_above_cursor_means_no_popup() {
+    fn no_room_above_the_prompt_means_no_popup() {
         let frame = Rect::new(0, 0, 80, 24);
-        // Not enough rows above the cursor for the fixed height.
-        assert!(PopupList::area_above_cursor(Rect::new(0, 3, 1, 1), frame).is_none());
-        assert!(PopupList::area_above_cursor(Rect::new(0, 0, 1, 1), frame).is_none());
-        // Cursor off the bottom of the frame.
-        assert!(PopupList::area_above_cursor(Rect::new(0, 24, 1, 1), frame).is_none());
+        // Not enough rows above the prompt for the fixed height.
+        assert!(PopupList::area_above(Rect::new(0, 3, 80, 8), frame).is_none());
+        assert!(PopupList::area_above(Rect::new(0, 0, 80, 8), frame).is_none());
+        // Prompt off the bottom of the frame.
+        assert!(PopupList::area_above(Rect::new(0, 25, 80, 8), frame).is_none());
     }
 }

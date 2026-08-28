@@ -11,5 +11,5 @@ pub use action::{Action, Command, ImageAttachment};
 pub use chat::Entry;
 pub use command::SlashCommand;
 pub use completion::{CompletionController, CompletionItem, CompletionStatus};
-pub use controller::{Controller, Overlay, Poll};
+pub use controller::{Activity, Controller, Overlay, Poll};
 pub use login::LoginState;

@@ -1,4 +1,4 @@
-use crate::core::{Controller, LoginState};
+use crate::core::{Activity, Controller, LoginState};
 use crate::views::UiState;
 use crate::views::component::Component;
 use crate::views::components::PopupList;
@@ -14,6 +14,65 @@ use ratatui::widgets::Paragraph;
 #[derive(Debug, Default)]
 pub struct Footer {
     popup: PopupList,
+}
+
+/// How an [`Activity`] presents itself in the status line.
+struct Status {
+    style: Style,
+    label: &'static str,
+    hints: &'static str,
+}
+
+impl From<Activity> for Status {
+    fn from(activity: Activity) -> Self {
+        match activity {
+            Activity::Thinking => Status {
+                label: "  ● thinking",
+                hints: "  Ctrl-C stop",
+                style: Style::default().italic().fg(ratatui::style::Color::Yellow),
+            },
+            // The list on screen already says what is happening, so the dot
+            // only holds the column and carries the popup's own accent.
+            Activity::Suggesting => Status {
+                label: "  ●",
+                hints: "  Enter accept · ↑↓ move · Esc dismiss",
+                style: Style::default().fg(theme::PROMPT_FG),
+            },
+            Activity::Idle => Status {
+                label: "  ● idle",
+                hints: "  Enter send · Ctrl-C quit",
+                style: Style::default().fg(ratatui::style::Color::Green),
+            },
+        }
+    }
+}
+
+/// Flags that layer onto any activity.
+fn badges(controller: &Controller) -> Vec<Span<'static>> {
+    let mut badges = Vec::new();
+    if controller.plan_mode() {
+        badges.push(Span::styled(
+            " · Plan mode",
+            Style::default().fg(ratatui::style::Color::White),
+        ));
+    }
+    if let Some(cost) = controller.usage().cost {
+        badges.push(Span::styled(
+            format!(" · ${:.4}", (cost * 10_000.0).trunc() / 10_000.0),
+            Style::default().fg(theme::MUTED_FG),
+        ));
+    }
+    badges
+}
+
+fn status_line(controller: &Controller) -> Line<'static> {
+    let status = Status::from(controller.activity());
+    let mut spans = vec![
+        Span::styled(status.label, status.style),
+        Span::styled(status.hints, Style::default().fg(theme::MUTED_FG)),
+    ];
+    spans.extend(badges(controller));
+    Line::from(spans)
 }
 
 impl Component for Footer {
@@ -64,38 +123,8 @@ impl Component for Footer {
             frame.render_widget(attachments, attachment_area);
         }
 
-        let (indicator, indicator_style, shortcuts) = if controller.is_busy() {
-            (
-                "  ● thinking",
-                Style::default().italic().fg(ratatui::style::Color::Yellow),
-                "· Ctrl-C stop",
-            )
-        } else {
-            (
-                "  ● idle",
-                Style::default().fg(ratatui::style::Color::Green),
-                "  Enter send · Ctrl-C quit",
-            )
-        };
-        let mut status_spans = vec![
-            Span::styled(indicator, indicator_style),
-            Span::styled(shortcuts, Style::default().fg(theme::MUTED_FG)),
-        ];
-        if controller.plan_mode() {
-            status_spans.push(Span::styled(
-                " · Plan mode",
-                Style::default().fg(ratatui::style::Color::White),
-            ));
-        }
-        if let Some(cost) = controller.usage().cost {
-            status_spans.push(Span::styled(
-                format!(" · ${:.4}", (cost * 10_000.0).trunc() / 10_000.0),
-                Style::default().fg(theme::MUTED_FG),
-            ));
-        }
-        let status = Line::from(status_spans);
         frame.render_widget(
-            Paragraph::new(status).style(Style::default().bg(theme::EDITOR_BG)),
+            Paragraph::new(status_line(controller)).style(Style::default().bg(theme::EDITOR_BG)),
             status_area,
         );
 
@@ -137,11 +166,9 @@ impl Component for Footer {
         state.editor().render(input_area, frame.buffer_mut());
         if let Some(position) = state.cursor_screen_position() {
             frame.set_cursor_position(position);
-            if let Some(popup_area) =
-                PopupList::area_above_cursor(Rect::new(position.x, position.y, 1, 1), frame.area())
-            {
-                self.popup.render(frame, popup_area, controller, state);
-            }
+        }
+        if let Some(popup_area) = PopupList::area_above(area, frame.area()) {
+            self.popup.render(frame, popup_area, controller, state);
         }
     }
 }
