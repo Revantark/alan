@@ -89,12 +89,7 @@ impl Component for PopupList {
     }
 }
 
-/// One popup line: the selection marker and the candidate.
-///
-/// Brightness marks what the next Enter will take, so a trailing `/` is left
-/// to say on its own that an entry is a directory.
 fn item_line(item: &CompletionItem, is_selected: bool) -> Line<'static> {
-    // The marker is blank unless selected, so it can always carry the accent.
     let (marker, label) = if is_selected {
         ("› ", theme::SELECTION_FG)
     } else {
