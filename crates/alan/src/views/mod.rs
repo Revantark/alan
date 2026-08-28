@@ -370,11 +370,7 @@ impl UiState {
     /// Which backend answers, and over what text, is the controller's call.
     fn sync_completion(&mut self, completion: &mut CompletionController) {
         let (row, col) = self.editor.cursor();
-        let line = self
-            .editor
-            .lines()
-            .get(row)
-            .map_or(String::new(), String::clone);
+        let line = self.editor.lines().get(row).map_or("", String::as_str);
         let cursor = Self::char_offset(&line, col.min(line.chars().count()));
         completion.sync(&line, cursor);
     }
