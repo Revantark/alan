@@ -1,4 +1,4 @@
-use crate::core::{CompletionState, Controller};
+use crate::core::{CompletionItem, CompletionStatus, Controller};
 use crate::views::UiState;
 use crate::views::component::Component;
 use crate::views::theme;
@@ -8,26 +8,29 @@ use ratatui::style::Style;
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Padding, Paragraph};
 
-/// Fixed number of rows in the completion popup.
+/// Fixed height of the completion popup, including its padding.
 const POPUP_ROWS: u16 = 7;
+/// Candidates visible inside that height.
+const VISIBLE_ROWS: usize = 5;
 
-/// Generic list popup rendered above the editor cursor. Currently used for
+/// Generic list popup rendered above the prompt. Currently used for
 /// `@`-path completion; reusable for any short list anchored at the prompt.
 #[derive(Debug, Default)]
 pub struct PopupList;
 
 impl PopupList {
-    /// Popup area whose bottom edge sits directly above `cursor`, spanning
-    /// the editor column (the frame minus the prompt gutter). Returns `None`
-    /// when there is no room to show it.
-    pub fn area_above_cursor(cursor: Rect, frame_area: Rect) -> Option<Rect> {
-        let top = cursor.y.checked_sub(POPUP_ROWS)?;
-        if top < frame_area.y || cursor.y >= frame_area.bottom() {
+    /// Popup area sitting directly above `prompt`, spanning the frame width.
+    ///
+    /// Anchored to the prompt rather than the cursor so it never covers the
+    /// status line, which is what describes the keys the popup has taken.
+    /// Returns `None` when there is no room above.
+    pub fn area_above(prompt: Rect, frame_area: Rect) -> Option<Rect> {
+        let top = prompt.y.checked_sub(POPUP_ROWS)?;
+        if top < frame_area.y || prompt.y > frame_area.bottom() {
             return None;
         }
-        let x = frame_area.x;
         Some(Rect {
-            x,
+            x: frame_area.x,
             y: top,
             width: frame_area.width,
             height: POPUP_ROWS,
@@ -43,23 +46,19 @@ impl Component for PopupList {
         controller: &Controller,
         _state: &mut UiState,
     ) {
-        let Some(completion) = controller.completion().state() else {
-            return;
-        };
-        let CompletionState {
-            items,
-            selected,
-            status,
-        } = completion;
-        if area.is_empty() {
+        let completion = controller.completion();
+        if !completion.is_open() || area.is_empty() {
             return;
         }
-        if !matches!(status, crate::core::CompletionStatus::Ready) {
-            let message = match status {
-                crate::core::CompletionStatus::Loading => "Loading…".to_owned(),
-                crate::core::CompletionStatus::Error(error) => error.clone(),
-                crate::core::CompletionStatus::Ready => String::new(),
-            };
+        let message = match completion.status() {
+            CompletionStatus::Loading => Some("Loading…".to_owned()),
+            CompletionStatus::Error(error) => Some(error),
+            CompletionStatus::Ready if completion.item_count() == 0 => {
+                Some("No matches".to_owned())
+            }
+            CompletionStatus::Ready => None,
+        };
+        if let Some(message) = message {
             frame.render_widget(
                 Paragraph::new(message)
                     .style(Style::default().bg(theme::EDITOR_BG))
@@ -68,50 +67,21 @@ impl Component for PopupList {
             );
             return;
         }
-        if items.is_empty() {
-            frame.render_widget(
-                Paragraph::new("No matches")
-                    .style(Style::default().bg(theme::EDITOR_BG))
-                    .block(Block::default().padding(Padding::new(2, 2, 1, 1))),
-                area,
-            );
-            return;
-        }
 
         frame.render_widget(ratatui::widgets::Clear, area);
+        let selected = completion.selected();
         let start = selected
             .saturating_sub(2)
-            .min(items.len().saturating_sub(5));
-        let end = (start + 5).min(items.len());
+            .min(completion.item_count().saturating_sub(VISIBLE_ROWS));
 
-        let rows = items[start..end]
+        let lines = completion
+            .items(start, VISIBLE_ROWS)
             .iter()
             .enumerate()
-            .map(|(offset, entry)| {
-                let index = start + offset;
-                let (marker, marker_style) = if index == *selected {
-                    ("› ", Style::default().fg(theme::PROMPT_FG))
-                } else {
-                    ("  ", Style::default())
-                };
-                let name = if entry.is_dir {
-                    format!("{}/", entry.path)
-                } else {
-                    entry.path.clone()
-                };
-                let name_style = if entry.is_dir {
-                    Style::default().fg(ratatui::style::Color::White)
-                } else {
-                    Style::default().fg(theme::EDITOR_FG)
-                };
-                Line::from(vec![
-                    Span::styled(marker, marker_style),
-                    Span::styled(name, name_style),
-                ])
-            })
+            .map(|(offset, item)| item_line(item, start + offset == selected))
             .collect::<Vec<_>>();
         frame.render_widget(
-            Paragraph::new(Text::from(rows))
+            Paragraph::new(Text::from(lines))
                 .style(Style::default().bg(theme::EDITOR_BG))
                 .block(Block::default().padding(Padding::new(2, 2, 1, 1))),
             area,
@@ -119,26 +89,44 @@ impl Component for PopupList {
     }
 }
 
+fn item_line(item: &CompletionItem, is_selected: bool) -> Line<'static> {
+    let (marker, label) = if is_selected {
+        ("› ", theme::SELECTION_FG)
+    } else {
+        ("  ", theme::EDITOR_FG)
+    };
+
+    Line::from(vec![
+        Span::styled(marker, Style::default().fg(theme::PROMPT_FG)),
+        Span::styled(item.display.clone(), Style::default().fg(label)),
+    ])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// Anchoring above the prompt is what keeps the status line, which sits
+    /// inside the prompt area, out from under the popup.
     #[test]
-    fn popup_sits_directly_above_cursor() {
+    fn popup_sits_directly_above_the_prompt() {
         let frame = Rect::new(0, 0, 80, 24);
-        let cursor = Rect::new(0, 20, 1, 1);
-        let area = PopupList::area_above_cursor(cursor, frame).unwrap();
+        let prompt = Rect::new(0, 16, 80, 8);
+
+        let area = PopupList::area_above(prompt, frame).unwrap();
+
         assert_eq!(area.height, POPUP_ROWS);
-        assert_eq!(area.bottom(), cursor.y);
+        assert_eq!(area.bottom(), prompt.y);
+        assert!(area.bottom() <= prompt.y, "overlaps the prompt");
     }
 
     #[test]
-    fn no_room_above_cursor_means_no_popup() {
+    fn no_room_above_the_prompt_means_no_popup() {
         let frame = Rect::new(0, 0, 80, 24);
-        // Not enough rows above the cursor for the fixed height.
-        assert!(PopupList::area_above_cursor(Rect::new(0, 3, 1, 1), frame).is_none());
-        assert!(PopupList::area_above_cursor(Rect::new(0, 0, 1, 1), frame).is_none());
-        // Cursor off the bottom of the frame.
-        assert!(PopupList::area_above_cursor(Rect::new(0, 24, 1, 1), frame).is_none());
+        // Not enough rows above the prompt for the fixed height.
+        assert!(PopupList::area_above(Rect::new(0, 3, 80, 8), frame).is_none());
+        assert!(PopupList::area_above(Rect::new(0, 0, 80, 8), frame).is_none());
+        // Prompt off the bottom of the frame.
+        assert!(PopupList::area_above(Rect::new(0, 25, 80, 8), frame).is_none());
     }
 }

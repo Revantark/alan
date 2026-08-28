@@ -10,8 +10,6 @@ pub mod login;
 pub use action::{Action, Command, ImageAttachment};
 pub use chat::Entry;
 pub use command::SlashCommand;
-#[cfg(test)]
-pub use completion::DirEntry;
-pub use completion::{CompletionController, CompletionState, CompletionStatus};
-pub use controller::{Controller, Overlay, Poll};
+pub use completion::{CompletionController, CompletionItem, CompletionStatus};
+pub use controller::{Activity, Controller, Overlay, Poll};
 pub use login::LoginState;

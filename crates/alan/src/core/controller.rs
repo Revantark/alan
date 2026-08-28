@@ -3,7 +3,7 @@
 use super::action::{Command, ImageAttachment};
 use super::chat::{ChatController, Entry};
 use super::command::SlashCommand;
-use super::completion::CompletionController;
+use super::completion::{CompletionController, Paths};
 use super::login::{LoginController, LoginState};
 use agent::Agent;
 use llm::Usage;
@@ -37,6 +37,17 @@ pub enum Overlay {
     Login,
 }
 
+/// What the prompt is doing, and so what Enter does to it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Activity {
+    /// Streaming a response.
+    Thinking,
+    /// Offering completions, which take Enter before the editor sees it.
+    Suggesting,
+    /// Waiting on a prompt.
+    Idle,
+}
+
 /// Coordinates feature controllers. It does not render or handle terminal types.
 pub struct Controller {
     chat: ChatController,
@@ -65,7 +76,7 @@ impl Controller {
         Self {
             chat: ChatController::new(agent),
             login: LoginController::new(providers, credentials),
-            completion: CompletionController::new(),
+            completion: CompletionController::new(vec![Box::new(Paths::default())]),
             overlay: Overlay::None,
         }
     }
@@ -78,8 +89,15 @@ impl Controller {
         self.chat.revision()
     }
 
-    pub fn is_busy(&self) -> bool {
-        self.chat.is_busy()
+    /// Ordered by precedence: a streaming response outranks an open popup.
+    pub fn activity(&self) -> Activity {
+        if self.chat.is_busy() {
+            Activity::Thinking
+        } else if self.completion.item_count() > 0 {
+            Activity::Suggesting
+        } else {
+            Activity::Idle
+        }
     }
 
     pub fn plan_mode(&self) -> bool {
@@ -256,7 +274,7 @@ mod tests {
         assert_eq!(controller.chat().len(), 2);
         assert!(matches!(&controller.chat()[0], Entry::Prompt(text) if text == "hi"));
         assert!(matches!(&controller.chat()[1], Entry::Response(text) if text == "hello"));
-        assert!(!controller.is_busy());
+        assert_eq!(controller.activity(), Activity::Idle);
     }
 
     struct ReasoningFakeApi;
@@ -307,7 +325,7 @@ mod tests {
         assert!(matches!(&controller.chat()[0], Entry::Prompt(text) if text == "hi"));
         assert!(matches!(&controller.chat()[1], Entry::Reasoning(text) if text == "thinking..."));
         assert!(matches!(&controller.chat()[2], Entry::Response(text) if text == "answer"));
-        assert!(!controller.is_busy());
+        assert_eq!(controller.activity(), Activity::Idle);
     }
 
     #[test]
@@ -315,7 +333,7 @@ mod tests {
         let mut controller = make_controller();
         controller.submit("   ".into(), vec![]);
         assert!(controller.chat().is_empty());
-        assert!(!controller.is_busy());
+        assert_eq!(controller.activity(), Activity::Idle);
     }
 
     #[test]
@@ -329,7 +347,7 @@ mod tests {
             Entry::Info(text) if text.contains("/help")
         ));
         // A command must never start an agent turn.
-        assert!(!controller.is_busy());
+        assert_eq!(controller.activity(), Activity::Idle);
     }
 
     /// Streamed text merges into a trailing `Response`, and commands run

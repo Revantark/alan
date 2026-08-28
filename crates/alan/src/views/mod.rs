@@ -158,7 +158,7 @@ impl UiState {
         }
         if let Event::Key(key) = &event
             && completion.is_open()
-            && (completion.has_items() || !matches!(key.code, KeyCode::Enter | KeyCode::Tab))
+            && (completion.item_count() > 0 || !matches!(key.code, KeyCode::Enter | KeyCode::Tab))
             && self.handle_completion_key(*key, completion)
         {
             return None;
@@ -246,9 +246,9 @@ impl UiState {
             }
             Event::Mouse(mouse) => self.handle_mouse_event(mouse, rendered_lines),
             Event::Paste(text) => {
+                self.editor.insert_str(text);
                 self.dirty = true;
                 self.sync_completion(completion);
-                self.editor.insert_str(text);
                 None
             }
             event => {
@@ -302,14 +302,17 @@ impl UiState {
                 true
             }
             KeyCode::Enter | KeyCode::Tab if key.modifiers.is_empty() => {
-                let Some(accepted) = completion.accept() else {
+                let Some((item, range)) = completion.accept() else {
                     return false;
                 };
-                self.replace_completion_token(&accepted.replacement);
-                self.dirty = true;
-                if accepted.is_dir {
-                    self.sync_completion(completion);
+                let separate = self.needs_separator_after(range.end);
+                self.replace_range(range, &item.replacement);
+                // An accepted mention is finished. Without a separator the next
+                // keystroke lands inside the token and reopens the popup.
+                if separate {
+                    self.editor.insert_str(" ");
                 }
+                self.dirty = true;
                 true
             }
             KeyCode::Esc => {
@@ -321,49 +324,38 @@ impl UiState {
         }
     }
 
-    fn replace_completion_token(&mut self, replacement: &str) {
-        let Some((start_col, end_col)) = self.token_span_containing_cursor() else {
-            return;
-        };
+    /// Whether byte `at` on the cursor's line is not already followed by
+    /// whitespace, so an accepted completion needs one adding.
+    fn needs_separator_after(&self, at: usize) -> bool {
         let (row, _) = self.editor.cursor();
         self.editor
+            .lines()
+            .get(row)
+            .and_then(|line| line.get(at..))
+            .is_none_or(|rest| !rest.starts_with(char::is_whitespace))
+    }
+
+    /// Overwrite a byte range of the cursor's line. The editor addresses text
+    /// by character column, so the range is converted on the way in.
+    fn replace_range(&mut self, range: std::ops::Range<usize>, text: &str) {
+        let (row, _) = self.editor.cursor();
+        let Some(line) = self.editor.lines().get(row) else {
+            return;
+        };
+        // The range was measured against this line, so it fits. Bail rather
+        // than panic if that ever stops being true.
+        let Some(before) = line.get(..range.start) else {
+            return;
+        };
+        let Some(replaced) = line.get(range) else {
+            return;
+        };
+        let start_col = before.chars().count();
+        let chars = replaced.chars().count();
+        self.editor
             .move_cursor(CursorMove::Jump(row as u16, start_col as u16));
-        self.editor.delete_str(end_col - start_col);
-        let text = format!("@{replacement}");
+        self.editor.delete_str(chars);
         self.editor.insert_str(text);
-    }
-
-    fn token_span_containing_cursor(&self) -> Option<(usize, usize)> {
-        self.completion_token_at_cursor()
-            .map(|(start, end, _)| (start, end))
-    }
-
-    /// Return the character-column span and text of the non-whitespace token
-    /// around the cursor when it starts with `@`.
-    fn completion_token_at_cursor(&self) -> Option<(usize, usize, String)> {
-        let (row, col) = self.editor.cursor();
-        let line = self.editor.lines().get(row)?;
-        let col = col.min(line.chars().count());
-        let at = Self::char_offset(line, col);
-        let start = line[..at]
-            .char_indices()
-            .rev()
-            .take_while(|&(_, c)| !c.is_whitespace())
-            .map(|(i, _)| i)
-            .last()?;
-        let end = line[at..]
-            .char_indices()
-            .find(|&(_, c)| c.is_whitespace())
-            .map(|(i, _)| at + i)
-            .unwrap_or(line.len());
-        let text = &line[start..end];
-        text.starts_with('@').then(|| {
-            (
-                line[..start].chars().count(),
-                line[..end].chars().count(),
-                text[1..].to_owned(),
-            )
-        })
     }
 
     /// Convert a character-column index (as reported by `TextArea::cursor`)
@@ -375,30 +367,12 @@ impl UiState {
             .unwrap_or(line.len())
     }
 
-    /// Read the `@token` at the cursor and keep the popup in step with it.
+    /// Which backend answers, and over what text, is the controller's call.
     fn sync_completion(&mut self, completion: &mut CompletionController) {
         let (row, col) = self.editor.cursor();
-        let token = self.editor.lines().get(row).and_then(|line| {
-            let col = col.min(line.chars().count());
-            let at = Self::char_offset(line, col);
-            let start = line[..at]
-                .char_indices()
-                .rev()
-                .take_while(|&(_, c)| !c.is_whitespace())
-                .map(|(i, _)| i)
-                .last()?;
-            let end = line[at..]
-                .char_indices()
-                .find(|&(_, c)| c.is_whitespace())
-                .map(|(i, _)| at + i)
-                .unwrap_or(line.len());
-            let text = &line[start..end];
-            text.starts_with('@').then(|| text[1..].to_owned())
-        });
-        match token {
-            Some(token) => completion.update(&token),
-            None => completion.dismiss(),
-        }
+        let line = self.editor.lines().get(row).map_or("", String::as_str);
+        let cursor = Self::char_offset(line, col.min(line.chars().count()));
+        completion.sync(line, cursor);
     }
 
     fn handle_mouse_event(
@@ -677,14 +651,21 @@ impl Default for UiState {
     }
 }
 
+/// A controller over a fixed index, so tests never touch the filesystem.
 #[cfg(test)]
-use crate::core::DirEntry;
+fn completion_with(index: &[&str]) -> CompletionController {
+    use crate::core::completion::Paths;
+
+    CompletionController::new(vec![Box::new(Paths::with_index(
+        index.iter().map(|path| (*path).to_owned()).collect(),
+    ))])
+}
 
 #[cfg(test)]
 impl UiState {
     /// Test shim for the pre-completion call signature.
     fn handle_editor_event_for_test(&mut self, event: Event) -> Option<Command> {
-        let mut completion = CompletionController::new();
+        let mut completion = completion_with(&[]);
         self.handle_event(event, &[], &mut completion)
     }
 }
@@ -946,6 +927,18 @@ mod tests {
         assert_eq!(state.editor_text(), "first\nsecond");
     }
 
+    /// Completion syncs against the text after the paste, not before it.
+    #[test]
+    fn pasting_a_mention_opens_the_popup() {
+        let mut state = UiState::new();
+        let mut completion = completion_with(&["alpha.txt"]);
+
+        state.handle_event(Event::Paste("@alp".into()), &[], &mut completion);
+
+        assert_eq!(state.editor_text(), "@alp");
+        assert!(completion.is_open());
+    }
+
     fn ctrl(code: char) -> crossterm::event::Event {
         crossterm::event::Event::Key(crossterm::event::KeyEvent::new(
             crossterm::event::KeyCode::Char(code),
@@ -1111,13 +1104,12 @@ mod tests {
         assert!(state.take_dirty());
     }
 
-    /// Drive the editor with a real CompletionController: typing `@` opens
-    /// the popup, injected scan results appear, and accepting replaces the
-    /// token in the editor without submitting.
+    /// Drive the editor with a real completion: typing `@` opens the popup
+    /// and accepting replaces the token without submitting.
     #[test]
     fn at_completion_opens_accepts_and_replaces_token() {
         let mut state = UiState::new();
-        let mut completion = CompletionController::new();
+        let mut completion = completion_with(&["something.txt"]);
 
         for character in "@som".chars() {
             state.handle_event(
@@ -1128,27 +1120,20 @@ mod tests {
         }
         assert!(completion.is_open());
 
-        // Stand in for the blocking scan of the project root delivering.
-        completion.inject_items(vec![DirEntry {
-            path: "something.txt".into(),
-            is_dir: false,
-        }]);
-
         let command = state.handle_event(key(KeyCode::Enter), &[], &mut completion);
 
         assert_eq!(command, None);
-        assert_eq!(state.editor_text(), "@something.txt");
+        assert_eq!(state.editor_text(), "@something.txt ");
         assert!(!completion.is_open());
     }
 
-    /// `TextArea::cursor()` reports the column in characters, but the token
-    /// span used to slice the line by byte offset. A multi-byte character
-    /// between `@` and the cursor used to panic with a byte-index out of
-    /// bounds. Regression test for that panic.
+    /// `TextArea::cursor()` reports columns in characters while the line is
+    /// sliced by byte offset, so a multi-byte character between `@` and the
+    /// cursor must not put the two out of step.
     #[test]
     fn at_completion_after_multibyte_char_does_not_panic() {
         let mut state = UiState::new();
-        let mut completion = CompletionController::new();
+        let mut completion = completion_with(&["éx.txt"]);
 
         // `@` preceded by other text and followed by a 2-byte character,
         // then more text — a common mid-sentence use of `@` mentions.
@@ -1163,38 +1148,23 @@ mod tests {
 
         // Accepting should replace the whole `@éx` token without panicking
         // and without eating the `abc ` that precedes it.
-        completion.inject_items(vec![DirEntry {
-            path: "éx.txt".into(),
-            is_dir: false,
-        }]);
-
         let command = state.handle_event(key(KeyCode::Enter), &[], &mut completion);
 
         assert_eq!(command, None);
-        assert_eq!(state.editor_text(), "abc @éx.txt");
+        assert_eq!(state.editor_text(), "abc @éx.txt ");
         assert!(!completion.is_open());
     }
 
     #[test]
     fn at_completion_navigation_and_escape() {
         let mut state = UiState::new();
-        let mut completion = CompletionController::new();
+        let mut completion = completion_with(&["a.txt", "b.txt"]);
 
         state.handle_event(key(KeyCode::Char('@')), &[], &mut completion);
-        completion.inject_items(vec![
-            DirEntry {
-                path: "a.txt".into(),
-                is_dir: false,
-            },
-            DirEntry {
-                path: "b.txt".into(),
-                is_dir: false,
-            },
-        ]);
-        assert_eq!(completion.state().unwrap().selected, 0);
+        assert_eq!(completion.selected(), 0);
 
         state.handle_event(key(KeyCode::Down), &[], &mut completion);
-        assert_eq!(completion.state().unwrap().selected, 1);
+        assert_eq!(completion.selected(), 1);
 
         state.handle_event(key(KeyCode::Esc), &[], &mut completion);
         assert!(!completion.is_open());
@@ -1213,7 +1183,7 @@ mod tests {
     #[test]
     fn deleting_the_at_closes_the_popup() {
         let mut state = UiState::new();
-        let mut completion = CompletionController::new();
+        let mut completion = completion_with(&["a.txt"]);
 
         state.handle_event(key(KeyCode::Char('@')), &[], &mut completion);
         assert!(completion.is_open());
@@ -1222,33 +1192,60 @@ mod tests {
         assert!(!completion.is_open());
     }
 
+    /// A directory is a reference in its own right: accepting one inserts it
+    /// and finishes.
     #[test]
-    fn accepting_a_directory_drills_down() {
+    fn accepting_a_directory_inserts_it_and_closes() {
         let mut state = UiState::new();
-        let mut completion = CompletionController::new();
+        let mut completion = completion_with(&["src/"]);
 
         state.handle_event(key(KeyCode::Char('@')), &[], &mut completion);
-        completion.inject_items(vec![DirEntry {
-            path: "src".into(),
-            is_dir: true,
-        }]);
-
         state.handle_event(key(KeyCode::Enter), &[], &mut completion);
 
-        assert_eq!(state.editor_text(), "@src/");
-        assert!(completion.is_open());
+        assert_eq!(state.editor_text(), "@src/ ");
+        assert!(!completion.is_open());
     }
 
-    /// Regression: moving the cursor left inside the token before accepting
-    /// must replace the whole token, not just the prefix before the cursor.
-    ///
-    /// Accepting with the cursor at `@fo|o` used to delete only `@fo` and
-    /// insert the replacement, leaving the trailing `o` behind
-    /// (`@foobaroo`). The recorded span is now consumed at accept time.
+    /// The separator is what keeps the next keystroke out of the token.
+    #[test]
+    fn typing_after_accepting_is_prose_not_another_mention() {
+        let mut state = UiState::new();
+        let mut completion = completion_with(&["src/"]);
+
+        state.handle_event(key(KeyCode::Char('@')), &[], &mut completion);
+        state.handle_event(key(KeyCode::Enter), &[], &mut completion);
+        state.handle_event(key(KeyCode::Char('h')), &[], &mut completion);
+
+        assert_eq!(state.editor_text(), "@src/ h");
+        assert!(!completion.is_open());
+    }
+
+    /// Text already follows the token, so it does not need separating twice.
+    #[test]
+    fn accepting_mid_sentence_does_not_double_the_space() {
+        let mut state = UiState::new();
+        let mut completion = completion_with(&["src/main.rs"]);
+
+        for character in "@mai and more".chars() {
+            state.handle_event(key(KeyCode::Char(character)), &[], &mut completion);
+        }
+        // Back inside the `@mai` token: `@mai| and more`.
+        for _ in 0.." and more".len() {
+            state.handle_event(key(KeyCode::Left), &[], &mut completion);
+        }
+        state.handle_event(key(KeyCode::Enter), &[], &mut completion);
+
+        assert_eq!(state.editor_text(), "@src/main.rs and more");
+    }
+
+    /// Accepting at `@fo|o` replaces the whole token, not the prefix before
+    /// the cursor, so no trailing `o` survives.
     #[test]
     fn accepting_completion_with_cursor_inside_token_replaces_whole_token() {
         let mut state = UiState::new();
-        let mut completion = CompletionController::new();
+        // The path must match the typed prefix (`foo`) yet differ from it,
+        // so a leftover suffix would show.
+        let mut completion = completion_with(&["foobar"]);
 
         for character in "@foo".chars() {
             state.handle_event(
@@ -1259,13 +1256,6 @@ mod tests {
         }
         assert!(completion.is_open());
 
-        // The injected path must match the typed prefix (`foo`) to survive
-        // `refilter`, yet differ from it so a leftover suffix would show.
-        completion.inject_items(vec![DirEntry {
-            path: "foobar".into(),
-            is_dir: false,
-        }]);
-
         // Move the cursor left twice: `@fo|o`.
         state.handle_event(key(KeyCode::Left), &[], &mut completion);
         state.handle_event(key(KeyCode::Left), &[], &mut completion);
@@ -1274,7 +1264,7 @@ mod tests {
         let command = state.handle_event(key(KeyCode::Enter), &[], &mut completion);
 
         assert_eq!(command, None);
-        assert_eq!(state.editor_text(), "@foobar");
+        assert_eq!(state.editor_text(), "@foobar ");
         assert!(!completion.is_open());
     }
 
@@ -1283,7 +1273,7 @@ mod tests {
     #[test]
     fn accepting_completion_with_cursor_inside_multibyte_token() {
         let mut state = UiState::new();
-        let mut completion = CompletionController::new();
+        let mut completion = completion_with(&["éfoobar"]);
 
         for character in "@éfoo".chars() {
             state.handle_event(
@@ -1294,11 +1284,6 @@ mod tests {
         }
         assert!(completion.is_open());
 
-        completion.inject_items(vec![DirEntry {
-            path: "éfoobar".into(),
-            is_dir: false,
-        }]);
-
         // Move the cursor left twice: `@éfo|o`.
         state.handle_event(key(KeyCode::Left), &[], &mut completion);
         state.handle_event(key(KeyCode::Left), &[], &mut completion);
@@ -1307,7 +1292,7 @@ mod tests {
         let command = state.handle_event(key(KeyCode::Enter), &[], &mut completion);
 
         assert_eq!(command, None);
-        assert_eq!(state.editor_text(), "@éfoobar");
+        assert_eq!(state.editor_text(), "@éfoobar ");
         assert!(!completion.is_open());
     }
 
@@ -1315,7 +1300,7 @@ mod tests {
     #[test]
     fn accepting_completion_at_token_end_still_replaces() {
         let mut state = UiState::new();
-        let mut completion = CompletionController::new();
+        let mut completion = completion_with(&["foobar"]);
 
         for character in "@foo".chars() {
             state.handle_event(
@@ -1324,15 +1309,11 @@ mod tests {
                 &mut completion,
             );
         }
-        completion.inject_items(vec![DirEntry {
-            path: "foobar".into(),
-            is_dir: false,
-        }]);
 
         let command = state.handle_event(key(KeyCode::Enter), &[], &mut completion);
 
         assert_eq!(command, None);
-        assert_eq!(state.editor_text(), "@foobar");
+        assert_eq!(state.editor_text(), "@foobar ");
         assert!(!completion.is_open());
     }
 }
