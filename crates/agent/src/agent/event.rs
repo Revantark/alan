@@ -57,6 +57,9 @@ impl Drop for AgentStream {
 pub enum AgentEvent {
     TextDelta(String),
     ReasoningDelta(String),
+    Usage {
+        usage: Usage,
+    },
     ToolCallStarted {
         id: String,
         name: String,

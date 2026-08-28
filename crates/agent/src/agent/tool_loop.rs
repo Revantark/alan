@@ -1,5 +1,7 @@
 use crate::AgentError;
 use crate::AgentMessage;
+use crate::agent::persistence;
+use crate::agent::prompt;
 use crate::context::AgentContext;
 use llm::LlmResponse;
 use providers::Model;
@@ -23,12 +25,15 @@ pub(super) async fn run_with(
         cx.check_cancelled()?;
 
         let session_id = agent.session_id.lock().await.clone();
-        let response = super::prompt::stream_round(session_id, model, context, cx, plan).await?;
+        let (response, round_usage) =
+            prompt::stream_round(session_id, model, context, cx, plan).await?;
 
-        // Accumulate token usage across rounds.
-        if let Some(usage) = response.usage.as_ref() {
+        // Usage is a per-round provider snapshot. Add it once to the
+        // aggregate, regardless of how many usage events the provider sent.
+        if let Some(usage) = round_usage.as_ref().or(response.usage.as_ref()) {
             context.usage.accumulate(usage);
-            super::persistence::persist_usage(agent, &context.usage).await?;
+            cx.round_usage_applied = true;
+            persistence::persist_usage(agent, &context.usage).await?;
         }
 
         let calls: Vec<_> = response.tool_calls().cloned().collect();

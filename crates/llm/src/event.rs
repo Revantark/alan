@@ -18,6 +18,12 @@ pub enum LlmEvent {
         name: Option<String>,
         arguments: String,
     },
+    /// Emitted as soon as a chunk carries token usage, before the stream
+    /// completes. Useful for live cost/token display without waiting for
+    /// [`Done`](LlmEvent::Done).
+    Usage {
+        usage: Usage,
+    },
     Done {
         stop_reason: StopReason,
         usage: Option<Usage>,

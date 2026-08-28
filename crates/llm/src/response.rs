@@ -162,13 +162,18 @@ impl LlmResponseBuilder {
                 }
                 call.arguments.push_str(arguments);
             }
+            LlmEvent::Usage { usage } => {
+                self.usage = Some(usage.clone());
+            }
             LlmEvent::Done {
                 stop_reason,
                 usage,
                 model,
             } => {
                 self.stop_reason = Some(*stop_reason);
-                self.usage = usage.clone();
+                if usage.is_some() {
+                    self.usage = usage.clone();
+                }
                 self.model = model.clone();
             }
         }

@@ -119,15 +119,21 @@ where
             if let Some(model) = chunk.model.clone() {
                 self.model = Some(model);
             }
-            if let Some(usage) = chunk.usage.clone() {
-                self.usage = Some(usage);
+            if let Some(usage) = &chunk.usage {
+                self.usage = Some(usage.clone());
             }
             if let Some(stop_reason) =
                 codec::stop_reason_for_finish_reason(chunk.finish_reason.as_deref())
             {
                 self.stop_reason = Some(stop_reason);
             }
+            // Emit usage *after* the chunk's text/reasoning/tool-call deltas
+            // so consumers see content before the summary.
+            let usage_event = chunk.usage.clone().map(|usage| LlmEvent::Usage { usage });
             self.pending.extend(codec::stream_events(chunk));
+            if let Some(event) = usage_event {
+                self.pending.push_back(event);
+            }
         }
         Ok(())
     }

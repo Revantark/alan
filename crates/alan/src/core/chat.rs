@@ -242,6 +242,10 @@ impl ChatController {
                                 ToolStatus::Failed(error),
                             );
                         }
+                        AgentEvent::Usage { usage } => {
+                            self.usage = usage;
+                            changed = true;
+                        }
                         AgentEvent::Finished { usage, .. } => {
                             changed |= Self::append_delta(&mut self.entries, &pending_text);
                             pending_text.clear();

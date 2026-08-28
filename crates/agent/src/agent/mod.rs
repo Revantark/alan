@@ -12,6 +12,7 @@ use crate::session::{Session, SessionManager};
 use crate::{AgentError, AgentMessage};
 use llm::Usage;
 use providers::Model;
+use std::path::PathBuf;
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
@@ -35,6 +36,8 @@ pub struct Agent {
     pub(super) session_id: Mutex<String>,
     pub(super) session_manager: Option<Arc<SessionManager>>,
     pub(super) active_session: Mutex<Option<Session>>,
+    /// Working directory reported in the conversation's first message.
+    pub(super) working_directory: Option<PathBuf>,
 }
 
 impl Agent {
@@ -47,9 +50,9 @@ impl Agent {
             max_tool_rounds: 100,
             session_manager: None,
             resumed_session: None,
+            working_directory: None,
         }
     }
-
     /// Start building a prompt request.
     ///
     /// Returns a [`PromptBuilder`] that can be configured with chained

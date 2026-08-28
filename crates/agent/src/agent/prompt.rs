@@ -1,11 +1,13 @@
 use super::Agent;
 use super::event::{AgentEvent, emit_event};
 use crate::AgentMessage;
+use crate::agent::persistence;
 use crate::context::AgentContext;
 use crate::{AgentError, AgentStream};
 use futures_util::StreamExt;
 use llm::{
     CompletionInput, LlmEvent, LlmResponse, LlmResponseBuilder, Message, RequestOptions, ToolSpec,
+    Usage,
 };
 use providers::{Model, ModelError};
 use tokio::sync::{mpsc::Sender, watch};
@@ -16,6 +18,10 @@ pub(super) struct PromptCx<'a> {
     pub cancellation: &'a mut watch::Receiver<bool>,
     pub partial: &'a mut String,
     pub stream: bool,
+    /// Latest usage snapshot observed in the current provider round.
+    pub round_usage: Option<Usage>,
+    /// Whether the current round's usage has already been added to context.
+    pub round_usage_applied: bool,
 }
 
 impl<'a> PromptCx<'a> {
@@ -47,6 +53,8 @@ pub(super) fn spawn_prompt_task(
             cancellation: &mut cancellation_receiver,
             partial: &mut partial,
             stream,
+            round_usage: None,
+            round_usage_applied: false,
         };
         let result = run_prompt_with_message(&agent, user_msg, &mut cx).await;
         if let Err(error) = result {
@@ -60,6 +68,25 @@ pub(super) fn spawn_prompt_task(
     }
 }
 
+/// Append the "Current project dir" line to the first user message of the
+/// conversation so the model knows where it is operating.
+fn attach_working_directory(
+    agent: &Agent,
+    context: &AgentContext,
+    mut user_msg: AgentMessage,
+) -> AgentMessage {
+    let Some(dir) = agent.working_directory.as_ref() else {
+        return user_msg;
+    };
+    if !context.messages.is_empty() {
+        return user_msg;
+    }
+    if let AgentMessage::User { text, .. } = &mut user_msg {
+        text.push_str(&format!("\n\nCurrent project dir : {}", dir.display()));
+    }
+    user_msg
+}
+
 /// Run the full prompt lifecycle inside the spawned background task.
 async fn run_prompt_with_message(
     agent: &Agent,
@@ -71,10 +98,20 @@ async fn run_prompt_with_message(
     let model = agent.model.lock().await;
     let mut context = agent.context.lock().await;
 
-    super::persistence::ensure_session(agent, &model).await?;
-    super::persistence::append_context_message(agent, &mut context, user_msg).await?;
+    let user_msg = attach_working_directory(agent, &context, user_msg);
+
+    persistence::ensure_session(agent, &model).await?;
+    persistence::append_context_message(agent, &mut context, user_msg).await?;
 
     let result = super::tool_loop::run_with(agent, &model, &mut context, cx).await;
+
+    if result.is_err()
+        && let Some(usage) = cx.round_usage.as_ref()
+        && !cx.round_usage_applied
+    {
+        context.usage.accumulate(usage);
+        persistence::persist_usage(agent, &context.usage).await?;
+    }
 
     save_partial_on_error(agent, &mut context, &result, cx.partial).await?;
     result
@@ -104,10 +141,10 @@ async fn save_partial_on_error(
 pub(super) async fn stream_round(
     session_id: String,
     model: &Model,
-    context: &AgentContext,
+    context: &mut AgentContext,
     cx: &mut PromptCx<'_>,
     plan: bool,
-) -> Result<LlmResponse, AgentError> {
+) -> Result<(LlmResponse, Option<Usage>), AgentError> {
     let tools: Vec<_> = context
         .tools
         .iter()
@@ -132,6 +169,12 @@ pub(super) async fn stream_round(
 
     let mut builder = LlmResponseBuilder::new();
     cx.partial.clear();
+    cx.round_usage = None;
+    cx.round_usage_applied = false;
+    // Usage is a provider snapshot. Keep the latest snapshot for this round;
+    // providers may send it more than once (for example on a finish chunk and
+    // in a separate usage-only chunk).
+    let mut round_usage = None;
 
     loop {
         let next = tokio::select! {
@@ -148,6 +191,22 @@ pub(super) async fn stream_round(
         let Some(event) = next else { break };
         let event = event.map_err(ModelError::from)?;
         builder.apply(&event).map_err(ModelError::from)?;
+
+        if let LlmEvent::Usage { usage } = &event {
+            round_usage = Some(usage.clone());
+            cx.round_usage = round_usage.clone();
+
+            if cx.stream {
+                emit_event(
+                    cx.events,
+                    AgentEvent::Usage {
+                        usage: aggregate_usage(&context.usage, usage),
+                    },
+                    cx.cancellation,
+                )
+                .await?;
+            }
+        }
 
         if cx.stream {
             match &event {
@@ -177,7 +236,13 @@ pub(super) async fn stream_round(
         }
     }
 
-    Ok(builder.finish().map_err(ModelError::from)?)
+    Ok((builder.finish().map_err(ModelError::from)?, round_usage))
+}
+
+fn aggregate_usage(current: &Usage, round: &Usage) -> Usage {
+    let mut aggregate = current.clone();
+    aggregate.accumulate(round);
+    aggregate
 }
 
 fn build_messages(context: &AgentContext) -> Vec<Message> {
