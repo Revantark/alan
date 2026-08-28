@@ -9,10 +9,10 @@
 #[derive(PartialEq, Eq, PartialOrd, Ord, Clone, Copy)]
 struct Rank {
     kind: Kind,
-    /// Byte offset of the match. Earlier beats later.
-    at: usize,
-    /// Length of the candidate. Shorter wins an otherwise equal match.
+    /// Length of the candidate.
     length: usize,
+    /// Byte offset of the match, to settle equal-length candidates.
+    at: usize,
 }
 
 /// Where in the candidate the match landed.
@@ -69,8 +69,8 @@ fn rank(pattern: &str, candidate: &str) -> Option<Rank> {
     };
     Some(Rank {
         kind,
-        at,
         length: candidate.len(),
+        at,
     })
 }
 
@@ -143,7 +143,7 @@ mod tests {
 
     /// All three match on the name, so only the tie-breaks separate them.
     #[test]
-    fn tie_breaks_on_position_then_length() {
+    fn tie_breaks_on_length_then_position() {
         let candidates = ["crates/x/main.rs", "b/main_helper.rs", "a/main.rs"];
         assert_eq!(
             ranked("main", &candidates),
@@ -188,6 +188,26 @@ mod tests {
         assert_eq!(
             ranked("src/s", &candidates),
             ["crates/agent/src/skill.rs", "crates/llm/src/lib.rs"]
+        );
+    }
+
+    /// When several names match equally well the shortest path wins, rather
+    /// than whichever has the fewest directories before the first part.
+    #[test]
+    fn equally_good_names_are_ordered_by_path_length() {
+        let candidates = [
+            "crates/llm/src/apis/chat_completions/sse.rs",
+            "crates/alan/src/views/selection.rs",
+            "crates/agent/src/skill.rs",
+        ];
+
+        assert_eq!(
+            ranked("src/s", &candidates),
+            [
+                "crates/agent/src/skill.rs",
+                "crates/alan/src/views/selection.rs",
+                "crates/llm/src/apis/chat_completions/sse.rs",
+            ]
         );
     }
 
