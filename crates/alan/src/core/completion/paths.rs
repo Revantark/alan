@@ -124,7 +124,6 @@ impl CompletionBackend for Paths {
             return Poll::Idle;
         };
         let Some(finished) = (&mut scan).now_or_never() else {
-            // Still walking. Put it back for the next tick.
             self.scan = Some(scan);
             return Poll::Idle;
         };
@@ -344,7 +343,6 @@ mod tests {
         tokio::task::yield_now().await;
 
         assert!(!paths.scanning());
-        // The previous index survives and the popup is not told anything.
         assert_eq!(paths.poll(), Poll::Idle);
     }
 
@@ -388,8 +386,6 @@ mod tests {
 
         let mut completion = CompletionController::new(vec![Box::new(Paths::new(root.clone()))]);
 
-        // Typing `@mai` opens the popup and starts the scan. Nothing to show
-        // yet, because the index is still empty.
         completion.sync("@mai", 4);
         assert!(completion.is_open());
         assert_eq!(completion.item_count(), 0);

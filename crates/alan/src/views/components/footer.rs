@@ -31,8 +31,6 @@ impl From<Activity> for Status {
                 hints: "  Ctrl-C stop",
                 style: Style::default().italic().fg(ratatui::style::Color::Yellow),
             },
-            // The list on screen already says what is happening, so the dot
-            // only holds the column and carries the popup's own accent.
             Activity::Suggesting => Status {
                 label: "  ●",
                 hints: "  Enter accept · ↑↓ move · Esc dismiss",
