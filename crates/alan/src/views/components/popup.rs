@@ -20,8 +20,10 @@ const CONTENT_PADDING: Padding = Padding::new(2, 2, 1, 1);
 pub struct PopupList;
 
 impl PopupList {
-    /// The status shown in place of candidates, if any.
-    fn message(status: CompletionStatus, item_count: usize) -> Option<String> {
+    /// The one line drawn in place of the candidate list: the scan running,
+    /// the error that stopped it, or nothing matching what was typed. `None`
+    /// means the candidates themselves are what gets drawn.
+    fn placeholder(status: CompletionStatus, item_count: usize) -> Option<String> {
         match status {
             CompletionStatus::Loading => Some("Loading…".to_owned()),
             CompletionStatus::Error(error) => Some(error),
@@ -33,7 +35,7 @@ impl PopupList {
     /// Rows the content will occupy, so the box never reserves space for
     /// candidates that are not there.
     pub fn required_rows(status: CompletionStatus, item_count: usize) -> u16 {
-        if Self::message(status, item_count).is_some() {
+        if Self::placeholder(status, item_count).is_some() {
             return 1;
         }
         item_count.min(VISIBLE_ROWS) as u16
@@ -72,9 +74,9 @@ impl Component for PopupList {
         if !completion.is_open() || area.is_empty() {
             return;
         }
-        if let Some(message) = Self::message(completion.status(), completion.item_count()) {
+        if let Some(placeholder) = Self::placeholder(completion.status(), completion.item_count()) {
             frame.render_widget(
-                Paragraph::new(message)
+                Paragraph::new(placeholder)
                     .style(Style::default().bg(theme::EDITOR_BG))
                     .block(Block::default().padding(CONTENT_PADDING)),
                 area,
@@ -156,7 +158,7 @@ mod tests {
 
         assert_eq!(PopupList::required_rows(Ready, 3), 3);
         assert_eq!(PopupList::required_rows(Ready, 99), VISIBLE_ROWS as u16);
-        // A status message is one row however many candidates sit behind it.
+        // A placeholder is one row however many candidates sit behind it.
         assert_eq!(PopupList::required_rows(Ready, 0), 1);
         assert_eq!(PopupList::required_rows(Loading, 9), 1);
         assert_eq!(PopupList::required_rows(Error("nope".into()), 9), 1);
