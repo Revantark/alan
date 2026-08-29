@@ -387,7 +387,7 @@ mod tests {
 
         let mut completion = CompletionController::new(vec![Box::new(Paths::new(root.clone()))]);
 
-        completion.sync("@mai", 4);
+        completion.sync("@mai", 4, 0);
         assert!(completion.is_open());
         assert_eq!(completion.item_count(), 0);
 
@@ -414,6 +414,7 @@ mod tests {
         CompletionRequest {
             pattern: pattern.to_owned(),
             range,
+            row: 0,
         }
     }
 

@@ -370,7 +370,7 @@ impl UiState {
         let (row, col) = self.editor.cursor();
         let line = self.editor.lines().get(row).map_or("", String::as_str);
         let cursor = Self::char_offset(line, col.min(line.chars().count()));
-        completion.sync(line, cursor);
+        completion.sync(line, cursor, row);
     }
 
     fn handle_mouse_event(
@@ -1237,6 +1237,34 @@ mod tests {
             PopupAction::of(plain(KeyCode::Esc), None),
             Some(PopupAction::Dismiss)
         );
+    }
+
+    /// A `/` opening a continuation line is prose, not a command, so the popup
+    /// stays shut and the text submitted is the text that was typed.
+    #[test]
+    fn a_slash_on_a_later_line_is_left_alone() {
+        let mut state = UiState::new();
+        let mut completion = completion_with_commands();
+
+        for character in "hello".chars() {
+            state.handle_event(key(KeyCode::Char(character)), &[], &mut completion);
+        }
+        state.handle_event(
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT)),
+            &[],
+            &mut completion,
+        );
+        for character in "/he".chars() {
+            state.handle_event(key(KeyCode::Char(character)), &[], &mut completion);
+        }
+        assert!(!completion.is_open());
+
+        let command = state.handle_event(key(KeyCode::Enter), &[], &mut completion);
+
+        assert!(matches!(
+            command,
+            Some(Command::Submit { text, .. }) if text == "hello\n/he"
+        ));
     }
 
     /// Picking a command is the whole input, so one Enter runs it.

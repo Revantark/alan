@@ -25,6 +25,8 @@ pub struct CompletionRequest {
     pub pattern: String,
     /// Bytes of the line the pattern occupies, which accepting overwrites.
     pub range: Range<usize>,
+    /// Line of the buffer the token sits on, which is what tells a backend
+    pub row: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -113,14 +115,15 @@ impl CompletionController {
         }
     }
 
-    /// Re-evaluate after every editor change.
-    pub fn sync(&mut self, line: &str, cursor: usize) {
-        self.active = self.claim(line, cursor);
+    /// Re-evaluate after every editor change. `line` is the one the cursor is
+    /// on and `row` is where it sits in the buffer.
+    pub fn sync(&mut self, line: &str, cursor: usize, row: usize) {
+        self.active = self.claim(line, cursor, row);
     }
 
     /// Any step failing means no completion applies here: no token under the
     /// cursor, no backend for its trigger, or the backend declining.
-    fn claim(&mut self, line: &str, cursor: usize) -> Option<Active> {
+    fn claim(&mut self, line: &str, cursor: usize, row: usize) -> Option<Active> {
         let token = token::at(line, cursor)?;
         // Read before the backend is borrowed mutably.
         let switching = self.active.as_ref().map(|active| active.trigger) != Some(token.trigger);
@@ -134,6 +137,7 @@ impl CompletionController {
         let request = CompletionRequest {
             pattern: line[token.range.clone()].to_owned(),
             range: token.range,
+            row,
         };
 
         let result = backend.complete(&request)?;
@@ -280,7 +284,7 @@ mod tests {
     #[test]
     fn an_unclaimed_trigger_opens_nothing() {
         let mut engine = engine(&["src/main.rs"]);
-        engine.sync("#tag", 4);
+        engine.sync("#tag", 4, 0);
 
         assert!(!engine.is_open());
     }
@@ -297,7 +301,7 @@ mod tests {
     #[test]
     fn an_at_token_opens_completion_anywhere_in_the_line() {
         let mut engine = engine(&["src/main.rs", "docs/"]);
-        engine.sync("explain @mai", 12);
+        engine.sync("explain @mai", 12, 0);
 
         assert!(engine.is_open());
         assert_eq!(displayed(&engine), ["src/main.rs"]);
@@ -306,8 +310,8 @@ mod tests {
     #[test]
     fn plain_text_closes_the_popup() {
         let mut engine = engine(&["src/main.rs"]);
-        engine.sync("@src", 4);
-        engine.sync("hello", 5);
+        engine.sync("@src", 4, 0);
+        engine.sync("hello", 5, 0);
 
         assert!(!engine.is_open());
     }
@@ -315,7 +319,7 @@ mod tests {
     #[test]
     fn selection_stays_inside_the_items() {
         let mut engine = engine(&["a.txt", "b.txt"]);
-        engine.sync("@", 1);
+        engine.sync("@", 1, 0);
         assert_eq!(engine.item_count(), 2);
 
         engine.move_selection(50);
@@ -328,7 +332,7 @@ mod tests {
     #[test]
     fn accepting_reports_the_range_it_overwrites() {
         let mut engine = engine(&["src/main.rs"]);
-        engine.sync("explain @mai", 12);
+        engine.sync("explain @mai", 12, 0);
 
         let (item, range) = engine.accept().unwrap();
         assert_eq!(item.replacement, "src/main.rs");
@@ -341,7 +345,7 @@ mod tests {
     #[test]
     fn accepting_a_directory_closes_the_popup() {
         let mut engine = engine(&["crates/", "crates/alan/"]);
-        engine.sync("@crat", 5);
+        engine.sync("@crat", 5, 0);
 
         let (item, range) = engine.accept().unwrap();
         assert_eq!(item.replacement, "crates/");
@@ -353,11 +357,11 @@ mod tests {
     #[test]
     fn typing_past_a_directory_reopens_the_popup() {
         let mut engine = engine(&["crates/", "crates/alan/main.rs"]);
-        engine.sync("@crates/", 8);
+        engine.sync("@crates/", 8, 0);
         engine.accept();
         assert!(!engine.is_open());
 
-        engine.sync("@crates/m", 9);
+        engine.sync("@crates/m", 9, 0);
 
         assert!(engine.is_open());
         assert_eq!(displayed(&engine), ["crates/alan/main.rs"]);
@@ -366,7 +370,7 @@ mod tests {
     #[test]
     fn accepting_nothing_when_no_candidate_matched() {
         let mut engine = engine(&["src/main.rs"]);
-        engine.sync("@zzz", 4);
+        engine.sync("@zzz", 4, 0);
 
         assert_eq!(engine.item_count(), 0);
         assert!(engine.accept().is_none());
@@ -375,7 +379,7 @@ mod tests {
     #[test]
     fn items_are_bounded_by_the_window_asked_for() {
         let mut engine = engine(&["a.txt", "b.txt", "c.txt"]);
-        engine.sync("@", 1);
+        engine.sync("@", 1, 0);
 
         assert_eq!(engine.items(0, 2).len(), 2);
         assert_eq!(engine.items(2, 5).len(), 1);

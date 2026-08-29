@@ -30,8 +30,9 @@ impl CompletionBackend for Commands {
     }
 
     fn complete(&self, request: &CompletionRequest) -> Option<CompletionResult> {
-        // The range starts after the one-byte trigger, so 1 is column 0.
-        if request.range.start != 1 {
+        // A command is the whole input, so it can only open the buffer. The
+        // range starts after the one-byte trigger, so 1 is column 0.
+        if request.row != 0 || request.range.start != 1 {
             return None;
         }
 
@@ -66,7 +67,7 @@ mod tests {
     #[test]
     fn a_lone_slash_lists_every_command() {
         let mut engine = engine();
-        engine.sync("/", 1);
+        engine.sync("/", 1, 0);
 
         assert!(engine.is_open());
         assert_eq!(engine.item_count(), SlashCommand::iter().count());
@@ -75,7 +76,7 @@ mod tests {
     #[test]
     fn a_pattern_narrows_to_the_matching_commands() {
         let mut engine = engine();
-        engine.sync("/he", 3);
+        engine.sync("/he", 3, 0);
 
         let items = engine.items(0, engine.item_count());
         assert_eq!(items.len(), 1);
@@ -87,7 +88,7 @@ mod tests {
     #[test]
     fn an_item_is_displayed_with_its_description() {
         let mut engine = engine();
-        engine.sync("/help", 5);
+        engine.sync("/help", 5, 0);
 
         assert_eq!(
             engine.items(0, 1)[0].display,
@@ -99,7 +100,17 @@ mod tests {
     #[test]
     fn a_slash_inside_the_line_is_not_a_command() {
         let mut engine = engine();
-        engine.sync("explain /usr", 12);
+        engine.sync("explain /usr", 12, 0);
+
+        assert!(!engine.is_open());
+    }
+
+    /// A command is the whole input, so a `/` opening a continuation line is
+    /// prose. Offering one there would submit the half-written prompt around it.
+    #[test]
+    fn a_slash_opening_a_later_line_is_not_a_command() {
+        let mut engine = engine();
+        engine.sync("/he", 3, 1);
 
         assert!(!engine.is_open());
     }
@@ -108,7 +119,7 @@ mod tests {
     #[test]
     fn accepting_replaces_the_name_and_keeps_the_slash() {
         let mut engine = engine();
-        engine.sync("/he", 3);
+        engine.sync("/he", 3, 0);
 
         let (item, range) = engine.accept().unwrap();
         assert_eq!(item.replacement, "help");
