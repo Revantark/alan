@@ -9,8 +9,8 @@ pub mod selection;
 mod theme;
 
 use crate::core::{
-    Accept, Action, Command, CompletionController, Controller, ImageAttachment, Overlay, Poll,
-    SlashCommand,
+    Accept, Action, Command, CompletionController, CompletionItem, Controller, ImageAttachment,
+    Overlay, Poll, SlashCommand,
 };
 use base64::Engine;
 use components::{Chat, Footer, Header, LoginOverlay};
@@ -159,7 +159,7 @@ impl UiState {
         }
         if let Event::Key(key) = &event
             && completion.is_open()
-            && let Some(action) = PopupAction::of(*key, completion)
+            && let Some(action) = PopupAction::of(*key, completion.selected_item())
         {
             return self.apply_completion_popup(action, completion);
         }
@@ -692,17 +692,13 @@ enum PopupAction {
 
 impl PopupAction {
     /// `None` leaves the key to the editor.
-    fn of(key: KeyEvent, completion: &CompletionController) -> Option<Self> {
+    fn of(key: KeyEvent, selected: Option<&CompletionItem>) -> Option<Self> {
         match key.code {
             KeyCode::Up => Some(Self::Move(-1)),
             KeyCode::Down => Some(Self::Move(1)),
             KeyCode::Esc => Some(Self::Dismiss),
             KeyCode::Enter | KeyCode::Tab if key.modifiers.is_empty() => {
-                // Nothing selected means nothing to take, so the key stays the
-                // editor's: Enter submits and Tab indents.
-                let item = completion.selected_item()?;
-                // Tab leaves room to keep typing; Enter only submits an item
-                // that is a whole input on its own.
+                let item = selected?;
                 Some(Self::Take {
                     submit: key.code == KeyCode::Enter && item.accept == Accept::Complete,
                 })
@@ -1190,27 +1186,36 @@ mod tests {
         ));
     }
 
+    fn plain(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    /// Only the `accept` field decides anything, so the text is left empty.
+    fn item(accept: Accept) -> CompletionItem {
+        CompletionItem {
+            display: String::new(),
+            replacement: String::new(),
+            accept,
+        }
+    }
+
     /// Only Enter on a whole input submits. Tab never does, and neither does
     /// Enter on a path, which is only ever part of a prompt.
     #[test]
     fn only_enter_on_a_whole_input_submits() {
-        let plain = |code| KeyEvent::new(code, KeyModifiers::NONE);
-
-        let mut commands = completion_with_commands();
-        commands.sync("/he", 3);
+        let command = item(Accept::Complete);
         assert_eq!(
-            PopupAction::of(plain(KeyCode::Enter), &commands),
+            PopupAction::of(plain(KeyCode::Enter), Some(&command)),
             Some(PopupAction::Take { submit: true })
         );
         assert_eq!(
-            PopupAction::of(plain(KeyCode::Tab), &commands),
+            PopupAction::of(plain(KeyCode::Tab), Some(&command)),
             Some(PopupAction::Take { submit: false })
         );
 
-        let mut paths = completion_with(&["src/main.rs"]);
-        paths.sync("/plan @src", 10);
+        let path = item(Accept::Insert);
         assert_eq!(
-            PopupAction::of(plain(KeyCode::Enter), &paths),
+            PopupAction::of(plain(KeyCode::Enter), Some(&path)),
             Some(PopupAction::Take { submit: false })
         );
     }
@@ -1219,19 +1224,17 @@ mod tests {
     /// submitting, Tab indenting, and Shift+Tab toggling plan mode.
     #[test]
     fn the_popup_declines_keys_it_cannot_act_on() {
-        let plain = |code| KeyEvent::new(code, KeyModifiers::NONE);
-        let mut completion = completion_with_commands();
+        // Nothing selected leaves the accepting keys to the editor.
+        assert_eq!(PopupAction::of(plain(KeyCode::Enter), None), None);
+        assert_eq!(PopupAction::of(plain(KeyCode::Tab), None), None);
 
-        completion.sync("/zzz", 4);
-        assert_eq!(completion.item_count(), 0, "nothing to accept");
-        assert_eq!(PopupAction::of(plain(KeyCode::Enter), &completion), None);
-        assert_eq!(PopupAction::of(plain(KeyCode::Tab), &completion), None);
-
-        completion.sync("/he", 3);
+        let selected = item(Accept::Complete);
         let shift_tab = KeyEvent::new(KeyCode::Tab, KeyModifiers::SHIFT);
-        assert_eq!(PopupAction::of(shift_tab, &completion), None);
+        assert_eq!(PopupAction::of(shift_tab, Some(&selected)), None);
+
+        // Dismissing never depends on there being something to take.
         assert_eq!(
-            PopupAction::of(plain(KeyCode::Esc), &completion),
+            PopupAction::of(plain(KeyCode::Esc), None),
             Some(PopupAction::Dismiss)
         );
     }
