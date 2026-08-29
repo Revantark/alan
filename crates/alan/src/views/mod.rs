@@ -9,7 +9,8 @@ pub mod selection;
 mod theme;
 
 use crate::core::{
-    Action, Command, CompletionController, Controller, ImageAttachment, Overlay, Poll, SlashCommand,
+    Accept, Action, Command, CompletionController, Controller, ImageAttachment, Overlay, Poll,
+    SlashCommand,
 };
 use base64::Engine;
 use components::{Chat, Footer, Header, LoginOverlay};
@@ -158,10 +159,9 @@ impl UiState {
         }
         if let Event::Key(key) = &event
             && completion.is_open()
-            && (completion.item_count() > 0 || !matches!(key.code, KeyCode::Enter | KeyCode::Tab))
-            && self.handle_completion_key(*key, completion)
+            && let Some(action) = PopupAction::of(*key, completion)
         {
-            return None;
+            return self.apply_completion_popup(action, completion);
         }
         self.handle_editor_event(event, rendered_lines, completion)
     }
@@ -283,45 +283,43 @@ impl UiState {
         );
     }
 
-    /// Navigation and acceptance keys while the completion popup is open.
-    /// Returns true only when completion consumed the key.
-    fn handle_completion_key(
+    /// Carry out what [`PopupAction::of`] decided. Only accepting can finish
+    /// the input, so only accepting can produce a command.
+    fn apply_completion_popup(
         &mut self,
-        key: KeyEvent,
+        action: PopupAction,
         completion: &mut CompletionController,
-    ) -> bool {
-        match key.code {
-            KeyCode::Up => {
-                completion.move_selection(-1);
-                self.dirty = true;
-                true
+    ) -> Option<Command> {
+        self.dirty = true;
+        match action {
+            PopupAction::Move(delta) => {
+                completion.move_selection(delta);
+                None
             }
-            KeyCode::Down => {
-                completion.move_selection(1);
-                self.dirty = true;
-                true
-            }
-            KeyCode::Enter | KeyCode::Tab if key.modifiers.is_empty() => {
-                let Some((item, range)) = completion.accept() else {
-                    return false;
-                };
-                let separate = self.needs_separator_after(range.end);
-                self.replace_range(range, &item.replacement);
-                // An accepted mention is finished. Without a separator the next
-                // keystroke lands inside the token and reopens the popup.
-                if separate {
-                    self.editor.insert_str(" ");
-                }
-                self.dirty = true;
-                true
-            }
-            KeyCode::Esc => {
+            PopupAction::Dismiss => {
                 completion.dismiss();
-                self.dirty = true;
-                true
+                None
             }
-            _ => false,
+            PopupAction::Take { submit } => {
+                let (item, range) = completion.accept()?;
+                self.insert_completion(&item.replacement, range);
+                // Taking an item can complete a command name, and the editor
+                // event that would otherwise restyle the line never runs.
+                self.sync_command_highlight();
+                submit.then(|| self.submit_editor_or_accept()).flatten()
+            }
         }
+    }
+
+    /// Overwrite the completed token with `replacement`.
+    fn insert_completion(&mut self, replacement: &str, range: std::ops::Range<usize>) {
+        let separate = self.needs_separator_after(range.end);
+        self.replace_range(range, replacement);
+        if separate {
+            self.editor.insert_str(" ");
+        }
+
+        self.dirty = true;
     }
 
     /// Whether byte `at` on the cursor's line is not already followed by
@@ -662,11 +660,55 @@ fn completion_with(index: &[&str]) -> CompletionController {
 }
 
 #[cfg(test)]
+fn completion_with_commands() -> CompletionController {
+    use crate::core::completion::Commands;
+
+    CompletionController::new(vec![Box::new(Commands::default())])
+}
+
+#[cfg(test)]
 impl UiState {
     /// Test shim for the pre-completion call signature.
     fn handle_editor_event_for_test(&mut self, event: Event) -> Option<Command> {
         let mut completion = completion_with(&[]);
         self.handle_event(event, &[], &mut completion)
+    }
+}
+
+/// What an open completion popup does with a key.
+///
+/// Decided before anything is mutated, so [`PopupAction::of`] returning `None`
+/// is the whole answer to "the editor should see this key" — nothing further
+/// down has to report back that it declined.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PopupAction {
+    Move(isize),
+    /// Put the highlighted item in the buffer, then submit if `submit`.
+    Take {
+        submit: bool,
+    },
+    Dismiss,
+}
+
+impl PopupAction {
+    /// `None` leaves the key to the editor.
+    fn of(key: KeyEvent, completion: &CompletionController) -> Option<Self> {
+        match key.code {
+            KeyCode::Up => Some(Self::Move(-1)),
+            KeyCode::Down => Some(Self::Move(1)),
+            KeyCode::Esc => Some(Self::Dismiss),
+            KeyCode::Enter | KeyCode::Tab if key.modifiers.is_empty() => {
+                // Nothing highlighted means nothing to take, so the key stays
+                // the editor's: Enter submits and Tab indents.
+                let item = completion.highlighted()?;
+                // Tab leaves room to keep typing; Enter only submits an item
+                // that is a whole input on its own.
+                Some(Self::Take {
+                    submit: key.code == KeyCode::Enter && item.accept == Accept::Complete,
+                })
+            }
+            _ => None,
+        }
     }
 }
 
@@ -1125,6 +1167,131 @@ mod tests {
         assert_eq!(command, None);
         assert_eq!(state.editor_text(), "@something.txt ");
         assert!(!completion.is_open());
+    }
+
+    /// An open popup showing no matches has nothing to accept, so Enter is the
+    /// editor's and submits the line.
+    #[test]
+    fn enter_submits_when_the_popup_has_no_matches() {
+        let mut state = UiState::new();
+        let mut completion = completion_with(&["alpha.txt"]);
+
+        for character in "@zzz".chars() {
+            state.handle_event(key(KeyCode::Char(character)), &[], &mut completion);
+        }
+        assert!(completion.is_open());
+        assert_eq!(completion.item_count(), 0);
+
+        let command = state.handle_event(key(KeyCode::Enter), &[], &mut completion);
+
+        assert!(matches!(
+            command,
+            Some(Command::Submit { text, .. }) if text == "@zzz"
+        ));
+    }
+
+    /// Only Enter on a whole input submits. Tab never does, and neither does
+    /// Enter on a path, which is only ever part of a prompt.
+    #[test]
+    fn only_enter_on_a_whole_input_submits() {
+        let plain = |code| KeyEvent::new(code, KeyModifiers::NONE);
+
+        let mut commands = completion_with_commands();
+        commands.sync("/he", 3);
+        assert_eq!(
+            PopupAction::of(plain(KeyCode::Enter), &commands),
+            Some(PopupAction::Take { submit: true })
+        );
+        assert_eq!(
+            PopupAction::of(plain(KeyCode::Tab), &commands),
+            Some(PopupAction::Take { submit: false })
+        );
+
+        let mut paths = completion_with(&["src/main.rs"]);
+        paths.sync("/plan @src", 10);
+        assert_eq!(
+            PopupAction::of(plain(KeyCode::Enter), &paths),
+            Some(PopupAction::Take { submit: false })
+        );
+    }
+
+    /// Keys the popup declines stay the editor's, which is what keeps Enter
+    /// submitting, Tab indenting, and Shift+Tab toggling plan mode.
+    #[test]
+    fn the_popup_declines_keys_it_cannot_act_on() {
+        let plain = |code| KeyEvent::new(code, KeyModifiers::NONE);
+        let mut completion = completion_with_commands();
+
+        completion.sync("/zzz", 4);
+        assert_eq!(completion.item_count(), 0, "nothing to accept");
+        assert_eq!(PopupAction::of(plain(KeyCode::Enter), &completion), None);
+        assert_eq!(PopupAction::of(plain(KeyCode::Tab), &completion), None);
+
+        completion.sync("/he", 3);
+        let shift_tab = KeyEvent::new(KeyCode::Tab, KeyModifiers::SHIFT);
+        assert_eq!(PopupAction::of(shift_tab, &completion), None);
+        assert_eq!(
+            PopupAction::of(plain(KeyCode::Esc), &completion),
+            Some(PopupAction::Dismiss)
+        );
+    }
+
+    /// Picking a command is the whole input, so one Enter runs it.
+    #[test]
+    fn slash_completion_runs_on_a_single_enter() {
+        let mut state = UiState::new();
+        let mut completion = completion_with_commands();
+
+        for character in "/he".chars() {
+            state.handle_event(key(KeyCode::Char(character)), &[], &mut completion);
+        }
+        assert!(completion.is_open());
+
+        let command = state.handle_event(key(KeyCode::Enter), &[], &mut completion);
+
+        let Some(Command::Submit { text, .. }) = command else {
+            panic!("expected a submit, got {command:?}");
+        };
+        // The accepted name carries a trailing separator, so it has to parse
+        // with one.
+        assert_eq!(SlashCommand::parse(&text), Some(SlashCommand::Help));
+        assert!(!completion.is_open());
+    }
+
+    /// Tab completes the name without running it, which is what leaves room to
+    /// type an argument after a command that grows one.
+    #[test]
+    fn tab_completes_a_command_without_running_it() {
+        let mut state = UiState::new();
+        let mut completion = completion_with_commands();
+
+        for character in "/he".chars() {
+            state.handle_event(key(KeyCode::Char(character)), &[], &mut completion);
+        }
+        let command = state.handle_event(key(KeyCode::Tab), &[], &mut completion);
+
+        assert_eq!(command, None);
+        assert_eq!(state.editor_text(), "/help ");
+    }
+
+    /// The `runs` flag belongs to the backend that offered the item, so a path
+    /// accepted inside a command line inserts itself and nothing more.
+    #[test]
+    fn accepting_a_path_inside_a_command_does_not_run_the_command() {
+        let mut state = UiState::new();
+        let mut completion = completion_with(&["src/main.rs"]);
+
+        for character in "/plan @src".chars() {
+            state.handle_event(key(KeyCode::Char(character)), &[], &mut completion);
+        }
+        assert!(completion.is_open());
+
+        let command = state.handle_event(key(KeyCode::Enter), &[], &mut completion);
+
+        assert_eq!(command, None, "accepting a mention must not run /plan");
+        // The line parses as `/plan`, so the flag rather than the text is what
+        // keeps it from running.
+        assert_eq!(state.editor_text(), "/plan @src/main.rs ");
     }
 
     /// `TextArea::cursor()` reports columns in characters while the line is

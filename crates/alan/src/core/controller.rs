@@ -3,7 +3,7 @@
 use super::action::{Command, ImageAttachment};
 use super::chat::{ChatController, Entry};
 use super::command::SlashCommand;
-use super::completion::{CompletionController, Paths};
+use super::completion::{Commands, CompletionController, Paths};
 use super::login::{LoginController, LoginState};
 use agent::Agent;
 use llm::Usage;
@@ -76,7 +76,10 @@ impl Controller {
         Self {
             chat: ChatController::new(agent),
             login: LoginController::new(providers, credentials),
-            completion: CompletionController::new(vec![Box::new(Paths::default())]),
+            completion: CompletionController::new(vec![
+                Box::new(Paths::default()),
+                Box::new(Commands::default()),
+            ]),
             overlay: Overlay::None,
         }
     }

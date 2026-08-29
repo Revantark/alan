@@ -6,8 +6,8 @@
 //! index is served stale rather than waited on.
 
 use super::{
-    CompletionBackend, CompletionItem, CompletionRequest, CompletionResult, CompletionStatus,
-    ranked_items,
+    Accept, CompletionBackend, CompletionItem, CompletionRequest, CompletionResult,
+    CompletionStatus, ranked_items,
 };
 use crate::core::Poll;
 use futures_util::FutureExt;
@@ -96,6 +96,7 @@ impl CompletionBackend for Paths {
             items: ranked_items(&request.pattern, &self.index, |path| CompletionItem {
                 display: path.to_owned(),
                 replacement: path.to_owned(),
+                accept: Accept::Insert,
             }),
         })
     }

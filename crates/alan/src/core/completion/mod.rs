@@ -4,11 +4,13 @@
 //! the line itself. Ranking is not their concern either: [`matcher`] orders
 //! every backend the same way.
 
+mod commands;
 mod matcher;
 mod paths;
 mod token;
 
 use super::Poll;
+pub use commands::Commands;
 pub use paths::Paths;
 use std::collections::HashMap;
 use std::ops::Range;
@@ -28,8 +30,15 @@ pub struct CompletionRequest {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompletionItem {
     pub display: String,
-    /// Text substituted for [`CompletionResult::range`].
     pub replacement: String,
+    pub accept: Accept,
+}
+
+/// What accepting an item leaves the input in. Set by the backend that offered the item
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Accept {
+    Insert,
+    Complete,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -183,11 +192,17 @@ impl CompletionController {
         active.selected = (active.selected as isize + delta).clamp(0, max) as usize;
     }
 
+    /// The item accepting would take, which is also what makes an empty popup
+    /// distinguishable from one with something to offer.
+    pub fn highlighted(&self) -> Option<&CompletionItem> {
+        let active = self.active.as_ref()?;
+        active.result.items.get(active.selected)
+    }
+
     /// The highlighted item and the byte range of the line it overwrites.
     pub fn accept(&mut self) -> Option<(CompletionItem, Range<usize>)> {
-        let active = self.active.as_ref()?;
-        let item = active.result.items.get(active.selected)?.clone();
-        let range = active.result.range.clone();
+        let item = self.highlighted()?.clone();
+        let range = self.active.as_ref()?.result.range.clone();
         self.active = None;
         Some((item, range))
     }
@@ -265,7 +280,7 @@ mod tests {
     #[test]
     fn an_unclaimed_trigger_opens_nothing() {
         let mut engine = engine(&["src/main.rs"]);
-        engine.sync("/help", 5);
+        engine.sync("#tag", 4);
 
         assert!(!engine.is_open());
     }

@@ -165,7 +165,9 @@ impl Component for Footer {
         if let Some(position) = state.cursor_screen_position() {
             frame.set_cursor_position(position);
         }
-        if let Some(popup_area) = PopupList::area_above(area, frame.area()) {
+        let completion = controller.completion();
+        let rows = PopupList::required_rows(completion.status(), completion.item_count());
+        if let Some(popup_area) = PopupList::area_above(area, frame.area(), rows) {
             self.popup.render(frame, popup_area, controller, state);
         }
     }

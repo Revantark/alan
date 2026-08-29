@@ -8,10 +8,11 @@ use ratatui::style::Style;
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Padding, Paragraph};
 
-/// Fixed height of the completion popup, including its padding.
-const POPUP_ROWS: u16 = 7;
-/// Candidates visible inside that height.
+/// Candidates shown at once, past which the list scrolls.
 const VISIBLE_ROWS: usize = 5;
+
+/// Blank space the popup's block keeps around its content
+const CONTENT_PADDING: Padding = Padding::new(2, 2, 1, 1);
 
 /// Generic list popup rendered above the prompt. Currently used for
 /// `@`-path completion; reusable for any short list anchored at the prompt.
@@ -19,13 +20,34 @@ const VISIBLE_ROWS: usize = 5;
 pub struct PopupList;
 
 impl PopupList {
-    /// Popup area sitting directly above `prompt`, spanning the frame width.
+    /// The status shown in place of candidates, if any.
+    fn message(status: CompletionStatus, item_count: usize) -> Option<String> {
+        match status {
+            CompletionStatus::Loading => Some("Loading…".to_owned()),
+            CompletionStatus::Error(error) => Some(error),
+            CompletionStatus::Ready if item_count == 0 => Some("No matches".to_owned()),
+            CompletionStatus::Ready => None,
+        }
+    }
+
+    /// Rows the content will occupy, so the box never reserves space for
+    /// candidates that are not there.
+    pub fn required_rows(status: CompletionStatus, item_count: usize) -> u16 {
+        if Self::message(status, item_count).is_some() {
+            return 1;
+        }
+        item_count.min(VISIBLE_ROWS) as u16
+    }
+
+    /// Popup area sitting directly above `prompt`, spanning the frame width and
+    /// tall enough for `rows` of content plus its padding.
     ///
     /// Anchored to the prompt rather than the cursor so it never covers the
     /// status line, which is what describes the keys the popup has taken.
     /// Returns `None` when there is no room above.
-    pub fn area_above(prompt: Rect, frame_area: Rect) -> Option<Rect> {
-        let top = prompt.y.checked_sub(POPUP_ROWS)?;
+    pub fn area_above(prompt: Rect, frame_area: Rect, rows: u16) -> Option<Rect> {
+        let height = rows.saturating_add(CONTENT_PADDING.top + CONTENT_PADDING.bottom);
+        let top = prompt.y.checked_sub(height)?;
         if top < frame_area.y || prompt.y > frame_area.bottom() {
             return None;
         }
@@ -33,7 +55,7 @@ impl PopupList {
             x: frame_area.x,
             y: top,
             width: frame_area.width,
-            height: POPUP_ROWS,
+            height,
         })
     }
 }
@@ -50,19 +72,11 @@ impl Component for PopupList {
         if !completion.is_open() || area.is_empty() {
             return;
         }
-        let message = match completion.status() {
-            CompletionStatus::Loading => Some("Loading…".to_owned()),
-            CompletionStatus::Error(error) => Some(error),
-            CompletionStatus::Ready if completion.item_count() == 0 => {
-                Some("No matches".to_owned())
-            }
-            CompletionStatus::Ready => None,
-        };
-        if let Some(message) = message {
+        if let Some(message) = Self::message(completion.status(), completion.item_count()) {
             frame.render_widget(
                 Paragraph::new(message)
                     .style(Style::default().bg(theme::EDITOR_BG))
-                    .block(Block::default().padding(Padding::new(2, 2, 1, 1))),
+                    .block(Block::default().padding(CONTENT_PADDING)),
                 area,
             );
             return;
@@ -83,7 +97,7 @@ impl Component for PopupList {
         frame.render_widget(
             Paragraph::new(Text::from(lines))
                 .style(Style::default().bg(theme::EDITOR_BG))
-                .block(Block::default().padding(Padding::new(2, 2, 1, 1))),
+                .block(Block::default().padding(CONTENT_PADDING)),
             area,
         );
     }
@@ -113,9 +127,12 @@ mod tests {
         let frame = Rect::new(0, 0, 80, 24);
         let prompt = Rect::new(0, 16, 80, 8);
 
-        let area = PopupList::area_above(prompt, frame).unwrap();
+        let area = PopupList::area_above(prompt, frame, VISIBLE_ROWS as u16).unwrap();
 
-        assert_eq!(area.height, POPUP_ROWS);
+        assert_eq!(
+            area.height,
+            VISIBLE_ROWS as u16 + CONTENT_PADDING.top + CONTENT_PADDING.bottom
+        );
         assert_eq!(area.bottom(), prompt.y);
         assert!(area.bottom() <= prompt.y, "overlaps the prompt");
     }
@@ -123,10 +140,25 @@ mod tests {
     #[test]
     fn no_room_above_the_prompt_means_no_popup() {
         let frame = Rect::new(0, 0, 80, 24);
-        // Not enough rows above the prompt for the fixed height.
-        assert!(PopupList::area_above(Rect::new(0, 3, 80, 8), frame).is_none());
-        assert!(PopupList::area_above(Rect::new(0, 0, 80, 8), frame).is_none());
+        let rows = VISIBLE_ROWS as u16;
+        // Not enough rows above the prompt for the height asked for.
+        assert!(PopupList::area_above(Rect::new(0, 3, 80, 8), frame, rows).is_none());
+        assert!(PopupList::area_above(Rect::new(0, 0, 80, 8), frame, rows).is_none());
         // Prompt off the bottom of the frame.
-        assert!(PopupList::area_above(Rect::new(0, 25, 80, 8), frame).is_none());
+        assert!(PopupList::area_above(Rect::new(0, 25, 80, 8), frame, rows).is_none());
+    }
+
+    /// The box reserves exactly what [`PopupList::render`] will draw, so a
+    /// short list leaves no dead rows and a long one does not run off-screen.
+    #[test]
+    fn required_rows_tracks_what_will_be_drawn() {
+        use CompletionStatus::{Error, Loading, Ready};
+
+        assert_eq!(PopupList::required_rows(Ready, 3), 3);
+        assert_eq!(PopupList::required_rows(Ready, 99), VISIBLE_ROWS as u16);
+        // A status message is one row however many candidates sit behind it.
+        assert_eq!(PopupList::required_rows(Ready, 0), 1);
+        assert_eq!(PopupList::required_rows(Loading, 9), 1);
+        assert_eq!(PopupList::required_rows(Error("nope".into()), 9), 1);
     }
 }
