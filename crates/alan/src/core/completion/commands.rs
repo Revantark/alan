@@ -29,8 +29,6 @@ impl CompletionBackend for Commands {
         '/'
     }
 
-    /// Commands take no arguments, so one opens the line or is not a command at
-    /// all: anywhere else a `/` is a path separator, as in `explain /usr/bin`.
     fn complete(&self, request: &CompletionRequest) -> Option<CompletionResult> {
         // The range starts after the one-byte trigger, so 1 is column 0.
         if request.range.start != 1 {
@@ -49,8 +47,6 @@ impl CompletionBackend for Commands {
     }
 }
 
-/// `/help — list the available commands`. Parsing the name back is what keeps
-/// the description tied to the variant rather than to a second list.
 fn describe_slash_command(name: &str) -> String {
     let Ok(command) = name.parse::<SlashCommand>() else {
         return format!("/{name}");

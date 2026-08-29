@@ -683,7 +683,7 @@ impl UiState {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PopupAction {
     Move(isize),
-    /// Put the highlighted item in the buffer, then submit if `submit`.
+    /// Put the selected item in the buffer, then submit if `submit`.
     Take {
         submit: bool,
     },
@@ -698,9 +698,9 @@ impl PopupAction {
             KeyCode::Down => Some(Self::Move(1)),
             KeyCode::Esc => Some(Self::Dismiss),
             KeyCode::Enter | KeyCode::Tab if key.modifiers.is_empty() => {
-                // Nothing highlighted means nothing to take, so the key stays
-                // the editor's: Enter submits and Tab indents.
-                let item = completion.highlighted()?;
+                // Nothing selected means nothing to take, so the key stays the
+                // editor's: Enter submits and Tab indents.
+                let item = completion.selected_item()?;
                 // Tab leaves room to keep typing; Enter only submits an item
                 // that is a whole input on its own.
                 Some(Self::Take {

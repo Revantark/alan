@@ -192,16 +192,16 @@ impl CompletionController {
         active.selected = (active.selected as isize + delta).clamp(0, max) as usize;
     }
 
-    /// The item accepting would take, which is also what makes an empty popup
-    /// distinguishable from one with something to offer.
-    pub fn highlighted(&self) -> Option<&CompletionItem> {
+    /// The item at [`Self::selected`], which is `None` when the popup has
+    /// nothing to offer.
+    pub fn selected_item(&self) -> Option<&CompletionItem> {
         let active = self.active.as_ref()?;
         active.result.items.get(active.selected)
     }
 
-    /// The highlighted item and the byte range of the line it overwrites.
+    /// The selected item and the byte range of the line it overwrites.
     pub fn accept(&mut self) -> Option<(CompletionItem, Range<usize>)> {
-        let item = self.highlighted()?.clone();
+        let item = self.selected_item()?.clone();
         let range = self.active.as_ref()?.result.range.clone();
         self.active = None;
         Some((item, range))
