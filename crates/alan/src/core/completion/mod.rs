@@ -250,9 +250,10 @@ impl CompletionController {
 }
 
 /// Shared so no backend can invent its own ordering.
-fn ranked_items<F>(pattern: &str, candidates: &[String], item: F) -> Vec<CompletionItem>
+fn ranked_items<C, F>(pattern: &str, candidates: &[C], item: F) -> Vec<CompletionItem>
 where
-    F: Fn(&str) -> CompletionItem,
+    C: AsRef<str>,
+    F: Fn(&C) -> CompletionItem,
 {
     matcher::rank_all(pattern, candidates)
         .into_iter()

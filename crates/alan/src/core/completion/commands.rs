@@ -11,15 +11,13 @@ use crate::core::SlashCommand;
 use strum::IntoEnumIterator;
 
 pub struct Commands {
-    names: Vec<String>,
+    commands: Vec<SlashCommand>,
 }
 
 impl Default for Commands {
     fn default() -> Self {
         Self {
-            names: SlashCommand::iter()
-                .map(|command| <&'static str>::from(command).to_owned())
-                .collect(),
+            commands: SlashCommand::iter().collect(),
         }
     }
 }
@@ -39,20 +37,13 @@ impl CompletionBackend for Commands {
         Some(CompletionResult {
             range: request.range.clone(),
             status: CompletionStatus::Ready,
-            items: ranked_items(&request.pattern, &self.names, |name| CompletionItem {
-                display: describe_slash_command(name),
-                replacement: name.to_owned(),
+            items: ranked_items(&request.pattern, &self.commands, |command| CompletionItem {
+                display: format!("{} — {}", command.name(), command.description()),
+                replacement: command.as_ref().to_owned(),
                 accept: Accept::Complete,
             }),
         })
     }
-}
-
-fn describe_slash_command(name: &str) -> String {
-    let Ok(command) = name.parse::<SlashCommand>() else {
-        return format!("/{name}");
-    };
-    format!("{} — {}", command.name(), command.description())
 }
 
 #[cfg(test)]

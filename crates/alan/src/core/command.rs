@@ -55,6 +55,12 @@ impl SlashCommand {
     }
 }
 
+impl AsRef<str> for SlashCommand {
+    fn as_ref(&self) -> &str {
+        self.into()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
