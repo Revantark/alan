@@ -1,5 +1,6 @@
 mod builder;
 mod event;
+mod mode;
 mod persistence;
 mod prompt;
 mod prompt_builder;
@@ -15,12 +16,13 @@ use providers::Model;
 use std::path::PathBuf;
 use std::sync::{
     Arc,
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicU8, Ordering},
 };
 use tokio::sync::Mutex;
 
 pub use builder::AgentBuilder;
 pub use event::{AgentEvent, AgentStream};
+pub use mode::Mode;
 pub use prompt_builder::PromptBuilder;
 
 pub(crate) const AGENT_EVENT_CAPACITY: usize = 128;
@@ -28,7 +30,8 @@ pub(crate) const AGENT_EVENT_CAPACITY: usize = 128;
 pub struct Agent {
     pub(super) model: Mutex<Model>,
     pub(super) context: Mutex<crate::context::AgentContext>,
-    pub(super) plan_mode: AtomicBool,
+    pub(super) mode: AtomicU8,
+    pub(super) review_intro_pending: AtomicBool,
     pub(super) max_tool_rounds: usize,
     /// Stable identifier used for LLM prompt caching.
     /// When no session manager is configured this is a random UUID;
@@ -93,12 +96,21 @@ impl Agent {
             .map(|session| session.id.clone())
     }
 
-    pub fn set_plan_mode(&self, enabled: bool) {
-        self.plan_mode.store(enabled, Ordering::Release);
+    pub fn set_mode(&self, mode: Mode) {
+        self.mode.store(mode.as_u8(), Ordering::Release);
+        self.review_intro_pending
+            .store(mode == Mode::Review, std::sync::atomic::Ordering::Release);
     }
 
-    pub fn plan_mode(&self) -> bool {
-        self.plan_mode.load(Ordering::Acquire)
+    pub fn mode(&self) -> Mode {
+        Mode::from_u8(self.mode.load(Ordering::Acquire))
+    }
+
+    /// Take the pending review-guidelines flag. Returns true only for the
+    /// first prompt after review mode was entered.
+    pub(super) fn take_review_intro(&self) -> bool {
+        self.review_intro_pending
+            .swap(false, std::sync::atomic::Ordering::AcqRel)
     }
 
     pub async fn messages(&self) -> Vec<AgentMessage> {

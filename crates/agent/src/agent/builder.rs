@@ -4,11 +4,14 @@ use llm::Usage;
 use providers::Model;
 use std::{
     path::PathBuf,
-    sync::{Arc, atomic::AtomicBool},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicU8},
+    },
 };
 use tokio::sync::Mutex;
 
-use super::Agent;
+use super::{Agent, Mode};
 
 const DEFAULT_SYSTEM_PROMPT: &str = r#"You are Alan, a reliable, pragmatic coding agent running in the user's project in a terminal.
 
@@ -142,7 +145,8 @@ impl AgentBuilder {
         Ok(Agent {
             model: Mutex::new(self.model),
             context: Mutex::new(context),
-            plan_mode: AtomicBool::new(false),
+            mode: AtomicU8::new(Mode::Normal.as_u8()),
+            review_intro_pending: AtomicBool::new(false),
             max_tool_rounds: self.max_tool_rounds,
             session_id: Mutex::new(session_id),
             session_manager: self.session_manager,

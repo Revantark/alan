@@ -92,9 +92,15 @@ impl UiState {
                 })
             }
             Action::ClearInput => {
-                self.input.clear();
-                self.attachments.clear();
-                Some(Command::Cancel)
+                // Esc first removes the newest attachment; with none pending
+                // it clears the input as before.
+                if self.attachments.pop().is_some() {
+                    self.dirty = true;
+                    None
+                } else {
+                    self.input.clear();
+                    Some(Command::Cancel)
+                }
             }
             Action::Backspace => {
                 self.input.pop();
@@ -176,6 +182,11 @@ impl UiState {
             // Clear selection on Escape
             Event::Key(key) if key.code == KeyCode::Esc && self.has_active_selection() => {
                 self.selection = None;
+                self.dirty = true;
+                None
+            }
+            Event::Key(key) if key.code == KeyCode::Esc && !self.attachments.is_empty() => {
+                self.attachments.pop();
                 self.dirty = true;
                 None
             }
@@ -1140,6 +1151,66 @@ mod tests {
             })
         );
         assert!(state.take_dirty());
+    }
+
+    #[test]
+    fn escape_removes_last_attachment_before_clearing_input() {
+        let mut state = UiState::new();
+        state.input.push_str("hi");
+        state.attachments.push(ImageAttachment {
+            name: "image-1".into(),
+            mime_type: "image/png".into(),
+            base64_data: "aGVsbG8=".into(),
+        });
+        state.attachments.push(ImageAttachment {
+            name: "image-2".into(),
+            mime_type: "image/png".into(),
+            base64_data: "d29ybGQ=".into(),
+        });
+
+        assert_eq!(
+            state.handle_editor_event_for_test(key(crossterm::event::KeyCode::Esc)),
+            None
+        );
+        assert_eq!(state.attachments.len(), 1);
+        assert_eq!(state.attachments[0].name, "image-1");
+        assert_eq!(state.input, "hi");
+
+        assert_eq!(
+            state.handle_editor_event_for_test(key(crossterm::event::KeyCode::Esc)),
+            None
+        );
+        assert!(state.attachments.is_empty());
+        assert_eq!(state.input, "hi");
+        assert!(state.take_dirty());
+
+        // No attachments left: Esc is ignored again, as before.
+        assert_eq!(
+            state.handle_editor_event_for_test(key(crossterm::event::KeyCode::Esc)),
+            None
+        );
+        assert_eq!(state.input, "hi");
+    }
+
+    /// Esc still dismisses a text selection even while attachments are
+    /// pending; attachments only start popping on a second Esc.
+    #[test]
+    fn escape_prefers_clearing_a_selection_over_attachments() {
+        let mut state = UiState::new();
+        state.attachments.push(ImageAttachment {
+            name: "image-1".into(),
+            mime_type: "image/png".into(),
+            base64_data: "aGVsbG8=".into(),
+        });
+        state.selection = Some(Selection::new(selection::TextPosition::new(0, 0)));
+        state.selection.as_mut().unwrap().cursor = selection::TextPosition::new(0, 3);
+
+        assert_eq!(
+            state.handle_editor_event_for_test(key(crossterm::event::KeyCode::Esc)),
+            None
+        );
+        assert!(state.selection.is_none());
+        assert_eq!(state.attachments.len(), 1);
     }
 
     /// Drive the editor with a real completion: typing `@` opens the popup
