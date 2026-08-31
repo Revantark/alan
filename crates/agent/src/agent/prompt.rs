@@ -82,7 +82,10 @@ fn attach_working_directory(
         return user_msg;
     }
     if let AgentMessage::User { text, .. } = &mut user_msg {
-        text.push_str(&format!("\n\nCurrent project dir : {}", dir.display()));
+        text.push_str(&format!(
+            "\nCurrent project dir which you are in : {}",
+            dir.display()
+        ));
     }
     user_msg
 }
