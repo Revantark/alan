@@ -2,9 +2,11 @@ use crate::{Message, ToolSpec};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ReasoningEffort {
+    #[default]
+    Auto,
     None,
     Minimal,
     Low,
@@ -15,8 +17,21 @@ pub enum ReasoningEffort {
 }
 
 impl ReasoningEffort {
+    /// Every level, in the order a user interface should offer them.
+    pub const ALL: &'static [Self] = &[
+        Self::Auto,
+        Self::None,
+        Self::Minimal,
+        Self::Low,
+        Self::Medium,
+        Self::High,
+        Self::XHigh,
+        Self::Max,
+    ];
+
     pub const fn as_str(&self) -> &'static str {
         match self {
+            Self::Auto => "auto",
             Self::None => "none",
             Self::Minimal => "minimal",
             Self::Low => "low",
@@ -26,11 +41,35 @@ impl ReasoningEffort {
             Self::Max => "max",
         }
     }
+
+    /// The inverse of [`as_str`](Self::as_str), so the two cannot drift.
+    pub fn parse(raw: &str) -> Option<Self> {
+        Self::ALL
+            .iter()
+            .copied()
+            .find(|effort| effort.as_str() == raw)
+    }
 }
 
 impl fmt::Display for ReasoningEffort {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.as_str())
+    }
+}
+
+#[cfg(test)]
+mod reasoning_effort_tests {
+    use super::ReasoningEffort;
+
+    /// `as_str` and the `rename_all` derive spell each level independently, and
+    /// a settings file written by one is read by the other.
+    #[test]
+    fn every_level_is_spelled_the_same_by_serde() {
+        for effort in ReasoningEffort::ALL {
+            let written = serde_json::to_string(effort).expect("serialize");
+            assert_eq!(written, format!("\"{}\"", effort.as_str()));
+            assert_eq!(ReasoningEffort::parse(effort.as_str()), Some(*effort));
+        }
     }
 }
 
@@ -101,5 +140,5 @@ pub struct LlmRequest<'a> {
     pub tools: &'a [ToolSpec],
     pub options: &'a RequestOptions,
     pub credential: Option<&'a Credential>,
-    pub reasoning_effort: Option<ReasoningEffort>,
+    pub reasoning_effort: ReasoningEffort,
 }

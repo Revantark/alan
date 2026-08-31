@@ -51,6 +51,7 @@ Alan stores credentials at `~/.alan/auth.json` by default. Set `ALAN_HOME` to ch
   matches anywhere; `@src/co` matches by directory).
 - Slash commands:
   - `/login` — sign in to a provider interactively
+  - `/settings` — view and change settings
   - `/plan` — toggle plan mode (also `Shift+Tab`)
   - `/help` — list available commands
 - Key bindings: `Esc` clears input/selection, `Ctrl+C` interrupts the agent,
@@ -67,14 +68,35 @@ All variables are optional:
 | `ALAN_MODEL` | Model id | `openai/gpt-4o-mini` |
 | `ALAN_HOME` | Alan home directory (Alan uses `$ALAN_HOME/.alan/`) | `$HOME` |
 | `ALAN_SESSION` | Resume this session ID from the current working directory | unset |
-| `ALAN_REASONING_EFFORT` | `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max` | unset |
+| `ALAN_REASONING_EFFORT` | `auto` (model decides), `none` (off), `minimal`, `low`, `medium`, `high`, `xhigh`, `max` | `auto` |
 | `ALAN_OPENROUTER_WEB_SEARCH` | Enable web search tool (`1`, `true`, `yes`, `on`) | off |
 | `ALAN_OPENROUTER_WEB_FETCH` | Enable web fetch tool (`1`, `true`, `yes`, `on`) | off |
 | `ALAN_LOG` | Log filter (falls back to `RUST_LOG`) | unset |
 | `ALAN_LOG_DIR` | Where daily log files go | `$ALAN_HOME/.alan/logs` |
 
-Files live under `$ALAN_HOME/.alan/`: `auth.json` (credentials),
-`sessions/` (conversation history), and `logs/`.
+Files live under `$ALAN_HOME/.alan/`: `settings.json` (see below), `auth.json`
+(credentials), `sessions/` (conversation history), and `logs/`.
+
+## Settings
+
+Run `/settings` to view and change settings. `↑↓` moves, `Enter` cycles a value
+or opens a prompt, `Backspace` clears a row, `Tab` switches between project and
+global scope. Each row shows which layer its value came from.
+
+Settings live in `$ALAN_HOME/.alan/settings.json` and
+`<project>/.alan/settings.json`. Neither is created until you change something,
+and each lists only the keys you set:
+
+```json
+{
+  "model": "anthropic/claude-opus-4",
+  "reasoning_effort": "high",
+  "max_tool_rounds": 30,
+  "tools": { "web_search": true }
+}
+```
+
+Project settings override global ones, and environment variables override both.
 
 ## Development
 

@@ -9,6 +9,7 @@ use strum::{EnumIter, EnumString, IntoEnumIterator, IntoStaticStr};
 #[strum(serialize_all = "kebab-case")]
 pub enum SlashCommand {
     Login,
+    Settings,
     Plan,
     Review,
     Normal,
@@ -38,6 +39,7 @@ impl SlashCommand {
     pub fn description(self) -> &'static str {
         match self {
             Self::Login => "sign in to a provider",
+            Self::Settings => "view and change settings",
             Self::Plan => "turn on plan mode (also Shift+Tab)",
             Self::Review => "turn on review mode (also Shift+Tab)",
             Self::Normal => "turn off plan and review mode",

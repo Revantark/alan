@@ -64,6 +64,26 @@ async fn persist_message(agent: &Agent, message: &AgentMessage) -> Result<(), Ag
     Ok(())
 }
 
+/// Applies the change in memory too, so both describe the same thing.
+pub(super) async fn persist_model(
+    agent: &Agent,
+    provider: String,
+    model: String,
+    reasoning_effort: llm::ReasoningEffort,
+) -> Result<(), AgentError> {
+    let mut active_session = agent.active_session.lock().await;
+    let (Some(manager), Some(session)) = (&agent.session_manager, &mut *active_session) else {
+        return Ok(());
+    };
+
+    let record = manager
+        .append_model(&session.id, &session.pwd, provider, model, reasoning_effort)
+        .await?;
+    session.record(record);
+
+    Ok(())
+}
+
 pub(super) async fn persist_usage(agent: &Agent, usage: &Usage) -> Result<(), AgentError> {
     let active_session = agent.active_session.lock().await;
     if let (Some(manager), Some(session)) = (&agent.session_manager, &*active_session) {

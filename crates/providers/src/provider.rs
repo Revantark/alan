@@ -33,7 +33,7 @@ pub trait Provider: Send + Sync {
     fn auth(&self) -> &dyn ProviderAuth;
 }
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct ProviderRegistry {
     providers: Vec<Arc<dyn Provider>>,
 }
@@ -52,18 +52,14 @@ impl ProviderRegistry {
     }
 }
 
+/// Wires a model to the API that serves it. Finding the [`ModelInfo`] is the
+/// provider's job, since only it knows what to do with an id it has never seen.
 pub(crate) fn bind_model(
-    models: &[ModelInfo],
+    info: ModelInfo,
     apis: &HashMap<ApiId, Arc<dyn LlmApi>>,
     auth: Arc<dyn AuthResolver>,
-    model_id: &str,
     options: ModelOptions,
 ) -> Result<Model, ProviderError> {
-    let info = models
-        .iter()
-        .find(|model| model.id == model_id)
-        .cloned()
-        .ok_or_else(|| ProviderError::ModelNotFound(model_id.into()))?;
     let api = apis
         .get(&info.api)
         .cloned()

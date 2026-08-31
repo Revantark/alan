@@ -21,7 +21,7 @@ pub struct Session {
     pub pwd: PathBuf,
     pub provider: String,
     pub model: String,
-    pub thinking_level: Option<ReasoningEffort>,
+    pub reasoning_effort: ReasoningEffort,
     pub messages: Vec<AgentMessage>,
     pub usage: Usage,
     pub created_at_ms: u64,
@@ -33,7 +33,7 @@ impl Session {
         pwd: impl Into<PathBuf>,
         provider: impl Into<String>,
         model: impl Into<String>,
-        thinking_level: Option<ReasoningEffort>,
+        reasoning_effort: ReasoningEffort,
     ) -> Self {
         let now = now_ms();
         Self {
@@ -42,7 +42,7 @@ impl Session {
             pwd: pwd.into(),
             provider: provider.into(),
             model: model.into(),
-            thinking_level,
+            reasoning_effort,
             messages: Vec::new(),
             usage: Usage::default(),
             created_at_ms: now,
@@ -58,7 +58,7 @@ impl Session {
             pwd: self.pwd.clone(),
             provider: self.provider.clone(),
             model: self.model.clone(),
-            thinking_level: self.thinking_level,
+            reasoning_effort: self.reasoning_effort,
             created_at_ms: self.created_at_ms,
             updated_at_ms: self.updated_at_ms,
         }
@@ -71,6 +71,16 @@ impl Session {
             SessionRecord::Session { .. } => {}
             SessionRecord::Message { message, .. } => self.messages.push(message),
             SessionRecord::Usage { usage, .. } => self.usage = usage,
+            SessionRecord::Model {
+                provider,
+                model,
+                reasoning_effort,
+                ..
+            } => {
+                self.provider = provider;
+                self.model = model;
+                self.reasoning_effort = reasoning_effort;
+            }
         }
         self.updated_at_ms = self.updated_at_ms.max(timestamp_ms);
     }
@@ -92,7 +102,7 @@ pub enum SessionRecord {
         pwd: PathBuf,
         provider: String,
         model: String,
-        thinking_level: Option<ReasoningEffort>,
+        reasoning_effort: ReasoningEffort,
         created_at_ms: u64,
         updated_at_ms: u64,
     },
@@ -104,6 +114,12 @@ pub enum SessionRecord {
         usage: Usage,
         timestamp_ms: u64,
     },
+    Model {
+        provider: String,
+        model: String,
+        reasoning_effort: ReasoningEffort,
+        timestamp_ms: u64,
+    },
 }
 
 impl SessionRecord {
@@ -111,7 +127,9 @@ impl SessionRecord {
     pub(super) fn timestamp_ms(&self) -> u64 {
         match self {
             Self::Session { updated_at_ms, .. } => *updated_at_ms,
-            Self::Message { timestamp_ms, .. } | Self::Usage { timestamp_ms, .. } => *timestamp_ms,
+            Self::Message { timestamp_ms, .. }
+            | Self::Usage { timestamp_ms, .. }
+            | Self::Model { timestamp_ms, .. } => *timestamp_ms,
         }
     }
 
@@ -180,9 +198,46 @@ mod tests {
         );
     }
 
+    /// The header pins the model a session *started* with. Replaying a `Model`
+    /// record moves that forward, which is what lets the bound model change
+    /// mid-session without the resume check rejecting the file.
+    #[test]
+    fn replaying_a_model_record_moves_the_session_to_the_new_model() {
+        let mut session = Session::new(
+            "/tmp/project",
+            "openrouter",
+            "old-model",
+            ReasoningEffort::Auto,
+        );
+        // `record` advances `updated_at_ms` monotonically, so start it behind
+        // the record's timestamp rather than at wall-clock now.
+        session.updated_at_ms = 1_000;
+
+        session.record(SessionRecord::Model {
+            provider: "openrouter".into(),
+            model: "new-model".into(),
+            reasoning_effort: ReasoningEffort::High,
+            timestamp_ms: 5_000,
+        });
+
+        assert_eq!(session.model, "new-model");
+        assert_eq!(session.reasoning_effort, ReasoningEffort::High);
+        assert_eq!(session.updated_at_ms, 5_000);
+        // The header a fresh writer would emit now describes the current model.
+        assert!(matches!(
+            session.header_record(),
+            SessionRecord::Session { model, .. } if model == "new-model"
+        ));
+    }
+
     #[test]
     fn header_record_preserves_session_metadata() {
-        let mut session = Session::new("/tmp/project", "openrouter", "test-model", None);
+        let mut session = Session::new(
+            "/tmp/project",
+            "openrouter",
+            "test-model",
+            ReasoningEffort::Auto,
+        );
         session.created_at_ms = 1_000;
         session.updated_at_ms = 2_000;
 
@@ -193,7 +248,7 @@ mod tests {
                 pwd,
                 provider,
                 model,
-                thinking_level,
+                reasoning_effort,
                 created_at_ms,
                 updated_at_ms,
             } => {
@@ -202,7 +257,7 @@ mod tests {
                 assert_eq!(pwd, PathBuf::from("/tmp/project"));
                 assert_eq!(provider, "openrouter");
                 assert_eq!(model, "test-model");
-                assert_eq!(thinking_level, None);
+                assert_eq!(reasoning_effort, ReasoningEffort::Auto);
                 assert_eq!(created_at_ms, 1_000);
                 assert_eq!(updated_at_ms, 2_000);
             }
@@ -212,7 +267,12 @@ mod tests {
 
     #[test]
     fn apply_record_appends_messages_and_replaces_usage_snapshot() {
-        let mut session = Session::new("/tmp/project", "openrouter", "test-model", None);
+        let mut session = Session::new(
+            "/tmp/project",
+            "openrouter",
+            "test-model",
+            ReasoningEffort::Auto,
+        );
 
         session.record(SessionRecord::Message {
             message: AgentMessage::user("first"),

@@ -6,7 +6,7 @@ use crate::{
     ProviderError, ProviderId, ServerToolInfo,
 };
 use async_trait::async_trait;
-use llm::{ChatCompletionsApi, HttpClient, LlmApi};
+use llm::{ChatCompletionsApi, HttpClient, LlmApi, ReasoningEffort};
 use reqwest::StatusCode;
 use std::{collections::HashMap, sync::Arc};
 
@@ -92,13 +92,7 @@ impl Provider for OpenRouterProvider {
         &self.server_tools
     }
     fn bind(&self, model_id: &str) -> Result<Model, ProviderError> {
-        bind_model(
-            &self.models,
-            &self.apis,
-            self.auth.clone(),
-            model_id,
-            ModelOptions::default(),
-        )
+        self.bind_with_options(model_id, ModelOptions::default())
     }
 
     fn bind_with_options(
@@ -106,13 +100,14 @@ impl Provider for OpenRouterProvider {
         model_id: &str,
         options: ModelOptions,
     ) -> Result<Model, ProviderError> {
-        bind_model(
-            &self.models,
-            &self.apis,
-            self.auth.clone(),
-            model_id,
-            options,
-        )
+        let info = self
+            .models
+            .iter()
+            .find(|model| model.id == model_id)
+            .cloned()
+            .unwrap_or_else(|| default_model(model_id));
+
+        bind_model(info, &self.apis, self.auth.clone(), options)
     }
     fn auth(&self) -> &dyn ProviderAuth {
         &self.login
@@ -196,13 +191,61 @@ fn default_model(id: &str) -> ModelInfo {
         id: id.into(),
         name: id.into(),
         api: ApiId::ChatCompletions,
-        //TODO: Do we need this ?
+        // `reasoning` is the only field read: it is what `Auto` defers to.
         capabilities: ModelCapabilities {
             streaming: true,
             tools: true,
             vision: false,
-            reasoning: None,
+            reasoning: ReasoningEffort::Auto,
         },
         pricing: Some(ModelPricing::default()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Switching models mid-session binds an id the catalog has never seen.
+    /// Rejecting it here would mean only the startup model ever worked.
+    #[test]
+    fn binds_a_model_the_catalog_does_not_know() {
+        let provider = OpenRouterProvider::builder("key")
+            .with_model("openai/gpt-4o-mini")
+            .build()
+            .expect("build");
+
+        let bound = provider.bind("anthropic/claude-opus-4").expect("binds");
+        assert_eq!(bound.info().id, "anthropic/claude-opus-4");
+    }
+
+    /// Guards the order of the lookup: synthesising first would silently
+    /// replace every configured model's capabilities with the defaults.
+    #[test]
+    fn a_known_model_keeps_its_catalog_entry() {
+        let info = ModelInfo {
+            provider: ProviderId::new("openrouter"),
+            id: "known".into(),
+            name: "Known".into(),
+            api: ApiId::ChatCompletions,
+            capabilities: ModelCapabilities {
+                streaming: true,
+                tools: true,
+                vision: true,
+                reasoning: ReasoningEffort::High,
+            },
+            pricing: None,
+        };
+        let provider = OpenRouterProvider::builder("key")
+            .with_models([info])
+            .build()
+            .expect("build");
+
+        let bound = provider.bind("known").expect("binds");
+        assert!(
+            bound.info().capabilities.vision,
+            "not the synthesised entry"
+        );
+        assert_eq!(bound.reasoning_effort(), ReasoningEffort::High);
     }
 }
