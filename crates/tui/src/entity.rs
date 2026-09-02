@@ -231,7 +231,11 @@ impl<A: 'static, M: 'static> EntityStore<A, M> {
         self.slots.contains_key(&id)
     }
 
-    fn lock(&self, id: EntityId) -> Option<MutexGuard<'_, SlotValue<A, M>>> {
+    pub(crate) fn is_active_entity(&self, id: EntityId) -> bool {
+        self.slots.contains_key(&id)
+    }
+
+    pub(crate) fn lock(&self, id: EntityId) -> Option<MutexGuard<'_, SlotValue<A, M>>> {
         self.slots.get(&id).and_then(|slot| slot.lock().ok())
     }
 

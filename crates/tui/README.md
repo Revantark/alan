@@ -58,3 +58,49 @@ redraw.
 - Rendering is pure and immediate-mode: read state, recalculate layout, no I/O.
 - Task results are routed by entity id captured at spawn; a removed component
   is never kept alive, and delivery to it is a safe no-op.
+
+## Stream subscriptions
+
+`Context::subscribe` attaches a repeated asynchronous stream to the component
+that calls it. Stream items and normal completion are delivered on the runtime
+side, not from the worker task, so the callback can safely mutate the target
+component and use normal `Context` capabilities such as `notify`, `send`, and
+`emit`.
+
+Keep the returned [`Subscription`](crate::Subscription) handle alive while the
+subscription should run. Dropping or cancelling it stops future delivery;
+removing the target entity cancels its subscriptions as well. Deliveries that
+arrive after cancellation or entity removal are safe no-ops.
+
+Subscriptions are distinct from `notify` (redraw invalidation), `send` (a
+deferred targeted message), and `emit` (a deferred root message). Stream
+errors are application data and should be represented by the stream item type,
+for example `Stream<Item = Result<Value, Error>>`.
+
+Async workers retain only an id and cancellation state; they do not retain a
+component or a strong entity handle.
+
+```rust,ignore
+use futures_util::stream;
+
+struct Loader {
+    values: Vec<String>,
+    subscription: Option<tui::Subscription>,
+}
+
+impl Component<Action, Message> for Loader {
+    fn init(&mut self, cx: &mut Context<'_, Self, Action, Message>) {
+        self.subscription = Some(cx.subscribe(
+            stream::iter(["one".to_owned(), "two".to_owned()]),
+            |event, loader, cx| {
+                if let tui::SubscriptionEvent::Item(value) = event {
+                    loader.values.push(value);
+                    cx.notify();
+                }
+            },
+        ));
+    }
+
+    // render omitted
+}
+```

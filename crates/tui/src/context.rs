@@ -16,6 +16,9 @@ use crate::component::{ActionStatus, Component};
 use crate::entity::{ComponentSlot, Entity, EntityId, EntityStore};
 use crate::focus::{FocusHandle, FocusId, FocusManager, FocusScope};
 use crate::overlay::OverlayStack;
+use crate::subscription::{
+    RuntimeDelivery, Subscription, SubscriptionEvent, SubscriptionId, SubscriptionRecord, handler,
+};
 use crate::task::{TaskDelivery, TaskError, TaskExecutor};
 
 /// Destination for a deferred component message.
@@ -34,8 +37,10 @@ pub(crate) struct QueuedMessage<M> {
 
 /// Framework state shared between the event loop and component contexts.
 pub(crate) struct RuntimeState<A, M> {
-    pub(crate) sender: UnboundedSender<TaskDelivery<M>>,
+    pub(crate) sender: UnboundedSender<RuntimeDelivery<M>>,
     pub(crate) executor: Arc<dyn TaskExecutor<M>>,
+    pub(crate) subscriptions: HashMap<SubscriptionId, SubscriptionRecord<A, M>>,
+    pub(crate) deliveries: VecDeque<RuntimeDelivery<M>>,
     pub(crate) focus: FocusManager,
     pub(crate) focus_map: HashMap<FocusId, EntityId>,
     pub(crate) parent_map: HashMap<EntityId, EntityId>,
@@ -51,14 +56,16 @@ pub(crate) struct RuntimeState<A, M> {
     pub(crate) quit: bool,
 }
 
-impl<A, M> RuntimeState<A, M> {
+impl<A: 'static, M: 'static> RuntimeState<A, M> {
     pub(crate) fn new(
-        sender: UnboundedSender<TaskDelivery<M>>,
+        sender: UnboundedSender<RuntimeDelivery<M>>,
         executor: Arc<dyn TaskExecutor<M>>,
     ) -> Self {
         Self {
             sender,
             executor,
+            subscriptions: HashMap::new(),
+            deliveries: VecDeque::new(),
             focus: FocusManager::default(),
             focus_map: HashMap::new(),
             parent_map: HashMap::new(),
@@ -76,6 +83,30 @@ impl<A, M> RuntimeState<A, M> {
     /// Drain one batch of queued component messages.
     pub(crate) fn take_messages(&mut self) -> VecDeque<QueuedMessage<M>> {
         std::mem::take(&mut self.messages)
+    }
+
+    pub(crate) fn take_delivery(&mut self) -> Option<RuntimeDelivery<M>> {
+        self.deliveries.pop_front()
+    }
+
+    pub(crate) fn cleanup_subscriptions(&mut self, store: &EntityStore<A, M>) {
+        let stale: Vec<_> = self
+            .subscriptions
+            .iter()
+            .filter_map(|(id, record)| {
+                (!record.active.load(std::sync::atomic::Ordering::Acquire)
+                    || !store.is_active_entity(record.target))
+                .then_some(*id)
+            })
+            .collect();
+        for id in stale {
+            if let Some(record) = self.subscriptions.remove(&id) {
+                record
+                    .active
+                    .store(false, std::sync::atomic::Ordering::Release);
+                let _ = record.cancellation.send(true);
+            }
+        }
     }
 
     /// Take and reset the dirty flag.
@@ -149,7 +180,19 @@ pub struct Context<'a, T, A, M = ()> {
     _marker: PhantomData<fn() -> T>,
 }
 
-impl<T, A: 'static, M: 'static> Context<'_, T, A, M> {
+impl<'a, T, A: 'static, M: 'static> Context<'a, T, A, M> {
+    pub(crate) fn new(
+        runtime_state: &'a mut RuntimeState<A, M>,
+        store: &'a EntityStore<A, M>,
+        entity: EntityId,
+    ) -> Self {
+        Self {
+            runtime_state,
+            store,
+            entity: Entity::from_id(entity),
+            _marker: PhantomData,
+        }
+    }
     /// Typed handle to the component currently executing a callback.
     ///
     /// Lets a component learn its own identity (e.g. during `init`) so it
@@ -326,6 +369,42 @@ impl<T, A: 'static, M: 'static> Context<'_, T, A, M> {
         self.store
             .dispatch_action(target.id(), action, &mut cx)
             .unwrap_or(ActionStatus::Continue)
+    }
+
+    /// Subscribe to a stream. Items and normal closure are delivered later on
+    /// the runtime side, never from the stream worker.
+    pub fn subscribe<S, Item, F>(&mut self, stream: S, callback: F) -> Subscription
+    where
+        T: Component<A, M>,
+        S: futures_util::Stream<Item = Item> + Send + 'static,
+        Item: Send + 'static,
+        M: Send + 'static,
+        F: for<'b> FnMut(SubscriptionEvent<Item>, &'b mut T, &'b mut Context<'b, T, A, M>)
+            + 'static,
+    {
+        let id = SubscriptionId::allocate();
+        let active = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let (cancellation, receiver) = tokio::sync::watch::channel(false);
+        self.runtime_state.subscriptions.insert(
+            id,
+            SubscriptionRecord {
+                target: self.entity.id(),
+                active: Arc::clone(&active),
+                cancellation: cancellation.clone(),
+                handler: handler(callback),
+            },
+        );
+        let worker = crate::subscription::worker(
+            stream,
+            id,
+            active.clone(),
+            receiver,
+            self.runtime_state.sender.clone(),
+        );
+        self.runtime_state
+            .executor
+            .spawn_subscription(Box::pin(worker));
+        Subscription::new(active, cancellation)
     }
 
     /// Spawn a background task whose output is delivered as a message to

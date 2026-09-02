@@ -11,7 +11,8 @@ use crate::entity::{EntityId, EntityStore};
 use crate::error::RuntimeError;
 use crate::event_loop::event_loop;
 use crate::keymap::{KeyMapper, NoopMapper};
-use crate::task::{TaskDelivery, TaskExecutor, TokioExecutor};
+use crate::subscription::RuntimeDelivery;
+use crate::task::{TaskExecutor, TokioExecutor};
 use crate::terminal::{TerminalGuard, install_panic_hook};
 
 /// Default tick interval driving periodic redraws.
@@ -132,7 +133,7 @@ where
             write.insert(self.root).id()
         };
 
-        let (sender, receiver) = mpsc::unbounded_channel::<TaskDelivery<M>>();
+        let (sender, receiver) = mpsc::unbounded_channel::<RuntimeDelivery<M>>();
         let mut state = RuntimeState::new(sender, self.executor.clone());
         // Run the root's init (insert children, focus, etc.) before the
         // first frame renders.

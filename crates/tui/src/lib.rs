@@ -36,6 +36,7 @@ pub mod focus;
 pub mod keymap;
 pub mod overlay;
 pub mod render;
+pub mod subscription;
 pub mod task;
 pub mod terminal;
 
@@ -44,4 +45,5 @@ pub use component::{ActionStatus, Component, RenderContext};
 pub use error::RuntimeError;
 pub use focus::{FocusHandle, FocusScope};
 pub use keymap::{InputContext, KeyMapper, NoopMapper, PassthroughMapper};
+pub use subscription::{Subscription, SubscriptionEvent};
 pub use task::{TaskExecutor, TokioExecutor};

@@ -18,6 +18,7 @@ use std::pin::Pin;
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::entity::EntityId;
+use crate::subscription::RuntimeDelivery;
 
 /// An error produced by a background task.
 pub struct TaskError(pub Box<dyn Error + Send + Sync>);
@@ -46,13 +47,16 @@ pub struct TaskDelivery<M> {
 
 /// A boxed task future producing a delivery routed to its target entity.
 pub type DeliveryFuture<M> = Pin<Box<dyn Future<Output = TaskDelivery<M>> + Send>>;
+pub type SubscriptionFuture = Pin<Box<dyn Future<Output = ()> + Send>>;
 
 /// Runs background tasks, delivering results through `sender`.
 ///
 /// The default implementation runs tasks on the surrounding tokio runtime.
 pub trait TaskExecutor<M>: Send + Sync + 'static {
     /// Spawn a task; its delivery is sent to the runtime when complete.
-    fn spawn(&self, future: DeliveryFuture<M>, sender: UnboundedSender<TaskDelivery<M>>);
+    fn spawn(&self, future: DeliveryFuture<M>, sender: UnboundedSender<RuntimeDelivery<M>>);
+
+    fn spawn_subscription(&self, future: SubscriptionFuture);
 }
 
 /// [`TaskExecutor`] backed by the tokio runtime.
@@ -60,11 +64,15 @@ pub trait TaskExecutor<M>: Send + Sync + 'static {
 pub struct TokioExecutor;
 
 impl<M: Send + 'static> TaskExecutor<M> for TokioExecutor {
-    fn spawn(&self, future: DeliveryFuture<M>, sender: UnboundedSender<TaskDelivery<M>>) {
+    fn spawn(&self, future: DeliveryFuture<M>, sender: UnboundedSender<RuntimeDelivery<M>>) {
         tokio::spawn(async move {
             let delivery = future.await;
-            let _ = sender.send(delivery);
+            let _ = sender.send(RuntimeDelivery::Task(delivery));
         });
+    }
+
+    fn spawn_subscription(&self, future: SubscriptionFuture) {
+        tokio::spawn(future);
     }
 }
 
@@ -86,7 +94,10 @@ mod tests {
             }),
             sender,
         );
-        let delivery: TaskDelivery<String> = receiver.recv().await.unwrap();
+        let delivery: TaskDelivery<String> = match receiver.recv().await.unwrap() {
+            RuntimeDelivery::Task(delivery) => delivery,
+            RuntimeDelivery::Subscription(_) => panic!("unexpected subscription delivery"),
+        };
         assert_eq!(delivery.result.unwrap(), "done");
         assert_eq!(delivery.target, target);
     }
@@ -105,7 +116,10 @@ mod tests {
             }),
             sender,
         );
-        let delivery: TaskDelivery<String> = receiver.recv().await.unwrap();
+        let delivery: TaskDelivery<String> = match receiver.recv().await.unwrap() {
+            RuntimeDelivery::Task(delivery) => delivery,
+            RuntimeDelivery::Subscription(_) => panic!("unexpected subscription delivery"),
+        };
         assert!(delivery.result.is_err());
     }
 }
