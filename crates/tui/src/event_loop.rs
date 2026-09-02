@@ -2,6 +2,7 @@
 //!
 //! Owns the runtime loop mechanics:
 
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -15,6 +16,8 @@ use crate::entity::{EntityId, EntityStore};
 use crate::error::RuntimeError;
 use crate::keymap::{InputContext, KeyMapper};
 use crate::render;
+use crate::subscription::RuntimeDelivery;
+use crate::subscription::{SubscriptionDelivery, SubscriptionDeliveryEvent};
 use crate::task::{TaskDelivery, TaskError};
 use crate::terminal::TerminalGuard;
 
@@ -120,6 +123,7 @@ fn remove_entity_tree<A: 'static, M: 'static>(
         core.parent_map.remove(&id);
         store.remove_entity(id);
     }
+    core.cleanup_subscriptions(store);
 }
 
 /// Deliver one batch of queued messages to their destinations. Messages
@@ -156,6 +160,34 @@ fn deliver_task<A: 'static, M: 'static>(
     }
 }
 
+fn deliver_subscription<A: 'static, M: 'static>(
+    delivery: SubscriptionDelivery,
+    core: &mut RuntimeState<A, M>,
+    store: &EntityStore<A, M>,
+) {
+    let Some(mut record) = core.subscriptions.remove(&delivery.id) else {
+        return;
+    };
+    if !record.active.load(Ordering::Acquire) || !store.is_active_entity(record.target) {
+        record.active.store(false, Ordering::Release);
+        let _ = record.cancellation.send(true);
+        return;
+    }
+    let closed = matches!(delivery.event, SubscriptionDeliveryEvent::Closed);
+    match delivery.event {
+        SubscriptionDeliveryEvent::Item(item) => {
+            record.handler.invoke(item, record.target, core, store)
+        }
+        SubscriptionDeliveryEvent::Closed => record.handler.close(record.target, core, store),
+    }
+    if !closed && record.active.load(Ordering::Acquire) && store.is_active_entity(record.target) {
+        core.subscriptions.insert(delivery.id, record);
+    } else {
+        record.active.store(false, Ordering::Release);
+        let _ = record.cancellation.send(true);
+    }
+}
+
 /// Run the loop until the application quits.
 pub(crate) async fn event_loop<A, M>(
     mut guard: TerminalGuard,
@@ -163,7 +195,7 @@ pub(crate) async fn event_loop<A, M>(
     entity_store: Arc<Mutex<EntityStore<A, M>>>,
     mut runtime_state: RuntimeState<A, M>,
     key_mapper: Arc<dyn KeyMapper<A>>,
-    mut task_rx: mpsc::UnboundedReceiver<TaskDelivery<M>>,
+    mut task_rx: mpsc::UnboundedReceiver<RuntimeDelivery<M>>,
     tick_rate: Duration,
 ) -> Result<(), RuntimeError>
 where
@@ -210,8 +242,22 @@ where
                 let Some(delivery) = delivery else {
                     break;
                 };
-                let store = entity_store.lock().expect("entity store poisoned");
-                deliver_task(delivery, &mut runtime_state, &store)?;
+                runtime_state.deliveries.push_back(delivery);
+            }
+        }
+
+        {
+            let store = entity_store.lock().expect("entity store poisoned");
+            runtime_state.cleanup_subscriptions(&store);
+            while let Some(delivery) = runtime_state.take_delivery() {
+                match delivery {
+                    RuntimeDelivery::Task(delivery) => {
+                        deliver_task(delivery, &mut runtime_state, &store)?
+                    }
+                    RuntimeDelivery::Subscription(delivery) => {
+                        deliver_subscription(delivery, &mut runtime_state, &store)
+                    }
+                }
             }
         }
 
