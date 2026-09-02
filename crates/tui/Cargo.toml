@@ -10,3 +10,6 @@ futures-util = { workspace = true }
 reqwest = { workspace = true }
 serde = { workspace = true }
 tokio = { workspace = true }
+
+[dev-dependencies]
+tui-textarea-2 = "0.13"
