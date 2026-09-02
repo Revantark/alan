@@ -14,6 +14,8 @@
 use std::error::Error;
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use tokio::sync::mpsc::UnboundedSender;
 
@@ -45,6 +47,48 @@ pub struct TaskDelivery<M> {
     pub result: Result<M, TaskError>,
 }
 
+/// A handle for cancelling a background task.
+///
+/// Dropping the handle does not cancel the task; call [`TaskHandle::cancel`]
+/// when the task should stop. Cancellation is best effort: the default Tokio
+/// executor aborts the task, so its result is not delivered to the runtime.
+#[derive(Clone)]
+pub struct TaskHandle {
+    active: Arc<AtomicBool>,
+    cancel: Arc<dyn Fn() + Send + Sync>,
+}
+
+impl TaskHandle {
+    /// Create a task handle backed by a cancellation callback.
+    pub fn new(cancel: impl Fn() + Send + Sync + 'static) -> Self {
+        Self {
+            active: Arc::new(AtomicBool::new(true)),
+            cancel: Arc::new(cancel),
+        }
+    }
+
+    /// Request cancellation. This operation is idempotent.
+    pub fn cancel(&self) {
+        if self.active.swap(false, Ordering::Release) {
+            (self.cancel)();
+        }
+    }
+
+    /// Returns whether cancellation has not been requested.
+    pub fn is_active(&self) -> bool {
+        self.active.load(Ordering::Acquire)
+    }
+}
+
+impl std::fmt::Debug for TaskHandle {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("TaskHandle")
+            .field("active", &self.is_active())
+            .finish_non_exhaustive()
+    }
+}
+
 /// A boxed task future producing a delivery routed to its target entity.
 pub type DeliveryFuture<M> = Pin<Box<dyn Future<Output = TaskDelivery<M>> + Send>>;
 pub type SubscriptionFuture = Pin<Box<dyn Future<Output = ()> + Send>>;
@@ -54,7 +98,11 @@ pub type SubscriptionFuture = Pin<Box<dyn Future<Output = ()> + Send>>;
 /// The default implementation runs tasks on the surrounding tokio runtime.
 pub trait TaskExecutor<M>: Send + Sync + 'static {
     /// Spawn a task; its delivery is sent to the runtime when complete.
-    fn spawn(&self, future: DeliveryFuture<M>, sender: UnboundedSender<RuntimeDelivery<M>>);
+    fn spawn(
+        &self,
+        future: DeliveryFuture<M>,
+        sender: UnboundedSender<RuntimeDelivery<M>>,
+    ) -> TaskHandle;
 
     fn spawn_subscription(&self, future: SubscriptionFuture);
 }
@@ -64,11 +112,23 @@ pub trait TaskExecutor<M>: Send + Sync + 'static {
 pub struct TokioExecutor;
 
 impl<M: Send + 'static> TaskExecutor<M> for TokioExecutor {
-    fn spawn(&self, future: DeliveryFuture<M>, sender: UnboundedSender<RuntimeDelivery<M>>) {
-        tokio::spawn(async move {
+    fn spawn(
+        &self,
+        future: DeliveryFuture<M>,
+        sender: UnboundedSender<RuntimeDelivery<M>>,
+    ) -> TaskHandle {
+        let active = Arc::new(AtomicBool::new(true));
+        let task_active = Arc::clone(&active);
+        let task = tokio::spawn(async move {
             let delivery = future.await;
+            task_active.store(false, Ordering::Release);
             let _ = sender.send(RuntimeDelivery::Task(delivery));
         });
+        let abort = task.abort_handle();
+        TaskHandle {
+            active,
+            cancel: Arc::new(move || abort.abort()),
+        }
     }
 
     fn spawn_subscription(&self, future: SubscriptionFuture) {
@@ -100,6 +160,30 @@ mod tests {
         };
         assert_eq!(delivery.result.unwrap(), "done");
         assert_eq!(delivery.target, target);
+    }
+
+    #[tokio::test]
+    async fn task_handle_cancels_task_and_is_idempotent() {
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let executor = TokioExecutor;
+        let target = crate::entity::EntityId::allocate();
+        let handle = executor.spawn(
+            Box::pin(async move {
+                tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                TaskDelivery {
+                    target,
+                    result: Ok("late".to_owned()),
+                }
+            }),
+            sender,
+        );
+
+        assert!(handle.is_active());
+        handle.cancel();
+        handle.cancel();
+        assert!(!handle.is_active());
+        tokio::task::yield_now().await;
+        assert!(receiver.try_recv().is_err());
     }
 
     #[tokio::test]

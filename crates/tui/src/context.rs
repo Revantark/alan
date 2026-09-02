@@ -19,7 +19,7 @@ use crate::overlay::OverlayStack;
 use crate::subscription::{
     RuntimeDelivery, Subscription, SubscriptionEvent, SubscriptionId, SubscriptionRecord, handler,
 };
-use crate::task::{TaskDelivery, TaskError, TaskExecutor};
+use crate::task::{TaskDelivery, TaskError, TaskExecutor, TaskHandle};
 
 /// Destination for a deferred component message.
 #[derive(Debug)]
@@ -408,13 +408,8 @@ impl<'a, T, A: 'static, M: 'static> Context<'a, T, A, M> {
     }
 
     /// Spawn a background task whose output is delivered as a message to
-    /// this entity.
-    ///
-    /// The task runs on the configured executor and must not block the UI
-    /// loop. The entity id is captured now, so a removed component is never
-    /// kept alive: delivery to a removed entity is a safe no-op. Errors
-    /// surface as `RuntimeError::Task` from the run loop.
-    pub fn spawn<F>(&mut self, future: F)
+    /// this entity. The returned handle can be used to cancel the task.
+    pub fn spawn<F>(&mut self, future: F) -> TaskHandle
     where
         F: Future<Output = Result<M, TaskError>> + Send + 'static,
     {
@@ -425,6 +420,6 @@ impl<'a, T, A: 'static, M: 'static> Context<'a, T, A, M> {
         };
         self.runtime_state
             .executor
-            .spawn(Box::pin(delivery), self.runtime_state.sender.clone());
+            .spawn(Box::pin(delivery), self.runtime_state.sender.clone())
     }
 }
