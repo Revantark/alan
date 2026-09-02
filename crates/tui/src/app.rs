@@ -13,7 +13,7 @@ use crate::event_loop::event_loop;
 use crate::keymap::{KeyMapper, NoopMapper};
 use crate::subscription::RuntimeDelivery;
 use crate::task::{TaskExecutor, TokioExecutor};
-use crate::terminal::{TerminalGuard, install_panic_hook};
+use crate::terminal::{TerminalGuard, TerminalOptions, install_panic_hook};
 
 /// Default tick interval driving periodic redraws.
 const DEFAULT_TICK_RATE: Duration = Duration::from_millis(16);
@@ -27,6 +27,7 @@ pub struct RuntimeBuilder<C, A, M = ()> {
     key_mapper: Arc<dyn KeyMapper<A>>,
     executor: Arc<dyn TaskExecutor<M>>,
     tick_rate: Duration,
+    terminal_options: TerminalOptions,
 }
 
 impl<C, A, M> RuntimeBuilder<C, A, M>
@@ -42,6 +43,7 @@ where
             key_mapper: Arc::new(NoopMapper),
             executor: Arc::new(TokioExecutor),
             tick_rate: DEFAULT_TICK_RATE,
+            terminal_options: TerminalOptions::default(),
         }
     }
 
@@ -66,7 +68,12 @@ where
         self
     }
 
-    /// Build the runtime.
+    /// Set the terminal features configured for the runtime.
+    pub fn terminal_options(mut self, terminal_options: TerminalOptions) -> Self {
+        self.terminal_options = terminal_options;
+        self
+    }
+
     pub fn build(self) -> Runtime<C, A, M> {
         if self.tick_rate.is_zero() {
             panic!("tick rate must be greater than zero");
@@ -76,6 +83,7 @@ where
             key_mapper: self.key_mapper,
             executor: self.executor,
             tick_rate: self.tick_rate,
+            terminal_options: self.terminal_options,
         }
     }
 }
@@ -106,6 +114,7 @@ pub struct Runtime<C, A, M = ()> {
     key_mapper: Arc<dyn KeyMapper<A>>,
     executor: Arc<dyn TaskExecutor<M>>,
     tick_rate: Duration,
+    terminal_options: TerminalOptions,
 }
 
 impl<C, A, M> Runtime<C, A, M>
@@ -124,7 +133,7 @@ where
     /// Sets up the terminal, runs the loop, and always restores terminal
     /// state, including on errors and panics.
     pub async fn run(self) -> Result<(), RuntimeError> {
-        let guard = TerminalGuard::new()?;
+        let guard = TerminalGuard::with_options(self.terminal_options)?;
         let _panic_hook = install_panic_hook();
 
         let entity_store = Arc::new(Mutex::new(EntityStore::new()));

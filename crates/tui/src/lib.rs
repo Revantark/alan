@@ -46,4 +46,4 @@ pub use error::RuntimeError;
 pub use focus::{FocusHandle, FocusScope};
 pub use keymap::{InputContext, KeyMapper, NoopMapper, PassthroughMapper};
 pub use subscription::{Subscription, SubscriptionEvent};
-pub use task::{TaskExecutor, TokioExecutor};
+pub use task::{TaskExecutor, TaskHandle, TokioExecutor};
