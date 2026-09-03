@@ -1,14 +1,17 @@
-//! Context capabilities available during component callbacks.
+//! Capabilities available during component callbacks.
 //!
-//! Mutating operations (overlay open/close and message delivery) are deferred
-//! and applied after the current callback completes. `emit` targets the root;
-//! `send` targets one entity. Entity reads and writes apply immediately and
-//! reject self-access, avoiding re-entry into the currently locked entity.
+//! `dispatch` and `update` are direct, synchronous operations on a known
+//! entity. `notify` invalidates the current entity and `observe` reacts to
+//! that invalidation later. `emit`/`subscribe` are deferred typed entity
+//! events; `subscribe_stream` consumes an external stream; `spawn` delivers a
+//! one-shot typed result. Deferred callbacks are never re-entrant.
 
-use std::collections::{HashMap, VecDeque};
+use std::any::{Any, TypeId};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::future::Future;
 use std::marker::PhantomData;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 
 use tokio::sync::mpsc::UnboundedSender;
 
@@ -17,54 +20,41 @@ use crate::entity::{ComponentSlot, Entity, EntityId, EntityStore};
 use crate::focus::FocusManager;
 use crate::overlay::OverlayStack;
 use crate::subscription::{
-    RuntimeDelivery, Subscription, SubscriptionEvent, SubscriptionId, SubscriptionRecord, handler,
+    self, EventDelivery, RuntimeDelivery, Subscription, SubscriptionId, SubscriptionRecord,
 };
-use crate::task::{TaskDelivery, TaskError, TaskExecutor, TaskHandle};
+use crate::task::{TaskDelivery, TaskError, TaskExecutor, TaskHandle, TaskId};
 
-/// Destination for a deferred component message.
-#[derive(Debug)]
-pub(crate) enum MessageTarget {
-    Root,
-    Entity(EntityId),
-}
-
-/// A message and the entity that should receive it.
-#[derive(Debug)]
-pub(crate) struct QueuedMessage<M> {
-    pub(crate) target: MessageTarget,
-    pub(crate) message: M,
-}
-
-/// Framework state shared between the event loop and component contexts.
-pub(crate) struct RuntimeState<A, M> {
-    pub(crate) sender: UnboundedSender<RuntimeDelivery<M>>,
-    pub(crate) executor: Arc<dyn TaskExecutor<M>>,
-    pub(crate) subscriptions: HashMap<SubscriptionId, SubscriptionRecord<A, M>>,
-    pub(crate) deliveries: VecDeque<RuntimeDelivery<M>>,
+/// Runtime state shared by the event loop and component contexts.
+pub(crate) struct RuntimeState<A> {
+    pub(crate) sender: UnboundedSender<RuntimeDelivery>,
+    pub(crate) executor: Arc<dyn TaskExecutor>,
+    pub(crate) subscriptions: HashMap<SubscriptionId, SubscriptionRecord<A>>,
+    pub(crate) task_handlers: HashMap<TaskId, Box<dyn TaskHandler<A>>>,
+    pub(crate) deliveries: VecDeque<RuntimeDelivery>,
+    pub(crate) invalidated: HashSet<EntityId>,
     pub(crate) focus: FocusManager,
     pub(crate) parent_map: HashMap<EntityId, EntityId>,
     pub(crate) overlays: OverlayStack,
-    pub(crate) pending_overlays: VecDeque<(EntityId, Box<dyn ComponentSlot<A, M>>)>,
-    pub(crate) pending_inserts: VecDeque<(EntityId, Box<dyn ComponentSlot<A, M>>)>,
-    /// Entities awaiting their one-time `init` call.
+    pub(crate) pending_overlays: VecDeque<(EntityId, Box<dyn ComponentSlot<A>>)>,
+    pub(crate) pending_inserts: VecDeque<(EntityId, Box<dyn ComponentSlot<A>>)>,
     pub(crate) pending_inits: VecDeque<EntityId>,
     pub(crate) pending_closes: usize,
-    /// One FIFO queue preserves ordering between root and targeted messages.
-    pub(crate) messages: VecDeque<QueuedMessage<M>>,
     pub(crate) dirty: bool,
     pub(crate) quit: bool,
 }
 
-impl<A: 'static, M: 'static> RuntimeState<A, M> {
+impl<A: 'static> RuntimeState<A> {
     pub(crate) fn new(
-        sender: UnboundedSender<RuntimeDelivery<M>>,
-        executor: Arc<dyn TaskExecutor<M>>,
+        sender: UnboundedSender<RuntimeDelivery>,
+        executor: Arc<dyn TaskExecutor>,
     ) -> Self {
         Self {
             sender,
             executor,
             subscriptions: HashMap::new(),
+            task_handlers: HashMap::new(),
             deliveries: VecDeque::new(),
+            invalidated: HashSet::new(),
             focus: FocusManager::default(),
             parent_map: HashMap::new(),
             overlays: OverlayStack::new(),
@@ -72,335 +62,224 @@ impl<A: 'static, M: 'static> RuntimeState<A, M> {
             pending_inserts: VecDeque::new(),
             pending_inits: VecDeque::new(),
             pending_closes: 0,
-            messages: VecDeque::new(),
             dirty: true,
             quit: false,
         }
     }
-
-    /// Drain one batch of queued component messages.
-    pub(crate) fn take_messages(&mut self) -> VecDeque<QueuedMessage<M>> {
-        std::mem::take(&mut self.messages)
-    }
-
-    pub(crate) fn take_delivery(&mut self) -> Option<RuntimeDelivery<M>> {
-        self.deliveries.pop_front()
-    }
-
-    pub(crate) fn cleanup_subscriptions(&mut self, store: &EntityStore<A, M>) {
+    pub(crate) fn cleanup_subscriptions(&mut self, store: &EntityStore<A>) {
         let stale: Vec<_> = self
             .subscriptions
             .iter()
             .filter_map(|(id, record)| {
-                (!record.active.load(std::sync::atomic::Ordering::Acquire)
-                    || !store.is_active_entity(record.target))
+                let (active, source, target) = match record {
+                    SubscriptionRecord::Stream(s) => (&s.active, None, s.target),
+                    SubscriptionRecord::Event(s) => (&s.active, Some(s.source), s.target),
+                    SubscriptionRecord::Observation(s) => (&s.active, Some(s.source), s.target),
+                };
+                (!active.load(std::sync::atomic::Ordering::Acquire)
+                    || !store.is_active_entity(target)
+                    || source.is_some_and(|id| !store.is_active_entity(id)))
                 .then_some(*id)
             })
             .collect();
         for id in stale {
-            if let Some(record) = self.subscriptions.remove(&id) {
-                record
-                    .active
-                    .store(false, std::sync::atomic::Ordering::Release);
-                let _ = record.cancellation.send(true);
-            }
+            self.remove_subscription(id);
+        }
+        self.task_handlers
+            .retain(|_, handler| handler.is_active() && store.is_active_entity(handler.target()));
+        self.invalidated.retain(|id| store.is_active_entity(*id));
+    }
+    pub(crate) fn remove_subscription(&mut self, id: SubscriptionId) {
+        if let Some(record) = self.subscriptions.remove(&id) {
+            let active = match &record {
+                SubscriptionRecord::Stream(s) => &s.active,
+                SubscriptionRecord::Event(s) => &s.active,
+                SubscriptionRecord::Observation(s) => &s.active,
+            };
+            active.store(false, std::sync::atomic::Ordering::Release);
+            let cancellation = match record {
+                SubscriptionRecord::Stream(s) => s.cancellation,
+                SubscriptionRecord::Event(s) => s.cancellation,
+                SubscriptionRecord::Observation(s) => s.cancellation,
+            };
+            let _ = cancellation.send(true);
         }
     }
-
-    /// Take and reset the dirty flag.
-    pub(crate) fn take_dirty(&mut self) -> bool {
-        std::mem::take(&mut self.dirty)
+    pub(crate) fn take_invalidated(&mut self) -> Vec<EntityId> {
+        self.invalidated.drain().collect()
     }
-
-    /// Mark the UI dirty, scheduling a redraw.
     pub(crate) fn mark_dirty(&mut self) {
         self.dirty = true;
     }
-
-    /// Whether shutdown was requested.
+    pub(crate) fn take_dirty(&mut self) -> bool {
+        std::mem::take(&mut self.dirty)
+    }
     pub(crate) fn should_quit(&self) -> bool {
         self.quit
     }
-
-    /// The entity currently targeted for input, if any: the topmost overlay,
-    /// otherwise the focused entity.
     pub(crate) fn input_target(&self) -> Option<EntityId> {
-        if let Some(top) = self.overlays.top() {
-            return Some(top);
-        }
-        self.focus.current()
+        self.overlays.top().or_else(|| self.focus.current())
     }
 }
 
-/// Type-erased context handed to the entity store for dispatch.
-///
-/// The store converts it to a typed [`Context`] for the concrete component.
-pub(crate) struct Ctx<'a, A, M> {
-    pub(crate) runtime_state: &'a mut RuntimeState<A, M>,
-    pub(crate) store: &'a EntityStore<A, M>,
-    pub(crate) entity: EntityId,
+pub(crate) trait TaskHandler<A>: 'static {
+    fn target(&self) -> EntityId;
+    fn is_active(&self) -> bool;
+    fn invoke(
+        self: Box<Self>,
+        result: Box<dyn Any + Send>,
+        state: &mut RuntimeState<A>,
+        store: &EntityStore<A>,
+    );
 }
 
-impl<'a, A, M> Ctx<'a, A, M> {
-    pub(crate) fn new(
-        runtime_state: &'a mut RuntimeState<A, M>,
-        store: &'a EntityStore<A, M>,
-        entity: EntityId,
-    ) -> Self {
-        Self {
-            runtime_state,
-            store,
-            entity,
-        }
-    }
+struct TypedTaskHandler<T, R, H> {
+    target: EntityId,
+    handler: H,
+    active: Arc<AtomicBool>,
+    marker: PhantomData<fn(T, R)>,
+}
 
-    pub(crate) fn typed<T>(&mut self) -> Context<'_, T, A, M> {
-        Context {
-            runtime_state: self.runtime_state,
-            store: self.store,
-            entity: Entity::from_id(self.entity),
-            _marker: PhantomData,
-        }
+impl<T, R, H, A> TaskHandler<A> for TypedTaskHandler<T, R, H>
+where
+    T: Component<A>,
+    R: Send + 'static,
+    A: 'static,
+    H: for<'a> FnOnce(Result<R, TaskError>, &'a mut T, &'a mut Context<'a, T, A>) + Send + 'static,
+{
+    fn target(&self) -> EntityId {
+        self.target
+    }
+    fn is_active(&self) -> bool {
+        self.active.load(std::sync::atomic::Ordering::Acquire)
+    }
+    fn invoke(
+        self: Box<Self>,
+        result: Box<dyn Any + Send>,
+        state: &mut RuntimeState<A>,
+        store: &EntityStore<A>,
+    ) {
+        let Ok(result) = result.downcast::<Result<R, TaskError>>() else {
+            return;
+        };
+        let Some(mut slot) = store.lock(self.target) else {
+            return;
+        };
+        let Some(component) = slot
+            .as_mut()
+            .and_then(|v| v.as_any_mut().downcast_mut::<T>())
+        else {
+            return;
+        };
+        let mut cx = Context::new(state, store, self.target);
+        (self.handler)(*result, component, &mut cx);
     }
 }
 
-/// Callback capabilities available during `init`, action handling, and
-/// message handling.
-///
-/// Typed with the component's own type `T`; `A` is the application action
-/// type and `M` the application message type.
-pub struct Context<'a, T, A, M = ()> {
-    runtime_state: &'a mut RuntimeState<A, M>,
-    store: &'a EntityStore<A, M>,
+/// Type-specific callback context for one component.
+pub struct Context<'a, T, A> {
+    pub(crate) runtime_state: &'a mut RuntimeState<A>,
+    pub(crate) store: &'a EntityStore<A>,
     entity: Entity<T>,
     _marker: PhantomData<fn() -> T>,
 }
 
-impl<'a, T, A: 'static, M: 'static> Context<'a, T, A, M> {
+impl<'a, T: Component<A>, A: 'static> Context<'a, T, A> {
     pub(crate) fn new(
-        runtime_state: &'a mut RuntimeState<A, M>,
-        store: &'a EntityStore<A, M>,
+        state: &'a mut RuntimeState<A>,
+        store: &'a EntityStore<A>,
         entity: EntityId,
     ) -> Self {
         Self {
-            runtime_state,
+            runtime_state: state,
             store,
             entity: Entity::from_id(entity),
             _marker: PhantomData,
         }
     }
-    /// Typed handle to the component currently executing a callback.
-    ///
-    /// Lets a component learn its own identity (e.g. during `init`) so it
-    /// can refer to itself in messages.
     pub fn entity(&self) -> Entity<T> {
         self.entity
     }
 
-    /// Queue a message for the root after the current callback returns.
-    ///
-    /// `emit` reports an event upward. Use [`Context::send`] for a command
-    /// addressed to one particular entity. Neither operation delivers
-    /// re-entrantly.
-    pub fn emit(&mut self, message: M) {
-        self.runtime_state.messages.push_back(QueuedMessage {
-            target: MessageTarget::Root,
-            message,
-        });
-    }
-
-    /// Queue a message for one entity after the current callback returns.
-    ///
-    /// Sending to an entity removed before delivery is a safe no-op. This is
-    /// separate from [`Context::emit`], which always targets the root.
-    pub fn send<E>(&mut self, target: Entity<E>, message: M)
-    where
-        E: Component<A, M>,
-    {
-        self.runtime_state.messages.push_back(QueuedMessage {
-            target: MessageTarget::Entity(target.id()),
-            message,
-        });
-    }
-
-    /// Mark the UI dirty, scheduling a redraw.
-    pub fn notify(&mut self) {
-        self.runtime_state.dirty = true;
-    }
-
-    /// Request runtime shutdown after the current callback completes.
-    pub fn quit(&mut self) {
-        self.runtime_state.quit = true;
-    }
-
-    /// Focus an entity so routed input reaches it.
-    ///
-    /// Focus is a containment decision made by the parent: a component does
-    /// not claim focus for itself. Calling this during `init` on a child
-    /// returned by [`Context::insert`] is the normal pattern; the entity
-    /// receives routed input once the current callback completes, when its
-    /// insert is flushed into the entity store.
-    pub fn focus_entity<E>(&mut self, target: Entity<E>) {
-        self.runtime_state.focus.focus(target.id());
-        self.runtime_state.dirty = true;
-    }
-
-    /// Declare the next/previous cycling order among entities.
-    ///
-    /// The order is owned by the entity currently executing a callback
-    /// (typically a parent declaring its children's tab order) and is
-    /// discarded when that entity is removed. Entities removed later are
-    /// filtered out of the order automatically. [`Context::focus_next`] and
-    /// [`Context::focus_prev`] cycle within the order containing the
-    /// currently focused entity; cycling is a no-op until an order exists.
-    pub fn focus_order<I>(&mut self, order: I)
-    where
-        I: IntoIterator<Item = EntityId>,
-    {
+    /// Queue a typed event from the current entity for later delivery.
+    pub fn emit<Ev: Send + 'static>(&mut self, event: Ev) {
         self.runtime_state
-            .focus
-            .register_order(self.entity.id(), order.into_iter().collect());
+            .deliveries
+            .push_back(RuntimeDelivery::Event(EventDelivery {
+                source: self.entity.id(),
+                event_type: TypeId::of::<Ev>(),
+                event: Box::new(event),
+            }));
     }
 
-    /// Whether the entity currently executing a callback holds focus.
-    pub fn is_focused(&self) -> bool {
-        self.runtime_state.focus.current() == Some(self.entity.id())
-    }
-
-    /// Focus the next entity in the active entity's declared order.
-    pub fn focus_next(&mut self) {
-        self.runtime_state.focus.focus_next();
-        self.runtime_state.dirty = true;
-    }
-
-    /// Focus the previous entity in the active entity's declared order.
-    pub fn focus_prev(&mut self) {
-        self.runtime_state.focus.focus_prev();
-        self.runtime_state.dirty = true;
-    }
-
-    /// Queue opening an overlay: the component is stored, the current focus
-    /// path saved, and input captured by the overlay once the current
-    /// callback completes.
-    pub fn open_overlay<O>(&mut self, overlay: O) -> Entity<O>
+    /// Observe state invalidation from a specific source. The callback reads
+    /// the source with `read`; it receives no source lock or payload.
+    pub fn observe<Source, F>(&mut self, source: Entity<Source>, callback: F) -> Subscription
     where
-        O: crate::component::Component<A, M>,
-        A: 'static,
-        M: 'static,
+        Source: Component<A>,
+        F: for<'b> FnMut(&'b mut T, Entity<Source>, &'b mut Context<'b, T, A>) + 'static,
     {
-        let id = EntityId::allocate();
-        self.runtime_state
-            .pending_overlays
-            .push_back((id, Box::new(overlay) as Box<dyn ComponentSlot<A, M>>));
-        self.runtime_state.parent_map.insert(id, self.entity.id());
-        self.runtime_state.dirty = true;
-        Entity::from_id(id)
-    }
-
-    /// Queue closing the topmost overlay; the previous focus path is
-    /// restored when the current callback completes. If no overlay is open,
-    /// this is a harmless no-op.
-    pub fn close_overlay(&mut self) {
-        self.runtime_state.pending_closes += 1;
-        self.runtime_state.dirty = true;
-    }
-
-    /// Run `f` with exclusive access to another entity's state.
-    ///
-    /// This is a direct state-access escape hatch, not an action dispatch or
-    /// message delivery operation. Returns `None` if the entity was removed,
-    /// the type does not match, or `target` is the entity currently executing
-    /// a callback.
-    pub fn update<E, R>(&mut self, target: Entity<E>, f: impl FnOnce(&mut E) -> R) -> Option<R>
-    where
-        E: 'static,
-    {
-        if target.id() == self.entity.id() {
-            return None;
-        }
-        self.store.typed_update(target.id(), f)
-    }
-
-    /// Run `f` with read access to another entity's state.
-    /// Returns `None` when the entity is missing, has another type, or is the
-    /// entity currently executing a callback.
-    pub fn read<E, R>(&self, target: Entity<E>, f: impl FnOnce(&E) -> R) -> Option<R>
-    where
-        E: 'static,
-    {
-        if target.id() == self.entity.id() {
-            return None;
-        }
-        self.store.typed_read(target.id(), f)
-    }
-
-    /// Register a new component with the runtime, returning its handle.
-    ///
-    /// This is how a parent creates child entities: insert the child state,
-    /// keep the handle, and later route actions to it with
-    /// [`Context::dispatch`] and render it with
-    /// [`RenderContext::render_entity`](crate::RenderContext::render_entity).
-    /// The component becomes available (routable and renderable) once the
-    /// current callback completes.
-    pub fn insert<E>(&mut self, state: E) -> Entity<E>
-    where
-        E: Component<A, M>,
-    {
-        let id = EntityId::allocate();
-        self.runtime_state
-            .pending_inserts
-            .push_back((id, Box::new(state) as Box<dyn ComponentSlot<A, M>>));
-        self.runtime_state.parent_map.insert(id, self.entity.id());
-        self.runtime_state.pending_inits.push_back(id);
-        Entity::from_id(id)
-    }
-
-    /// Dispatch an action directly to a child entity.
-    ///
-    /// This is the parent-routing primitive: a parent decides which child is
-    /// active and delegates, then handles the action itself if the child
-    /// continued. Note the child's queued requests (messages, overlays,
-    /// focus) are applied like the parent's, after the child callback
-    /// completes.
-    pub fn dispatch<E>(&mut self, target: Entity<E>, action: &A) -> ActionStatus
-    where
-        E: Component<A, M>,
-    {
-        if target.id() == self.entity.id() {
-            // Dispatching to the entity currently executing a callback would
-            // deadlock on its slot lock; the component has &mut self already.
-            return ActionStatus::Continue;
-        }
-        let mut cx = Ctx::new(self.runtime_state, self.store, target.id());
-        self.store
-            .dispatch_action(target.id(), action, &mut cx)
-            .unwrap_or(ActionStatus::Continue)
-    }
-
-    /// Subscribe to a stream. Items and normal closure are delivered later on
-    /// the runtime side, never from the stream worker.
-    pub fn subscribe<S, Item, F>(&mut self, stream: S, callback: F) -> Subscription
-    where
-        T: Component<A, M>,
-        S: futures_util::Stream<Item = Item> + Send + 'static,
-        Item: Send + 'static,
-        M: Send + 'static,
-        F: for<'b> FnMut(SubscriptionEvent<Item>, &'b mut T, &'b mut Context<'b, T, A, M>)
-            + 'static,
-    {
+        let (active, cancellation, _) = subscription::cancellation();
         let id = SubscriptionId::allocate();
-        let active = Arc::new(std::sync::atomic::AtomicBool::new(true));
-        let (cancellation, receiver) = tokio::sync::watch::channel(false);
         self.runtime_state.subscriptions.insert(
             id,
-            SubscriptionRecord {
+            SubscriptionRecord::Observation(subscription::ObservationSubscription {
+                source: source.id(),
                 target: self.entity.id(),
-                active: Arc::clone(&active),
+                active: active.clone(),
                 cancellation: cancellation.clone(),
-                handler: handler(callback),
-            },
+                handler: subscription::observation_handler(callback),
+            }),
         );
-        let worker = crate::subscription::worker(
+        Subscription::new(active, cancellation)
+    }
+
+    /// Subscribe to a typed event emitted by one specific source entity.
+    pub fn subscribe<Ev, Source, F>(&mut self, source: Entity<Source>, callback: F) -> Subscription
+    where
+        Ev: Send + 'static,
+        Source: Component<A>,
+        F: for<'b> FnMut(&Ev, &'b mut T, Entity<Source>, &'b mut Context<'b, T, A>) + 'static,
+    {
+        let (active, cancellation, _) = subscription::cancellation();
+        let id = SubscriptionId::allocate();
+        self.runtime_state.subscriptions.insert(
+            id,
+            SubscriptionRecord::Event(subscription::EventSubscription {
+                source: source.id(),
+                target: self.entity.id(),
+                active: active.clone(),
+                cancellation: cancellation.clone(),
+                handler: subscription::event_handler(callback),
+            }),
+        );
+        Subscription::new(active, cancellation)
+    }
+
+    /// Subscribe to an external asynchronous stream.
+    pub fn subscribe_stream<S, Item, F>(&mut self, stream: S, callback: F) -> Subscription
+    where
+        T: Component<A>,
+        S: futures_util::Stream<Item = Item> + Send + 'static,
+        Item: Send + 'static,
+        F: for<'b> FnMut(
+                subscription::SubscriptionEvent<Item>,
+                &'b mut T,
+                &'b mut Context<'b, T, A>,
+            ) + 'static,
+    {
+        let id = SubscriptionId::allocate();
+        let (active, cancellation, receiver) = subscription::cancellation();
+        self.runtime_state.subscriptions.insert(
+            id,
+            SubscriptionRecord::Stream(subscription::StreamSubscription {
+                target: self.entity.id(),
+                active: active.clone(),
+                cancellation: cancellation.clone(),
+                handler: subscription::stream_handler(callback),
+            }),
+        );
+        let worker = subscription::worker(
             stream,
             id,
             active.clone(),
@@ -413,19 +292,150 @@ impl<'a, T, A: 'static, M: 'static> Context<'a, T, A, M> {
         Subscription::new(active, cancellation)
     }
 
-    /// Spawn a background task whose output is delivered as a message to
-    /// this entity. The returned handle can be used to cancel the task.
-    pub fn spawn<F>(&mut self, future: F) -> TaskHandle
+    /// Start one-shot work; its typed result is delivered to this entity.
+    pub fn spawn<F, R, H>(&mut self, future: F, handler: H) -> TaskHandle
     where
-        F: Future<Output = Result<M, TaskError>> + Send + 'static,
+        F: Future<Output = Result<R, TaskError>> + Send + 'static,
+        R: Send + 'static,
+        H: for<'b> FnOnce(Result<R, TaskError>, &'b mut T, &'b mut Context<'b, T, A>)
+            + Send
+            + 'static,
     {
+        let id = TaskId::allocate();
         let target = self.entity.id();
+        let cancellation = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        self.runtime_state.task_handlers.insert(
+            id,
+            Box::new(TypedTaskHandler {
+                target,
+                handler,
+                active: Arc::clone(&cancellation),
+                marker: PhantomData,
+            }),
+        );
         let delivery = async move {
-            let result = future.await;
-            TaskDelivery { target, result }
+            TaskDelivery {
+                id,
+                target,
+                result: Box::new(future.await),
+            }
         };
-        self.runtime_state
+        let handle = self
+            .runtime_state
             .executor
-            .spawn(Box::pin(delivery), self.runtime_state.sender.clone())
+            .spawn(Box::pin(delivery), self.runtime_state.sender.clone());
+        handle.with_cancel_cleanup(move || {
+            cancellation.store(false, std::sync::atomic::Ordering::Release);
+        })
+    }
+
+    /// Invalidate this entity; observers run in a later deferred phase.
+    pub fn notify(&mut self) {
+        self.runtime_state.invalidated.insert(self.entity.id());
+        self.runtime_state.dirty = true;
+    }
+    pub fn quit(&mut self) {
+        self.runtime_state.quit = true;
+    }
+    pub fn focus_entity<E>(&mut self, target: Entity<E>) {
+        self.runtime_state.focus.focus(target.id());
+        self.runtime_state.dirty = true;
+    }
+    pub fn focus_order<I: IntoIterator<Item = EntityId>>(&mut self, order: I) {
+        self.runtime_state
+            .focus
+            .register_order(self.entity.id(), order.into_iter().collect());
+    }
+    pub fn is_focused(&self) -> bool {
+        self.runtime_state.focus.current() == Some(self.entity.id())
+    }
+    pub fn focus_next(&mut self) {
+        self.runtime_state.focus.focus_next();
+        self.runtime_state.dirty = true;
+    }
+    pub fn focus_prev(&mut self) {
+        self.runtime_state.focus.focus_prev();
+        self.runtime_state.dirty = true;
+    }
+
+    pub fn open_overlay<O: Component<A>>(&mut self, overlay: O) -> Entity<O> {
+        let id = EntityId::allocate();
+        self.runtime_state
+            .pending_overlays
+            .push_back((id, Box::new(overlay)));
+        self.runtime_state.parent_map.insert(id, self.entity.id());
+        self.runtime_state.dirty = true;
+        Entity::from_id(id)
+    }
+    pub fn close_overlay(&mut self) {
+        self.runtime_state.pending_closes += 1;
+        self.runtime_state.dirty = true;
+    }
+
+    /// Mutate another entity synchronously. A successful update invalidates
+    /// the target and marks it dirty; missing or wrong-typed entities are no-ops.
+    pub fn update<E: 'static, R>(
+        &mut self,
+        target: Entity<E>,
+        f: impl FnOnce(&mut E) -> R,
+    ) -> Option<R> {
+        if target.id() == self.entity.id() {
+            return None;
+        }
+        let result = self.store.typed_update(target.id(), f);
+        if result.is_some() {
+            self.runtime_state.invalidated.insert(target.id());
+            self.runtime_state.dirty = true;
+        }
+        result
+    }
+    pub fn read<E: 'static, R>(&self, target: Entity<E>, f: impl FnOnce(&E) -> R) -> Option<R> {
+        if target.id() == self.entity.id() {
+            None
+        } else {
+            self.store.typed_read(target.id(), f)
+        }
+    }
+    pub fn insert<E: Component<A>>(&mut self, state: E) -> Entity<E> {
+        let id = EntityId::allocate();
+        self.runtime_state
+            .pending_inserts
+            .push_back((id, Box::new(state)));
+        self.runtime_state.parent_map.insert(id, self.entity.id());
+        self.runtime_state.pending_inits.push_back(id);
+        Entity::from_id(id)
+    }
+    /// Dispatch a synchronous action to a known entity. Self-dispatch is a
+    /// safe `Continue` no-op because the current slot is already locked.
+    pub fn dispatch<E: Component<A>>(&mut self, target: Entity<E>, action: &A) -> ActionStatus {
+        if target.id() == self.entity.id() {
+            return ActionStatus::Continue;
+        }
+        let mut cx = Ctx::new(self.runtime_state, self.store, target.id());
+        self.store
+            .dispatch_action(target.id(), action, &mut cx)
+            .unwrap_or(ActionStatus::Continue)
+    }
+}
+
+pub(crate) struct Ctx<'a, A> {
+    runtime_state: &'a mut RuntimeState<A>,
+    store: &'a EntityStore<A>,
+    entity: EntityId,
+}
+impl<'a, A: 'static> Ctx<'a, A> {
+    pub(crate) fn new(
+        state: &'a mut RuntimeState<A>,
+        store: &'a EntityStore<A>,
+        entity: EntityId,
+    ) -> Self {
+        Self {
+            runtime_state: state,
+            store,
+            entity,
+        }
+    }
+    pub(crate) fn typed<T: Component<A>>(&mut self) -> Context<'_, T, A> {
+        Context::new(self.runtime_state, self.store, self.entity)
     }
 }
