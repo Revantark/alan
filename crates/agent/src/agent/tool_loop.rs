@@ -7,9 +7,9 @@ use llm::LlmResponse;
 use providers::Model;
 use tools::ToolOutput;
 
-use super::Agent;
 use super::event::{AgentEvent, emit_event};
 use super::prompt::PromptCx;
+use super::{Agent, Mode};
 
 /// Core agent loop: stream LLM responses and execute tool calls until the
 /// model produces a final answer or `max_tool_rounds` is reached.
@@ -19,14 +19,14 @@ pub(super) async fn run_with(
     context: &mut AgentContext,
     cx: &mut PromptCx<'_>,
 ) -> Result<LlmResponse, AgentError> {
-    let plan = agent.plan_mode();
+    let mode = agent.mode();
 
     for _ in 0..agent.max_tool_rounds {
         cx.check_cancelled()?;
 
         let session_id = agent.session_id.lock().await.clone();
         let (response, round_usage) =
-            prompt::stream_round(session_id, model, context, cx, plan).await?;
+            prompt::stream_round(session_id, model, context, cx, mode).await?;
 
         // Usage is a per-round provider snapshot. Add it once to the
         // aggregate, regardless of how many usage events the provider sent.
@@ -50,7 +50,7 @@ pub(super) async fn run_with(
         )
         .await?;
 
-        handle_tool_calls(agent, calls, context, cx, plan).await?;
+        handle_tool_calls(agent, calls, context, cx, mode).await?;
     }
 
     Err(AgentError::MaxToolRounds)
@@ -90,7 +90,7 @@ async fn handle_tool_calls(
     calls: Vec<llm::ToolCall>,
     context: &mut AgentContext,
     cx: &mut PromptCx<'_>,
-    plan: bool,
+    mode: Mode,
 ) -> Result<(), AgentError> {
     for call in calls {
         cx.check_cancelled()?;
@@ -101,8 +101,9 @@ async fn handle_tool_calls(
             .copied()
             .ok_or_else(|| AgentError::ToolNotFound(call.name.clone()))?;
 
-        // In plan mode only read-only tools (and bash) may be invoked.
-        if plan && !context.tools[tool_index].read_only && call.name != "bash" {
+        // In plan and review modes only read-only tools (and bash) may be
+        // invoked.
+        if mode != Mode::Normal && !context.tools[tool_index].read_only && call.name != "bash" {
             return Err(AgentError::ToolNotFound(call.name.clone()));
         }
 

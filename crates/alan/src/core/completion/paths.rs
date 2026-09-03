@@ -6,8 +6,8 @@
 //! index is served stale rather than waited on.
 
 use super::{
-    CompletionBackend, CompletionItem, CompletionRequest, CompletionResult, CompletionStatus,
-    ranked_items,
+    Accept, CompletionBackend, CompletionItem, CompletionRequest, CompletionResult,
+    CompletionStatus, ranked_items,
 };
 use crate::core::Poll;
 use futures_util::FutureExt;
@@ -96,6 +96,7 @@ impl CompletionBackend for Paths {
             items: ranked_items(&request.pattern, &self.index, |path| CompletionItem {
                 display: path.to_owned(),
                 replacement: path.to_owned(),
+                accept: Accept::Insert,
             }),
         })
     }
@@ -386,7 +387,7 @@ mod tests {
 
         let mut completion = CompletionController::new(vec![Box::new(Paths::new(root.clone()))]);
 
-        completion.sync("@mai", 4);
+        completion.sync("@mai", 4, 0);
         assert!(completion.is_open());
         assert_eq!(completion.item_count(), 0);
 
@@ -413,6 +414,7 @@ mod tests {
         CompletionRequest {
             pattern: pattern.to_owned(),
             range,
+            row: 0,
         }
     }
 

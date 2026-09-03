@@ -11,7 +11,8 @@ Alan is a minimal coding agent written in Rust. It runs in your terminal and use
 - File read, file write, file edit, and shell tools
 - Optional OpenRouter web search and web fetch tools
 - Tool-call execution with configurable round limits
-- Plan mode toggled with `/plan` or `Shift+Tab`
+- Plan mode toggled with `/plan` or `Shift+Tab`; review mode with `/review`.
+  `Shift+Tab` cycles Normal → Plan → Review; `/normal` turns both off.
 - Session history is stored under `$ALAN_HOME/.alan/sessions` (or
   `$HOME/.alan/sessions` when `ALAN_HOME` is unset). Each working directory
   gets its own hashed subdirectory, containing append-only JSONL session files.

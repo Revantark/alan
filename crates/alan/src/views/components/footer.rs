@@ -3,6 +3,7 @@ use crate::views::UiState;
 use crate::views::component::Component;
 use crate::views::components::PopupList;
 use crate::views::theme;
+use agent::Mode;
 use providers::AuthPrompt;
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
@@ -48,11 +49,13 @@ impl From<Activity> for Status {
 /// Flags that layer onto any activity.
 fn badges(controller: &Controller) -> Vec<Span<'static>> {
     let mut badges = Vec::new();
-    if controller.plan_mode() {
-        badges.push(Span::styled(
-            " · Plan mode",
-            Style::default().fg(ratatui::style::Color::White),
-        ));
+    let badge = match controller.mode() {
+        Mode::Plan => Some((" · Plan mode", ratatui::style::Color::White)),
+        Mode::Review => Some((" · Review mode", ratatui::style::Color::White)),
+        Mode::Normal => None,
+    };
+    if let Some((label, color)) = badge {
+        badges.push(Span::styled(label, Style::default().fg(color)));
     }
     if let Some(cost) = controller.usage().cost {
         badges.push(Span::styled(
@@ -106,7 +109,7 @@ impl Component for Footer {
             let mut lines: Vec<Line<'static>> = vec![
                 Line::from("\n"),
                 Line::from(Span::styled(
-                    "  Attachments",
+                    "  Attachments  (esc removes last)",
                     Style::default().fg(theme::ATTACHMENT_FG).bold(),
                 )),
             ];
@@ -165,7 +168,9 @@ impl Component for Footer {
         if let Some(position) = state.cursor_screen_position() {
             frame.set_cursor_position(position);
         }
-        if let Some(popup_area) = PopupList::area_above(area, frame.area()) {
+        let completion = controller.completion();
+        let rows = PopupList::required_rows(completion.status(), completion.item_count());
+        if let Some(popup_area) = PopupList::area_above(area, frame.area(), rows) {
             self.popup.render(frame, popup_area, controller, state);
         }
     }

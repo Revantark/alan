@@ -121,16 +121,25 @@ impl ChatController {
         self.busy
     }
 
-    pub fn plan_mode(&self) -> bool {
-        self.agent.plan_mode()
+    pub fn mode(&self) -> agent::Mode {
+        self.agent.mode()
     }
 
     pub fn usage(&self) -> Usage {
         self.usage.clone()
     }
 
-    pub fn toggle_plan_mode(&mut self) {
-        self.agent.set_plan_mode(!self.agent.plan_mode());
+    pub fn toggle_mode(&mut self) {
+        let next = match self.agent.mode() {
+            agent::Mode::Normal => agent::Mode::Plan,
+            agent::Mode::Plan => agent::Mode::Review,
+            agent::Mode::Review => agent::Mode::Normal,
+        };
+        self.agent.set_mode(next);
+    }
+
+    pub fn set_mode(&mut self, mode: agent::Mode) {
+        self.agent.set_mode(mode);
     }
 
     pub fn push_info(&mut self, text: impl Into<String>) {

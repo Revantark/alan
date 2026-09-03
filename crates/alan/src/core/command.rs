@@ -10,6 +10,8 @@ use strum::{EnumIter, EnumString, IntoEnumIterator, IntoStaticStr};
 pub enum SlashCommand {
     Login,
     Plan,
+    Review,
+    Normal,
     Help,
 }
 
@@ -36,7 +38,9 @@ impl SlashCommand {
     pub fn description(self) -> &'static str {
         match self {
             Self::Login => "sign in to a provider",
-            Self::Plan => "toggle plan mode (also Shift+Tab)",
+            Self::Plan => "turn on plan mode (also Shift+Tab)",
+            Self::Review => "turn on review mode (also Shift+Tab)",
+            Self::Normal => "turn off plan and review mode",
             Self::Help => "list the available commands",
         }
     }
@@ -52,6 +56,12 @@ impl SlashCommand {
             ));
         }
         text
+    }
+}
+
+impl AsRef<str> for SlashCommand {
+    fn as_ref(&self) -> &str {
+        self.into()
     }
 }
 

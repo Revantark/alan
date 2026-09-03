@@ -9,7 +9,8 @@ pub mod selection;
 mod theme;
 
 use crate::core::{
-    Action, Command, CompletionController, Controller, ImageAttachment, Overlay, Poll, SlashCommand,
+    Accept, Action, Command, CompletionController, CompletionItem, Controller, ImageAttachment,
+    Overlay, Poll, SlashCommand,
 };
 use base64::Engine;
 use components::{Chat, Footer, Header, LoginOverlay};
@@ -91,9 +92,15 @@ impl UiState {
                 })
             }
             Action::ClearInput => {
-                self.input.clear();
-                self.attachments.clear();
-                Some(Command::Cancel)
+                // Esc first removes the newest attachment; with none pending
+                // it clears the input as before.
+                if self.attachments.pop().is_some() {
+                    self.dirty = true;
+                    None
+                } else {
+                    self.input.clear();
+                    Some(Command::Cancel)
+                }
             }
             Action::Backspace => {
                 self.input.pop();
@@ -158,10 +165,9 @@ impl UiState {
         }
         if let Event::Key(key) = &event
             && completion.is_open()
-            && (completion.item_count() > 0 || !matches!(key.code, KeyCode::Enter | KeyCode::Tab))
-            && self.handle_completion_key(*key, completion)
+            && let Some(action) = PopupAction::of(*key, completion.selected_item())
         {
-            return None;
+            return self.apply_completion_popup(action, completion);
         }
         self.handle_editor_event(event, rendered_lines, completion)
     }
@@ -176,6 +182,11 @@ impl UiState {
             // Clear selection on Escape
             Event::Key(key) if key.code == KeyCode::Esc && self.has_active_selection() => {
                 self.selection = None;
+                self.dirty = true;
+                None
+            }
+            Event::Key(key) if key.code == KeyCode::Esc && !self.attachments.is_empty() => {
+                self.attachments.pop();
                 self.dirty = true;
                 None
             }
@@ -283,45 +294,43 @@ impl UiState {
         );
     }
 
-    /// Navigation and acceptance keys while the completion popup is open.
-    /// Returns true only when completion consumed the key.
-    fn handle_completion_key(
+    /// Carry out what [`PopupAction::of`] decided. Only accepting can finish
+    /// the input, so only accepting can produce a command.
+    fn apply_completion_popup(
         &mut self,
-        key: KeyEvent,
+        action: PopupAction,
         completion: &mut CompletionController,
-    ) -> bool {
-        match key.code {
-            KeyCode::Up => {
-                completion.move_selection(-1);
-                self.dirty = true;
-                true
+    ) -> Option<Command> {
+        self.dirty = true;
+        match action {
+            PopupAction::Move(delta) => {
+                completion.move_selection(delta);
+                None
             }
-            KeyCode::Down => {
-                completion.move_selection(1);
-                self.dirty = true;
-                true
-            }
-            KeyCode::Enter | KeyCode::Tab if key.modifiers.is_empty() => {
-                let Some((item, range)) = completion.accept() else {
-                    return false;
-                };
-                let separate = self.needs_separator_after(range.end);
-                self.replace_range(range, &item.replacement);
-                // An accepted mention is finished. Without a separator the next
-                // keystroke lands inside the token and reopens the popup.
-                if separate {
-                    self.editor.insert_str(" ");
-                }
-                self.dirty = true;
-                true
-            }
-            KeyCode::Esc => {
+            PopupAction::Dismiss => {
                 completion.dismiss();
-                self.dirty = true;
-                true
+                None
             }
-            _ => false,
+            PopupAction::Take { submit } => {
+                let (item, range) = completion.accept()?;
+                self.insert_completion(&item.replacement, range);
+                // Taking an item can complete a command name, and the editor
+                // event that would otherwise restyle the line never runs.
+                self.sync_command_highlight();
+                submit.then(|| self.submit_editor_or_accept()).flatten()
+            }
         }
+    }
+
+    /// Overwrite the completed token with `replacement`.
+    fn insert_completion(&mut self, replacement: &str, range: std::ops::Range<usize>) {
+        let separate = self.needs_separator_after(range.end);
+        self.replace_range(range, replacement);
+        if separate {
+            self.editor.insert_str(" ");
+        }
+
+        self.dirty = true;
     }
 
     /// Whether byte `at` on the cursor's line is not already followed by
@@ -372,7 +381,7 @@ impl UiState {
         let (row, col) = self.editor.cursor();
         let line = self.editor.lines().get(row).map_or("", String::as_str);
         let cursor = Self::char_offset(line, col.min(line.chars().count()));
-        completion.sync(line, cursor);
+        completion.sync(line, cursor, row);
     }
 
     fn handle_mouse_event(
@@ -662,11 +671,51 @@ fn completion_with(index: &[&str]) -> CompletionController {
 }
 
 #[cfg(test)]
+fn completion_with_commands() -> CompletionController {
+    use crate::core::completion::Commands;
+
+    CompletionController::new(vec![Box::new(Commands::default())])
+}
+
+#[cfg(test)]
 impl UiState {
     /// Test shim for the pre-completion call signature.
     fn handle_editor_event_for_test(&mut self, event: Event) -> Option<Command> {
         let mut completion = completion_with(&[]);
         self.handle_event(event, &[], &mut completion)
+    }
+}
+
+/// What an open completion popup does with a key.
+///
+/// Decided before anything is mutated, so [`PopupAction::of`] returning `None`
+/// is the whole answer to "the editor should see this key" — nothing further
+/// down has to report back that it declined.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PopupAction {
+    Move(isize),
+    /// Put the selected item in the buffer, then submit if `submit`.
+    Take {
+        submit: bool,
+    },
+    Dismiss,
+}
+
+impl PopupAction {
+    /// `None` leaves the key to the editor.
+    fn of(key: KeyEvent, selected: Option<&CompletionItem>) -> Option<Self> {
+        match key.code {
+            KeyCode::Up => Some(Self::Move(-1)),
+            KeyCode::Down => Some(Self::Move(1)),
+            KeyCode::Esc => Some(Self::Dismiss),
+            KeyCode::Enter | KeyCode::Tab if key.modifiers.is_empty() => {
+                let item = selected?;
+                Some(Self::Take {
+                    submit: key.code == KeyCode::Enter && item.accept == Accept::Complete,
+                })
+            }
+            _ => None,
+        }
     }
 }
 
@@ -1104,6 +1153,66 @@ mod tests {
         assert!(state.take_dirty());
     }
 
+    #[test]
+    fn escape_removes_last_attachment_before_clearing_input() {
+        let mut state = UiState::new();
+        state.input.push_str("hi");
+        state.attachments.push(ImageAttachment {
+            name: "image-1".into(),
+            mime_type: "image/png".into(),
+            base64_data: "aGVsbG8=".into(),
+        });
+        state.attachments.push(ImageAttachment {
+            name: "image-2".into(),
+            mime_type: "image/png".into(),
+            base64_data: "d29ybGQ=".into(),
+        });
+
+        assert_eq!(
+            state.handle_editor_event_for_test(key(crossterm::event::KeyCode::Esc)),
+            None
+        );
+        assert_eq!(state.attachments.len(), 1);
+        assert_eq!(state.attachments[0].name, "image-1");
+        assert_eq!(state.input, "hi");
+
+        assert_eq!(
+            state.handle_editor_event_for_test(key(crossterm::event::KeyCode::Esc)),
+            None
+        );
+        assert!(state.attachments.is_empty());
+        assert_eq!(state.input, "hi");
+        assert!(state.take_dirty());
+
+        // No attachments left: Esc is ignored again, as before.
+        assert_eq!(
+            state.handle_editor_event_for_test(key(crossterm::event::KeyCode::Esc)),
+            None
+        );
+        assert_eq!(state.input, "hi");
+    }
+
+    /// Esc still dismisses a text selection even while attachments are
+    /// pending; attachments only start popping on a second Esc.
+    #[test]
+    fn escape_prefers_clearing_a_selection_over_attachments() {
+        let mut state = UiState::new();
+        state.attachments.push(ImageAttachment {
+            name: "image-1".into(),
+            mime_type: "image/png".into(),
+            base64_data: "aGVsbG8=".into(),
+        });
+        state.selection = Some(Selection::new(selection::TextPosition::new(0, 0)));
+        state.selection.as_mut().unwrap().cursor = selection::TextPosition::new(0, 3);
+
+        assert_eq!(
+            state.handle_editor_event_for_test(key(crossterm::event::KeyCode::Esc)),
+            None
+        );
+        assert!(state.selection.is_none());
+        assert_eq!(state.attachments.len(), 1);
+    }
+
     /// Drive the editor with a real completion: typing `@` opens the popup
     /// and accepting replaces the token without submitting.
     #[test]
@@ -1125,6 +1234,166 @@ mod tests {
         assert_eq!(command, None);
         assert_eq!(state.editor_text(), "@something.txt ");
         assert!(!completion.is_open());
+    }
+
+    /// An open popup showing no matches has nothing to accept, so Enter is the
+    /// editor's and submits the line.
+    #[test]
+    fn enter_submits_when_the_popup_has_no_matches() {
+        let mut state = UiState::new();
+        let mut completion = completion_with(&["alpha.txt"]);
+
+        for character in "@zzz".chars() {
+            state.handle_event(key(KeyCode::Char(character)), &[], &mut completion);
+        }
+        assert!(completion.is_open());
+        assert_eq!(completion.item_count(), 0);
+
+        let command = state.handle_event(key(KeyCode::Enter), &[], &mut completion);
+
+        assert!(matches!(
+            command,
+            Some(Command::Submit { text, .. }) if text == "@zzz"
+        ));
+    }
+
+    fn plain(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    /// Only the `accept` field decides anything, so the text is left empty.
+    fn item(accept: Accept) -> CompletionItem {
+        CompletionItem {
+            display: String::new(),
+            replacement: String::new(),
+            accept,
+        }
+    }
+
+    /// Only Enter on a whole input submits. Tab never does, and neither does
+    /// Enter on a path, which is only ever part of a prompt.
+    #[test]
+    fn only_enter_on_a_whole_input_submits() {
+        let command = item(Accept::Complete);
+        assert_eq!(
+            PopupAction::of(plain(KeyCode::Enter), Some(&command)),
+            Some(PopupAction::Take { submit: true })
+        );
+        assert_eq!(
+            PopupAction::of(plain(KeyCode::Tab), Some(&command)),
+            Some(PopupAction::Take { submit: false })
+        );
+
+        let path = item(Accept::Insert);
+        assert_eq!(
+            PopupAction::of(plain(KeyCode::Enter), Some(&path)),
+            Some(PopupAction::Take { submit: false })
+        );
+    }
+
+    /// Keys the popup declines stay the editor's, which is what keeps Enter
+    /// submitting, Tab indenting, and Shift+Tab toggling plan mode.
+    #[test]
+    fn the_popup_declines_keys_it_cannot_act_on() {
+        // Nothing selected leaves the accepting keys to the editor.
+        assert_eq!(PopupAction::of(plain(KeyCode::Enter), None), None);
+        assert_eq!(PopupAction::of(plain(KeyCode::Tab), None), None);
+
+        let selected = item(Accept::Complete);
+        let shift_tab = KeyEvent::new(KeyCode::Tab, KeyModifiers::SHIFT);
+        assert_eq!(PopupAction::of(shift_tab, Some(&selected)), None);
+
+        // Dismissing never depends on there being something to take.
+        assert_eq!(
+            PopupAction::of(plain(KeyCode::Esc), None),
+            Some(PopupAction::Dismiss)
+        );
+    }
+
+    /// A `/` opening a continuation line is prose, not a command, so the popup
+    /// stays shut and the text submitted is the text that was typed.
+    #[test]
+    fn a_slash_on_a_later_line_is_left_alone() {
+        let mut state = UiState::new();
+        let mut completion = completion_with_commands();
+
+        for character in "hello".chars() {
+            state.handle_event(key(KeyCode::Char(character)), &[], &mut completion);
+        }
+        state.handle_event(
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT)),
+            &[],
+            &mut completion,
+        );
+        for character in "/he".chars() {
+            state.handle_event(key(KeyCode::Char(character)), &[], &mut completion);
+        }
+        assert!(!completion.is_open());
+
+        let command = state.handle_event(key(KeyCode::Enter), &[], &mut completion);
+
+        assert!(matches!(
+            command,
+            Some(Command::Submit { text, .. }) if text == "hello\n/he"
+        ));
+    }
+
+    /// Picking a command is the whole input, so one Enter runs it.
+    #[test]
+    fn slash_completion_runs_on_a_single_enter() {
+        let mut state = UiState::new();
+        let mut completion = completion_with_commands();
+
+        for character in "/he".chars() {
+            state.handle_event(key(KeyCode::Char(character)), &[], &mut completion);
+        }
+        assert!(completion.is_open());
+
+        let command = state.handle_event(key(KeyCode::Enter), &[], &mut completion);
+
+        let Some(Command::Submit { text, .. }) = command else {
+            panic!("expected a submit, got {command:?}");
+        };
+        // The accepted name carries a trailing separator, so it has to parse
+        // with one.
+        assert_eq!(SlashCommand::parse(&text), Some(SlashCommand::Help));
+        assert!(!completion.is_open());
+    }
+
+    /// Tab completes the name without running it, which is what leaves room to
+    /// type an argument after a command that grows one.
+    #[test]
+    fn tab_completes_a_command_without_running_it() {
+        let mut state = UiState::new();
+        let mut completion = completion_with_commands();
+
+        for character in "/he".chars() {
+            state.handle_event(key(KeyCode::Char(character)), &[], &mut completion);
+        }
+        let command = state.handle_event(key(KeyCode::Tab), &[], &mut completion);
+
+        assert_eq!(command, None);
+        assert_eq!(state.editor_text(), "/help ");
+    }
+
+    /// The `runs` flag belongs to the backend that offered the item, so a path
+    /// accepted inside a command line inserts itself and nothing more.
+    #[test]
+    fn accepting_a_path_inside_a_command_does_not_run_the_command() {
+        let mut state = UiState::new();
+        let mut completion = completion_with(&["src/main.rs"]);
+
+        for character in "/plan @src".chars() {
+            state.handle_event(key(KeyCode::Char(character)), &[], &mut completion);
+        }
+        assert!(completion.is_open());
+
+        let command = state.handle_event(key(KeyCode::Enter), &[], &mut completion);
+
+        assert_eq!(command, None, "accepting a mention must not run /plan");
+        // The line parses as `/plan`, so the flag rather than the text is what
+        // keeps it from running.
+        assert_eq!(state.editor_text(), "/plan @src/main.rs ");
     }
 
     /// `TextArea::cursor()` reports columns in characters while the line is

@@ -1,5 +1,5 @@
-use super::Agent;
 use super::event::{AgentEvent, emit_event};
+use super::{Agent, Mode};
 use crate::AgentMessage;
 use crate::agent::persistence;
 use crate::context::AgentContext;
@@ -46,7 +46,9 @@ pub(super) fn spawn_prompt_task(
     let agent = agent.clone();
 
     tokio::spawn(async move {
-        let user_msg = build_user_message(content, images, agent.plan_mode());
+        let mode = agent.mode();
+        let review_intro = mode == Mode::Review && agent.take_review_intro();
+        let user_msg = build_user_message(content, images, mode, review_intro);
         let mut partial = String::new();
         let mut cx = PromptCx {
             events: Some(&tx),
@@ -146,12 +148,12 @@ pub(super) async fn stream_round(
     model: &Model,
     context: &mut AgentContext,
     cx: &mut PromptCx<'_>,
-    plan: bool,
+    mode: Mode,
 ) -> Result<(LlmResponse, Option<Usage>), AgentError> {
     let tools: Vec<_> = context
         .tools
         .iter()
-        .filter(|tool| !plan || tool.read_only || tool.definition.name == "bash")
+        .filter(|tool| mode == Mode::Normal || tool.read_only || tool.definition.name == "bash")
         .map(|tool| ToolSpec::Function(tool.definition.clone()))
         .collect();
 
@@ -258,13 +260,15 @@ fn build_messages(context: &AgentContext) -> Vec<Message> {
     messages
 }
 
-/// Build a user message, applying the plan-mode suffix and optional images.
+/// Build a user message, applying the plan-mode suffix, the review-mode
+/// guidelines, and optional images.
 pub(super) fn build_user_message(
     content: String,
     images: Vec<llm::ImageUrl>,
-    plan_mode: bool,
+    mode: Mode,
+    review_intro: bool,
 ) -> AgentMessage {
-    let text = prompt_content(content, plan_mode);
+    let text = prompt_content(content, mode, review_intro);
     if images.is_empty() {
         AgentMessage::user(text)
     } else {
@@ -272,13 +276,38 @@ pub(super) fn build_user_message(
     }
 }
 
-fn prompt_content(content: impl Into<String>, plan_mode: bool) -> String {
+fn prompt_content(content: impl Into<String>, mode: Mode, review_intro: bool) -> String {
     let content = content.into();
-    if plan_mode {
-        format!("{content}\n\nPlan mode is on, do not edit any files.")
-    } else {
-        content
+    let mut text = match mode {
+        Mode::Plan => format!("{content}\n\n{}", plan_suffix()),
+        _ => content,
+    };
+    if review_intro {
+        text.push_str(&format!("\n\n{}", review_guidelines()));
     }
+    text
+}
+
+fn plan_suffix() -> &'static str {
+    "Plan mode is on, do not edit any files."
+}
+
+/// Guidelines attached to the first user message after review mode is
+/// entered. Appended after the plan suffix when both are active.
+fn review_guidelines() -> &'static str {
+    "Review mode is on, do not edit any files.
+
+Review the code in this project against:
+1. Performance
+2. SOLID, DRY, KISS
+3. Language best practices
+4. Edge cases
+5. Security: input validation, secrets handling, injection, unsafe deserialization
+6. Correctness: error handling, resource cleanup, concurrency and race conditions
+7. Tests: coverage of the change, and do they fail when the code breaks
+8. Readability: naming, function size, comments explain why not what
+9. If something can be done in a better way, describe the best approach in two or three lines
+10. Future scoping"
 }
 
 /// Validate that a prompt carries content: either non-empty text or at

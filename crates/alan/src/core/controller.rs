@@ -3,7 +3,7 @@
 use super::action::{Command, ImageAttachment};
 use super::chat::{ChatController, Entry};
 use super::command::SlashCommand;
-use super::completion::{CompletionController, Paths};
+use super::completion::{Commands, CompletionController, Paths};
 use super::login::{LoginController, LoginState};
 use agent::Agent;
 use llm::Usage;
@@ -76,7 +76,10 @@ impl Controller {
         Self {
             chat: ChatController::new(agent),
             login: LoginController::new(providers, credentials),
-            completion: CompletionController::new(vec![Box::new(Paths::default())]),
+            completion: CompletionController::new(vec![
+                Box::new(Paths::default()),
+                Box::new(Commands::default()),
+            ]),
             overlay: Overlay::None,
         }
     }
@@ -100,8 +103,8 @@ impl Controller {
         }
     }
 
-    pub fn plan_mode(&self) -> bool {
-        self.chat.plan_mode()
+    pub fn mode(&self) -> agent::Mode {
+        self.chat.mode()
     }
 
     pub fn usage(&self) -> Usage {
@@ -161,7 +164,7 @@ impl Controller {
                 false
             }
             Command::TogglePlanMode => {
-                self.chat.toggle_plan_mode();
+                self.chat.toggle_mode();
                 false
             }
         }
@@ -189,7 +192,9 @@ impl Controller {
         if let Some(command) = SlashCommand::parse(&text) {
             match command {
                 SlashCommand::Login => self.open_login(),
-                SlashCommand::Plan => self.chat.toggle_plan_mode(),
+                SlashCommand::Plan => self.chat.set_mode(agent::Mode::Plan),
+                SlashCommand::Review => self.chat.set_mode(agent::Mode::Review),
+                SlashCommand::Normal => self.chat.set_mode(agent::Mode::Normal),
                 SlashCommand::Help => self.chat.push_info(SlashCommand::help()),
             }
             return;
@@ -369,13 +374,41 @@ mod tests {
     #[test]
     fn plan_command_toggles_the_same_state_as_the_shortcut() {
         let mut controller = make_controller();
-        assert!(!controller.plan_mode());
+        assert_eq!(controller.mode(), agent::Mode::Normal);
 
         controller.submit("/plan".into(), vec![]);
-        assert!(controller.plan_mode());
+        assert_eq!(controller.mode(), agent::Mode::Plan);
 
-        controller.submit("/plan".into(), vec![]);
-        assert!(!controller.plan_mode());
+        controller.submit("/normal".into(), vec![]);
+        assert_eq!(controller.mode(), agent::Mode::Normal);
+    }
+
+    #[test]
+    fn review_command_turns_on_review_mode_and_rearms_on_reentry() {
+        let mut controller = make_controller();
+        controller.submit("/review".into(), vec![]);
+        assert_eq!(controller.mode(), agent::Mode::Review);
+
+        controller.submit("/normal".into(), vec![]);
+        assert_eq!(controller.mode(), agent::Mode::Normal);
+
+        controller.submit("/review".into(), vec![]);
+        assert_eq!(controller.mode(), agent::Mode::Review);
+    }
+
+    #[test]
+    fn shift_tab_cycles_normal_plan_review_normal() {
+        let mut controller = make_controller();
+        assert_eq!(controller.mode(), agent::Mode::Normal);
+
+        controller.handle(Command::TogglePlanMode);
+        assert_eq!(controller.mode(), agent::Mode::Plan);
+
+        controller.handle(Command::TogglePlanMode);
+        assert_eq!(controller.mode(), agent::Mode::Review);
+
+        controller.handle(Command::TogglePlanMode);
+        assert_eq!(controller.mode(), agent::Mode::Normal);
     }
 
     /// Submitting a prompt spawns an agent task, so this needs a runtime.

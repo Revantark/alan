@@ -1039,3 +1039,74 @@ fn to_llm_tool_result_without_parts_uses_plain_content() {
     assert_eq!(llm_msg.content.as_deref(), Some("all good"));
     assert!(llm_msg.content_parts.is_none());
 }
+
+async fn first_user_text(a: &Arc<Agent>) -> String {
+    match a.messages().await.first() {
+        Some(AgentMessage::User { text, .. }) => text.clone(),
+        other => panic!("expected user message, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn review_mode_appends_guidelines_to_first_message_only() {
+    let a = agent(model());
+    a.set_mode(Mode::Review);
+
+    a.ask(a.prompt().content("review this"))
+        .unwrap()
+        .into_response()
+        .await
+        .unwrap();
+    let first = first_user_text(&a).await;
+    assert!(first.starts_with("review this"));
+    assert!(first.contains("Review mode is on, do not edit any files."));
+    assert!(first.contains("3. Language best practices"));
+    assert!(first.contains("10. Future scoping"));
+
+    // The guidelines attach only to the first message of the review session.
+    a.ask(a.prompt().content("second"))
+        .unwrap()
+        .into_response()
+        .await
+        .unwrap();
+    match &a.messages().await[2] {
+        AgentMessage::User { text, .. } => assert_eq!(text, "second"),
+        other => panic!("expected user message, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn reentering_review_mode_rearms_the_guidelines() {
+    let a = agent(model());
+    a.set_mode(Mode::Review);
+    a.ask(a.prompt().content("first review pass"))
+        .unwrap()
+        .into_response()
+        .await
+        .unwrap();
+    assert!(first_user_text(&a).await.contains("Review mode is on"));
+
+    a.set_mode(Mode::Normal);
+    a.ask(a.prompt().content("normal"))
+        .unwrap()
+        .into_response()
+        .await
+        .unwrap();
+    match &a.messages().await[2] {
+        AgentMessage::User { text, .. } => assert_eq!(text, "normal"),
+        other => panic!("expected user message, got {other:?}"),
+    }
+
+    a.set_mode(Mode::Review);
+    a.ask(a.prompt().content("second review pass"))
+        .unwrap()
+        .into_response()
+        .await
+        .unwrap();
+    match &a.messages().await[4] {
+        AgentMessage::User { text, .. } => {
+            assert!(text.contains("Review mode is on"))
+        }
+        other => panic!("expected user message, got {other:?}"),
+    }
+}
