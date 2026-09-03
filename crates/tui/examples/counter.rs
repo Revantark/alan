@@ -25,7 +25,7 @@ use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 use tui::context::Context;
 use tui::entity::Entity;
 use tui::keymap::KeyMapper;
-use tui::{ActionStatus, Component, FocusHandle, FocusScope, InputContext, RenderContext, Runtime};
+use tui::{ActionStatus, Component, InputContext, RenderContext, Runtime};
 
 /// Semantic user input for this application.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -82,16 +82,11 @@ impl KeyMapper<Action> for AppKeyMapper {
 struct Counter {
     label: &'static str,
     value: u32,
-    handle: FocusHandle,
 }
 
 impl Counter {
-    fn new(label: &'static str, scope: &mut FocusScope) -> Self {
-        Self {
-            label,
-            value: 0,
-            handle: scope.handle(),
-        }
+    fn new(label: &'static str) -> Self {
+        Self { label, value: 0 }
     }
 
     fn open_confirmation(&mut self, cx: &mut Context<'_, Self, Action, Message>, delta: i32) {
@@ -107,12 +102,6 @@ impl Counter {
     }
 }
 impl Component<Action, Message> for Counter {
-    fn init(&mut self, cx: &mut Context<'_, Self, Action, Message>) {
-        // Bind eagerly so routed input reaches this counter even before it
-        // has ever handled an action.
-        cx.bind_focus(self.handle);
-    }
-
     fn handle_message(&mut self, message: Message, cx: &mut Context<'_, Self, Action, Message>) {
         if let Message::ApplyChange { delta } = message {
             self.apply(delta);
@@ -126,8 +115,6 @@ impl Component<Action, Message> for Counter {
         action: &Action,
         cx: &mut Context<'_, Self, Action, Message>,
     ) -> ActionStatus {
-        // Claim routed input on first contact; binding is idempotent.
-        cx.bind_focus(self.handle);
         match action {
             Action::Increment => {
                 self.open_confirmation(cx, 1);
@@ -141,13 +128,18 @@ impl Component<Action, Message> for Counter {
         }
     }
 
-    fn render(&self, frame: &mut Frame, area: Rect, _cx: &RenderContext<'_, Action, Message>) {
+    fn render(&self, frame: &mut Frame, area: Rect, cx: &RenderContext<'_, Action, Message>) {
+        let style = if cx.is_focused() {
+            Style::default().add_modifier(Modifier::BOLD)
+        } else {
+            Style::default()
+        };
         let line = Line::from(vec![
             Span::styled(
                 format!("{}: ", self.label),
                 Style::default().add_modifier(Modifier::DIM),
             ),
-            Span::raw(self.value.to_string()),
+            Span::styled(self.value.to_string(), style),
         ]);
         frame.render_widget(Paragraph::new(line), area);
     }
@@ -238,7 +230,6 @@ impl Component<Action, Message> for ConfirmOverlay {
 
 /// Root component: owns child entities, routes actions, interprets messages.
 struct Root {
-    scope: FocusScope,
     children: Option<Vec<Entity<Counter>>>,
     status: Option<Entity<Status>>,
 }
@@ -246,7 +237,6 @@ struct Root {
 impl Root {
     fn new() -> Self {
         Self {
-            scope: FocusScope::new(),
             children: None,
             status: None,
         }
@@ -261,18 +251,14 @@ impl Component<Action, Message> for Root {
     fn init(&mut self, cx: &mut Context<'_, Self, Action, Message>) {
         // Insert children before the first frame; their handles are stable
         // afterwards.
-        let mut scope = self.scope.clone();
-        let first_counter = Counter::new("first", &mut scope);
-        let second_counter = Counter::new("second", &mut scope);
-        let first_handle = first_counter.handle;
-        let first = cx.insert(first_counter);
-        let second = cx.insert(second_counter);
+        let first = cx.insert(Counter::new("first"));
+        let second = cx.insert(Counter::new("second"));
         let status = cx.insert(Status {
             text: Self::status_text(),
         });
-        cx.register_scope(scope);
-        // Focus the first counter so routed input reaches it.
-        cx.focus(first_handle);
+        // The root decides focus and the tab order between its children.
+        cx.focus_entity(first);
+        cx.focus_order([first.id(), second.id()]);
         self.children = Some(vec![first, second]);
         self.status = Some(status);
     }
