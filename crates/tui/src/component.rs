@@ -20,7 +20,7 @@ use ratatui::Frame;
 use ratatui::layout::Rect;
 
 use crate::context::Context;
-use crate::entity::{Entity, EntityStore};
+use crate::entity::{Entity, EntityId, EntityStore};
 
 /// Read-only capabilities available during render.
 ///
@@ -29,11 +29,31 @@ use crate::entity::{Entity, EntityStore};
 /// nothing can be mutated from a render pass.
 pub struct RenderContext<'a, A: 'static, M: 'static = ()> {
     pub(crate) store: &'a EntityStore<A, M>,
+    /// The entity that currently holds focus, if any.
+    pub(crate) focused: Option<EntityId>,
+    /// The entity this context renders (None only inside the runtime).
+    pub(crate) entity: Option<EntityId>,
 }
 
 impl<'a, A, M> RenderContext<'a, A, M> {
-    pub(crate) fn new(store: &'a EntityStore<A, M>) -> Self {
-        Self { store }
+    pub(crate) fn new(
+        store: &'a EntityStore<A, M>,
+        focused: Option<EntityId>,
+        entity: Option<EntityId>,
+    ) -> Self {
+        Self {
+            store,
+            focused,
+            entity,
+        }
+    }
+
+    /// Whether the entity being rendered currently holds focus.
+    ///
+    /// Components use this to draw visible focus styling (highlighted
+    /// borders, cursors) without tracking focus state themselves.
+    pub fn is_focused(&self) -> bool {
+        self.entity.is_some() && self.focused == self.entity
     }
 
     /// Render a child entity into `area`.
@@ -46,12 +66,12 @@ impl<'a, A, M> RenderContext<'a, A, M> {
         frame: &mut Frame,
         area: Rect,
     ) {
-        self.store.render_entity(
-            entity.id(),
-            frame,
-            area,
-            &RenderContext { store: self.store },
-        );
+        let cx = RenderContext {
+            store: self.store,
+            focused: self.focused,
+            entity: Some(entity.id()),
+        };
+        self.store.render_entity(entity.id(), frame, area, &cx);
     }
 }
 
@@ -80,9 +100,9 @@ pub enum ActionStatus {
 /// `render` draws the current state into `area`.
 pub trait Component<A: 'static, M: 'static = ()>: 'static {
     /// Called once before the first frame, after the component is
-    /// registered. Use it to insert children, register focus scopes, and
-    /// set initial focus. Entities inserted here are available before the
-    /// first render.
+    /// registered. Use it to insert children and set initial focus with
+    /// [`Context::focus_entity`]. Entities inserted here are available
+    /// before the first render.
     fn init(&mut self, _cx: &mut Context<'_, Self, A, M>)
     where
         Self: Sized,

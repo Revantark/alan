@@ -43,7 +43,6 @@ pub mod terminal;
 pub use app::{Runtime, RuntimeBuilder};
 pub use component::{ActionStatus, Component, RenderContext};
 pub use error::RuntimeError;
-pub use focus::{FocusHandle, FocusScope};
 pub use keymap::{InputContext, KeyMapper, NoopMapper, PassthroughMapper};
 pub use subscription::{Subscription, SubscriptionEvent};
 pub use task::{TaskExecutor, TaskHandle, TokioExecutor};

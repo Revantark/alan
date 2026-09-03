@@ -1,7 +1,6 @@
 //! Asynchronous stream subscriptions owned by a component.
 
 use std::any::Any;
-use std::future::Future;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
@@ -175,43 +174,40 @@ where
     })
 }
 
-pub(crate) fn worker<S, Item, M>(
+pub(crate) async fn worker<S, Item, M>(
     stream: S,
     id: SubscriptionId,
     active: Arc<AtomicBool>,
     mut cancellation: watch::Receiver<bool>,
     sender: UnboundedSender<RuntimeDelivery<M>>,
-) -> impl Future<Output = ()> + Send
-where
+) where
     S: futures_util::Stream<Item = Item> + Send + 'static,
     Item: Send + 'static,
     M: Send + 'static,
 {
-    async move {
-        let mut stream = Box::pin(stream);
-        loop {
-            tokio::select! {
-                changed = cancellation.changed() => {
-                    if changed.is_err() || *cancellation.borrow() { break; }
-                }
-                item = stream.next() => {
-                    match item {
-                        Some(item) => {
-                            if !active.load(Ordering::Acquire) { break; }
-                            if sender.send(RuntimeDelivery::Subscription(SubscriptionDelivery {
+    let mut stream = Box::pin(stream);
+    loop {
+        tokio::select! {
+            changed = cancellation.changed() => {
+                if changed.is_err() || *cancellation.borrow() { break; }
+            }
+            item = stream.next() => {
+                match item {
+                    Some(item) => {
+                        if !active.load(Ordering::Acquire) { break; }
+                        if sender.send(RuntimeDelivery::Subscription(SubscriptionDelivery {
+                            id,
+                            event: SubscriptionDeliveryEvent::Item(Box::new(item)),
+                        })).is_err() { break; }
+                    }
+                    None => {
+                        if active.load(Ordering::Acquire) {
+                            let _ = sender.send(RuntimeDelivery::Subscription(SubscriptionDelivery {
                                 id,
-                                event: SubscriptionDeliveryEvent::Item(Box::new(item)),
-                            })).is_err() { break; }
+                                event: SubscriptionDeliveryEvent::Closed,
+                            }));
                         }
-                        None => {
-                            if active.load(Ordering::Acquire) {
-                                let _ = sender.send(RuntimeDelivery::Subscription(SubscriptionDelivery {
-                                    id,
-                                    event: SubscriptionDeliveryEvent::Closed,
-                                }));
-                            }
-                            break;
-                        }
+                        break;
                     }
                 }
             }

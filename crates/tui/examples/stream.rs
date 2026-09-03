@@ -25,15 +25,13 @@ use std::time::Duration;
 use futures_util::Stream;
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
+use ratatui::style::{Modifier, Style};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use tui::context::Context;
 use tui::entity::Entity;
 use tui::keymap::KeyMapper;
 use tui::subscription::SubscriptionEvent;
-use tui::{
-    ActionStatus, Component, FocusHandle, FocusScope, InputContext, RenderContext, Runtime,
-    Subscription,
-};
+use tui::{ActionStatus, Component, InputContext, RenderContext, Runtime, Subscription};
 
 /// Semantic user input for this application.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -110,7 +108,6 @@ fn token_stream() -> impl Stream<Item = Result<String, String>> + Send + 'static
 /// The subscription handle must be retained for as long as the stream should
 /// run; dropping it (here: when a new stream starts) cancels the stream.
 struct StreamView {
-    handle: FocusHandle,
     generation: u32,
     streamed: String,
     status: String,
@@ -118,9 +115,8 @@ struct StreamView {
 }
 
 impl StreamView {
-    fn new(scope: &mut FocusScope) -> Self {
+    fn new() -> Self {
         Self {
-            handle: scope.handle(),
             generation: 0,
             streamed: String::new(),
             status: "press enter to start a stream".to_owned(),
@@ -188,16 +184,11 @@ impl StreamView {
 }
 
 impl Component<Action, Message> for StreamView {
-    fn init(&mut self, cx: &mut Context<'_, Self, Action, Message>) {
-        cx.bind_focus(self.handle);
-    }
-
     fn handle_action(
         &mut self,
         action: &Action,
         cx: &mut Context<'_, Self, Action, Message>,
     ) -> ActionStatus {
-        cx.bind_focus(self.handle);
         match action {
             Action::Start => {
                 self.start(cx);
@@ -211,8 +202,14 @@ impl Component<Action, Message> for StreamView {
         }
     }
 
-    fn render(&self, frame: &mut Frame, area: Rect, _cx: &RenderContext<'_, Action, Message>) {
+    fn render(&self, frame: &mut Frame, area: Rect, cx: &RenderContext<'_, Action, Message>) {
+        let border_style = if cx.is_focused() {
+            Style::default().add_modifier(Modifier::BOLD)
+        } else {
+            Style::default()
+        };
         let block = Block::default()
+            .border_style(border_style)
             .borders(Borders::ALL)
             .title(format!(" streamed output — {} ", self.status));
         frame.render_widget(
@@ -243,7 +240,6 @@ impl Component<Action, Message> for Status {
 
 /// Root component: owns child entities and interprets messages.
 struct Root {
-    scope: FocusScope,
     view: Option<Entity<StreamView>>,
     status: Option<Entity<Status>>,
 }
@@ -251,7 +247,6 @@ struct Root {
 impl Root {
     fn new() -> Self {
         Self {
-            scope: FocusScope::new(),
             view: None,
             status: None,
         }
@@ -260,15 +255,12 @@ impl Root {
 
 impl Component<Action, Message> for Root {
     fn init(&mut self, cx: &mut Context<'_, Self, Action, Message>) {
-        let mut scope = self.scope.clone();
-        let view = StreamView::new(&mut scope);
-        let view_handle = view.handle;
-        let view = cx.insert(view);
+        let view = cx.insert(StreamView::new());
         let status = cx.insert(Status {
             text: "enter: start stream | esc: cancel | q: quit".to_owned(),
         });
-        cx.register_scope(scope);
-        cx.focus(view_handle);
+        // The root decides focus: routed input starts at the view.
+        cx.focus_entity(view);
         self.view = Some(view);
         self.status = Some(status);
     }

@@ -18,7 +18,7 @@ use reqwest::Client;
 use serde::Deserialize;
 use tui::context::Context;
 use tui::keymap::KeyMapper;
-use tui::{ActionStatus, Component, FocusHandle, InputContext, RenderContext, Runtime};
+use tui::{ActionStatus, Component, InputContext, RenderContext, Runtime};
 
 const MODELS_URL: &str = "https://openrouter.ai/api/v1/models?limit=10";
 
@@ -155,7 +155,6 @@ struct ModelsApp {
     list_state: ListState,
     detail: Option<usize>,
     error: Option<String>,
-    focus: FocusHandle,
 }
 
 impl ModelsApp {
@@ -167,7 +166,6 @@ impl ModelsApp {
             list_state: ListState::default(),
             detail: None,
             error: None,
-            focus: FocusHandle::new(),
         }
     }
 
@@ -217,8 +215,8 @@ impl ModelsApp {
 
 impl Component<Action, Message> for ModelsApp {
     fn init(&mut self, cx: &mut Context<'_, Self, Action, Message>) {
-        cx.bind_focus(self.focus);
-        cx.focus(self.focus);
+        // The app is the root: with nothing focused, actions route straight
+        // here, so no explicit focus is needed.
         self.load_models(cx);
     }
 
@@ -244,7 +242,6 @@ impl Component<Action, Message> for ModelsApp {
         action: &Action,
         cx: &mut Context<'_, Self, Action, Message>,
     ) -> ActionStatus {
-        cx.bind_focus(self.focus);
         match action {
             Action::Quit => {
                 cx.quit();

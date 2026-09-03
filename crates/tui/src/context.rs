@@ -14,7 +14,7 @@ use tokio::sync::mpsc::UnboundedSender;
 
 use crate::component::{ActionStatus, Component};
 use crate::entity::{ComponentSlot, Entity, EntityId, EntityStore};
-use crate::focus::{FocusHandle, FocusId, FocusManager, FocusScope};
+use crate::focus::FocusManager;
 use crate::overlay::OverlayStack;
 use crate::subscription::{
     RuntimeDelivery, Subscription, SubscriptionEvent, SubscriptionId, SubscriptionRecord, handler,
@@ -42,7 +42,6 @@ pub(crate) struct RuntimeState<A, M> {
     pub(crate) subscriptions: HashMap<SubscriptionId, SubscriptionRecord<A, M>>,
     pub(crate) deliveries: VecDeque<RuntimeDelivery<M>>,
     pub(crate) focus: FocusManager,
-    pub(crate) focus_map: HashMap<FocusId, EntityId>,
     pub(crate) parent_map: HashMap<EntityId, EntityId>,
     pub(crate) overlays: OverlayStack,
     pub(crate) pending_overlays: VecDeque<(EntityId, Box<dyn ComponentSlot<A, M>>)>,
@@ -67,7 +66,6 @@ impl<A: 'static, M: 'static> RuntimeState<A, M> {
             subscriptions: HashMap::new(),
             deliveries: VecDeque::new(),
             focus: FocusManager::default(),
-            focus_map: HashMap::new(),
             parent_map: HashMap::new(),
             overlays: OverlayStack::new(),
             pending_overlays: VecDeque::new(),
@@ -130,9 +128,7 @@ impl<A: 'static, M: 'static> RuntimeState<A, M> {
         if let Some(top) = self.overlays.top() {
             return Some(top);
         }
-        self.focus
-            .current()
-            .and_then(|handle| self.focus_map.get(&handle.id()).copied())
+        self.focus.current()
     }
 }
 
@@ -237,40 +233,50 @@ impl<'a, T, A: 'static, M: 'static> Context<'a, T, A, M> {
         self.runtime_state.quit = true;
     }
 
-    /// Set the current focus.
-    pub fn focus(&mut self, handle: FocusHandle) {
-        self.runtime_state.focus.focus(handle);
+    /// Focus an entity so routed input reaches it.
+    ///
+    /// Focus is a containment decision made by the parent: a component does
+    /// not claim focus for itself. Calling this during `init` on a child
+    /// returned by [`Context::insert`] is the normal pattern; the entity
+    /// receives routed input once the current callback completes, when its
+    /// insert is flushed into the entity store.
+    pub fn focus_entity<E>(&mut self, target: Entity<E>) {
+        self.runtime_state.focus.focus(target.id());
         self.runtime_state.dirty = true;
     }
 
-    /// Focus the next handle in the active focus scope.
+    /// Declare the next/previous cycling order among entities.
+    ///
+    /// The order is owned by the entity currently executing a callback
+    /// (typically a parent declaring its children's tab order) and is
+    /// discarded when that entity is removed. Entities removed later are
+    /// filtered out of the order automatically. [`Context::focus_next`] and
+    /// [`Context::focus_prev`] cycle within the order containing the
+    /// currently focused entity; cycling is a no-op until an order exists.
+    pub fn focus_order<I>(&mut self, order: I)
+    where
+        I: IntoIterator<Item = EntityId>,
+    {
+        self.runtime_state
+            .focus
+            .register_order(self.entity.id(), order.into_iter().collect());
+    }
+
+    /// Whether the entity currently executing a callback holds focus.
+    pub fn is_focused(&self) -> bool {
+        self.runtime_state.focus.current() == Some(self.entity.id())
+    }
+
+    /// Focus the next entity in the active entity's declared order.
     pub fn focus_next(&mut self) {
         self.runtime_state.focus.focus_next();
         self.runtime_state.dirty = true;
     }
 
-    /// Focus the previous handle in the active focus scope.
+    /// Focus the previous entity in the active entity's declared order.
     pub fn focus_prev(&mut self) {
         self.runtime_state.focus.focus_prev();
         self.runtime_state.dirty = true;
-    }
-
-    /// Bind a focus handle to this component so routed input reaches it.
-    ///
-    /// Call once when the component first handles an action; rebinding is
-    /// idempotent.
-    pub fn bind_focus(&mut self, handle: FocusHandle) {
-        self.runtime_state
-            .focus_map
-            .insert(handle.id(), self.entity.id());
-    }
-
-    /// Register a focus scope for next/previous cycling.
-    ///
-    /// Create all handles up front (e.g. at component construction), then
-    /// register the scope once.
-    pub fn register_scope(&mut self, scope: FocusScope) {
-        self.runtime_state.focus.register(self.entity.id(), scope);
     }
 
     /// Queue opening an overlay: the component is stored, the current focus

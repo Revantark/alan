@@ -1,204 +1,104 @@
-//! Explicit focus management.
+//! Runtime-internal focus management.
 //!
 //! Focus is application state; Ratatui does not infer it from rendering.
-//! Handles are stable identities, not screen coordinates. The manager tracks
-//! the current focus, supports next/previous within a registered scope, and
-//! saves/restores focus paths around overlays.
+//! Focus targets entities directly: there are no user-facing handles.
+//! A parent explicitly focuses a child with
+//! [`Context::focus_entity`](crate::context::Context::focus_entity) and may
+//! declare a cycling order with
+//! [`Context::focus_order`](crate::context::Context::focus_order).
 //!
-//! Registrations keep their owning entity so focus state can be dropped when
-//! that entity is removed: a closed overlay must leave no focus behind, or
-//! cycling would walk through components that no longer exist.
-
-use std::collections::HashSet;
-use std::fmt;
-use std::sync::atomic::{AtomicU64, Ordering};
+//! The manager tracks the current focus, supports next/previous cycling
+//! within a declared order, and saves/restores focus paths around overlays.
+//! When an entity is removed, every trace of it disappears: its declared
+//! orders are dropped, its entries are filtered from other owners' orders,
+//! and focus paths that point at it are cleared — a closed overlay leaves no
+//! focus behind.
 
 use crate::entity::EntityId;
 
-fn next_counter() -> u64 {
-    static NEXT: AtomicU64 = AtomicU64::new(0);
-    NEXT.fetch_add(1, Ordering::Relaxed)
-}
-
-/// Identity of a focusable control.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct FocusId(u64);
-
-impl fmt::Display for FocusId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "focus-{}", self.0)
-    }
-}
-
-/// Identity of a focus scope (an ordered group of handles).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct ScopeId(u64);
-
-impl ScopeId {
-    fn allocate() -> Self {
-        Self(next_counter())
-    }
-}
-
-/// Stable handle to a focusable component.
-///
-/// Copies cheaply; compare by value. Created through [`FocusScope::handle`]
-/// (ordered, for tab cycling) or [`FocusHandle::new`] (standalone, e.g. for
-/// popups).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct FocusHandle {
-    pub(crate) id: FocusId,
-    pub(crate) scope: ScopeId,
-}
-
-impl FocusHandle {
-    /// Create a standalone handle outside any registered scope.
-    pub fn new() -> Self {
-        Self {
-            id: FocusId(next_counter()),
-            scope: ScopeId(next_counter()),
-        }
-    }
-
-    /// The handle's focus id, used for visible focus styling.
-    pub fn id(&self) -> FocusId {
-        self.id
-    }
-}
-
-impl Default for FocusHandle {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-/// An ordered group of focus handles, cycled with next/previous.
-#[derive(Debug, Clone)]
-pub struct FocusScope {
-    id: ScopeId,
-    handles: Vec<FocusHandle>,
-}
-
-impl Default for FocusScope {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl FocusScope {
-    /// Create an empty scope.
-    pub fn new() -> Self {
-        Self {
-            id: ScopeId::allocate(),
-            handles: Vec::new(),
-        }
-    }
-
-    /// Create and register a handle in this scope, in tab order.
-    pub fn handle(&mut self) -> FocusHandle {
-        let handle = FocusHandle {
-            id: FocusId(next_counter()),
-            scope: self.id,
-        };
-        self.handles.push(handle);
-        handle
-    }
-
-    /// Handles in registration (tab) order.
-    pub fn handles(&self) -> &[FocusHandle] {
-        &self.handles
-    }
-}
-
+/// A cycling order declared by one entity (its children, for example).
 #[derive(Debug)]
-struct RegisteredScope {
+struct RegisteredOrder {
     owner: EntityId,
-    scope: FocusScope,
+    entities: Vec<EntityId>,
 }
 
-/// Runtime focus state: current handle, registered scopes, saved paths.
+/// Runtime focus state: current entity, declared cycling orders, saved paths.
 #[derive(Debug, Default)]
 pub(crate) struct FocusManager {
-    scopes: Vec<RegisteredScope>,
-    current: Option<FocusHandle>,
-    saved: Vec<Option<FocusHandle>>,
+    orders: Vec<RegisteredOrder>,
+    current: Option<EntityId>,
+    saved: Vec<Option<EntityId>>,
 }
 
 impl FocusManager {
-    /// Register a scope so its handles participate in next/previous cycling.
-    pub(crate) fn register(&mut self, owner: EntityId, scope: FocusScope) {
-        self.scopes.push(RegisteredScope { owner, scope });
+    /// Register a cycling order owned by `owner`.
+    pub(crate) fn register_order(&mut self, owner: EntityId, entities: Vec<EntityId>) {
+        self.orders.push(RegisteredOrder { owner, entities });
     }
 
-    /// Remove all state associated with an entity owner.
-    pub(crate) fn remove_entity(&mut self, owner: EntityId) {
-        let removed_scope_ids: HashSet<ScopeId> = self
-            .scopes
-            .iter()
-            .filter(|registered| registered.owner == owner)
-            .map(|registered| registered.scope.id)
-            .collect();
-        self.scopes.retain(|registered| registered.owner != owner);
-        if self
-            .current
-            .is_some_and(|handle| removed_scope_ids.contains(&handle.scope))
-        {
+    /// Remove every trace of an entity: orders it owns, entries pointing at
+    /// it, and focus paths that reference it.
+    pub(crate) fn remove_entity(&mut self, id: EntityId) {
+        for order in &mut self.orders {
+            order.entities.retain(|entity| *entity != id);
+        }
+        self.orders
+            .retain(|order| order.owner != id && !order.entities.is_empty());
+        if self.current == Some(id) {
             self.current = None;
         }
         for saved in &mut self.saved {
-            if saved.is_some_and(|handle| removed_scope_ids.contains(&handle.scope)) {
+            if *saved == Some(id) {
                 *saved = None;
             }
         }
     }
 
-    /// The scope registered for a handle, if any.
-    fn scope_of(&self, handle: &FocusHandle) -> Option<&FocusScope> {
-        self.scopes
-            .iter()
-            .find(|s| s.scope.id == handle.scope)
-            .map(|s| &s.scope)
-    }
-
     /// Set the current focus.
-    pub(crate) fn focus(&mut self, handle: FocusHandle) {
-        self.current = Some(handle);
+    pub(crate) fn focus(&mut self, id: EntityId) {
+        self.current = Some(id);
     }
 
-    /// The currently focused handle, if any.
-    pub(crate) fn current(&self) -> Option<FocusHandle> {
+    /// The currently focused entity, if any.
+    pub(crate) fn current(&self) -> Option<EntityId> {
         self.current
     }
 
-    /// Focus the next handle in the current handle's scope (wrapping).
-    /// With no current focus, focuses the first registered handle.
+    /// Focus the next entity in the active entity's declared order (wrapping).
+    /// With no current focus, focuses the first entity of the first order.
     pub(crate) fn focus_next(&mut self) {
         self.cycle(1);
     }
 
-    /// Focus the previous handle in the current handle's scope (wrapping).
+    /// Focus the previous entity in the active entity's declared order
+    /// (wrapping).
     pub(crate) fn focus_prev(&mut self) {
         self.cycle(-1);
     }
 
     fn cycle(&mut self, direction: isize) {
         let Some(current) = self.current else {
-            if let Some(handle) = self.scopes.first().and_then(|s| s.scope.handles.first()) {
-                self.current = Some(*handle);
+            if let Some(order) = self.orders.first() {
+                self.current = order.entities.first().copied();
             }
             return;
         };
-        let Some(scope) = self.scope_of(&current) else {
+        let Some(entities) = self
+            .orders
+            .iter()
+            .find(|order| order.entities.contains(&current))
+            .map(|order| &order.entities)
+        else {
             return;
         };
-        let handles = &scope.handles;
-        if handles.is_empty() {
-            return;
-        }
-        let index = handles.iter().position(|h| h.id == current.id).unwrap_or(0);
-        let count = handles.len() as isize;
+        let index = entities
+            .iter()
+            .position(|entity| *entity == current)
+            .unwrap_or(0);
+        let count = entities.len() as isize;
         let next = (index as isize + direction).rem_euclid(count) as usize;
-        self.current = Some(handles[next]);
+        self.current = Some(entities[next]);
     }
 
     /// Save the current focus path (before opening an overlay).
@@ -216,64 +116,74 @@ impl FocusManager {
 mod tests {
     use super::*;
 
-    fn manager() -> FocusManager {
-        let mut scope = FocusScope::new();
-        let _a = scope.handle();
-        let _b = scope.handle();
-        let _c = scope.handle();
+    fn order() -> (EntityId, EntityId, EntityId, FocusManager) {
+        let owner = EntityId::allocate();
+        let (a, b, c) = (
+            EntityId::allocate(),
+            EntityId::allocate(),
+            EntityId::allocate(),
+        );
         let mut manager = FocusManager::default();
-        manager.register(EntityId::from_u64(0), scope);
-        manager
+        manager.register_order(owner, vec![a, b, c]);
+        (a, b, c, manager)
     }
 
     #[test]
-    fn handles_are_unique() {
-        let mut scope = FocusScope::new();
-        let a = scope.handle();
-        let b = scope.handle();
-        assert_ne!(a, b);
-        assert_eq!(scope.handles().len(), 2);
-    }
-
-    #[test]
-    fn no_focus_starts_first_handle_on_next() {
-        let mut manager = manager();
+    fn no_focus_starts_first_entity_on_next() {
+        let (a, _, _, mut manager) = order();
         assert_eq!(manager.current(), None);
         manager.focus_next();
-        let first = manager.current().unwrap();
+        assert_eq!(manager.current(), Some(a));
         manager.focus_next();
         manager.focus_next();
         manager.focus_next();
-        assert_eq!(manager.current(), Some(first), "cycles back to first");
+        assert_eq!(manager.current(), Some(a), "cycles back to first");
     }
 
     #[test]
     fn focus_prev_wraps_backwards() {
-        let mut manager = manager();
+        let (a, _, c, mut manager) = order();
         manager.focus_next();
-        let first = manager.current().unwrap();
         manager.focus_prev();
-        let last = manager.current().unwrap();
-        assert_ne!(first, last);
+        assert_eq!(manager.current(), Some(c));
         manager.focus_next();
-        assert_eq!(manager.current(), Some(first));
+        assert_eq!(manager.current(), Some(a));
     }
 
     #[test]
-    fn explicit_focus_then_cycle() {
-        let mut manager = manager();
-        let mut scope = FocusScope::new();
-        let handle = scope.handle();
-        manager.focus(handle);
-        assert_eq!(manager.current(), Some(handle));
-        // Handle's scope is unregistered: cycling is a no-op.
+    fn explicit_focus_outside_any_order_does_not_cycle() {
+        let (_, _, _, mut manager) = order();
+        let standalone = EntityId::allocate();
+        manager.focus(standalone);
+        assert_eq!(manager.current(), Some(standalone));
         manager.focus_next();
-        assert_eq!(manager.current(), Some(handle));
+        assert_eq!(manager.current(), Some(standalone));
+    }
+
+    #[test]
+    fn cycles_within_the_order_containing_the_current_entity() {
+        let (_, _, _, mut manager) = order();
+        let owner = EntityId::allocate();
+        let (x, y) = (EntityId::allocate(), EntityId::allocate());
+        manager.register_order(owner, vec![x, y]);
+        let standalone = EntityId::allocate();
+        manager.focus(standalone);
+        manager.focus_next();
+        assert_eq!(manager.current(), Some(standalone), "no order contains it");
+        manager.focus(x);
+        manager.focus_next();
+        assert_eq!(manager.current(), Some(y));
+        manager.focus_next();
+        assert_eq!(
+            manager.current(),
+            Some(x),
+            "wraps within x/y, not into a/b/c"
+        );
     }
 
     #[test]
     fn save_and_restore() {
-        let mut manager = manager();
+        let (_, _, _, mut manager) = order();
         manager.focus_next();
         let before = manager.current();
         manager.save();
@@ -284,38 +194,38 @@ mod tests {
     }
 
     #[test]
-    fn removing_scope_owner_removes_it_from_cycling() {
-        let owner = EntityId::from_u64(42);
-        let mut scope = FocusScope::new();
-        let handle = scope.handle();
+    fn removing_entity_drops_its_orders_and_references() {
+        let owner = EntityId::allocate();
+        let a = EntityId::allocate();
         let mut manager = FocusManager::default();
-        manager.register(owner, scope);
-        manager.focus(handle);
-        manager.remove_entity(owner);
-        manager.focus_next();
+        manager.register_order(owner, vec![a]);
+        manager.focus(a);
+        manager.remove_entity(a);
         assert_eq!(manager.current(), None);
     }
 
     #[test]
-    fn removed_scope_is_cleared_from_saved_focus() {
-        let owner = EntityId::from_u64(43);
-        let mut scope = FocusScope::new();
-        let handle = scope.handle();
+    fn removing_entity_cleans_it_from_other_owners_orders() {
+        let owner = EntityId::allocate();
+        let (a, b) = (EntityId::allocate(), EntityId::allocate());
         let mut manager = FocusManager::default();
-        manager.register(owner, scope);
-        manager.focus(handle);
+        manager.register_order(owner, vec![a, b]);
+        manager.focus(b);
+        manager.remove_entity(a);
+        manager.focus_prev();
+        assert_eq!(manager.current(), Some(b));
+    }
+
+    #[test]
+    fn removing_entity_clears_saved_focus() {
+        let owner = EntityId::allocate();
+        let a = EntityId::allocate();
+        let mut manager = FocusManager::default();
+        manager.register_order(owner, vec![a]);
+        manager.focus(a);
         manager.save();
-        manager.remove_entity(owner);
+        manager.remove_entity(a);
         manager.restore();
         assert_eq!(manager.current(), None);
-    }
-
-    #[test]
-    fn detached_handles_do_not_cycle() {
-        let mut manager = FocusManager::default();
-        let handle = FocusHandle::new();
-        manager.focus(handle);
-        manager.focus_next();
-        assert_eq!(manager.current(), Some(handle));
     }
 }

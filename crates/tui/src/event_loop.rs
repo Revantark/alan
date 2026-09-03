@@ -119,7 +119,6 @@ fn remove_entity_tree<A: 'static, M: 'static>(
 
     for id in removed {
         core.focus.remove_entity(id);
-        core.focus_map.retain(|_, owner| *owner != id);
         core.parent_map.remove(&id);
         store.remove_entity(id);
     }
@@ -214,9 +213,10 @@ where
             flush_requests(&mut runtime_state, &mut store);
 
             if runtime_state.take_dirty() {
-                guard
-                    .terminal()
-                    .draw(|frame| render::draw(root, &runtime_state.overlays, &store, frame))?;
+                let focused = runtime_state.focus.current();
+                guard.terminal().draw(|frame| {
+                    render::draw(root, &runtime_state.overlays, &store, frame, focused)
+                })?;
             }
         }
 
@@ -384,13 +384,11 @@ mod tests {
             calls: Arc::clone(&calls),
             propagation: ActionStatus::Handled,
         });
-        let handle = crate::FocusHandle::new();
         let (sender, _receiver) = mpsc::unbounded_channel();
         let mut core = RuntimeState::new(sender, Arc::new(crate::task::TokioExecutor));
         core.parent_map.insert(focused.id(), root.id());
         core.parent_map.insert(sibling.id(), root.id());
-        core.focus_map.insert(handle.id(), focused.id());
-        core.focus.focus(handle);
+        core.focus.focus(focused.id());
 
         dispatch(&TestAction, &mut core, &store, root.id());
 
@@ -488,32 +486,18 @@ mod tests {
 
     struct OverlayProbe {
         initialized: Arc<AtomicUsize>,
-        handle: crate::FocusHandle,
-        scope: crate::FocusScope,
         opens_child: bool,
-    }
-
-    impl OverlayProbe {
-        fn new(initialized: Arc<AtomicUsize>, opens_child: bool) -> Self {
-            let mut scope = crate::FocusScope::new();
-            let handle = scope.handle();
-            Self {
-                initialized,
-                handle,
-                scope,
-                opens_child,
-            }
-        }
     }
 
     impl Component<TestAction, ()> for OverlayProbe {
         fn init(&mut self, cx: &mut Context<'_, Self, TestAction, ()>) {
             self.initialized.fetch_add(1, Ordering::SeqCst);
-            cx.register_scope(self.scope.clone());
-            cx.bind_focus(self.handle);
-            cx.focus(self.handle);
+            cx.focus_entity(cx.entity());
             if self.opens_child {
-                cx.open_overlay(Self::new(Arc::clone(&self.initialized), false));
+                cx.open_overlay(Self {
+                    initialized: Arc::clone(&self.initialized),
+                    opens_child: false,
+                });
             }
         }
 
@@ -526,8 +510,10 @@ mod tests {
         let mut store = EntityStore::new();
         let initialized = Arc::new(AtomicUsize::new(0));
         let outer_id = EntityId::allocate();
-        let outer = OverlayProbe::new(Arc::clone(&initialized), true);
-        let outer_handle = outer.handle;
+        let outer = OverlayProbe {
+            initialized: Arc::clone(&initialized),
+            opens_child: true,
+        };
         let mut core = core_for();
         core.pending_overlays.push_back((
             outer_id,
@@ -541,11 +527,12 @@ mod tests {
         let inner_id = core.overlays.top().expect("nested overlay is active");
         assert!(store.contains(outer_id));
         assert!(store.contains(inner_id));
-        assert_ne!(core.focus.current(), Some(outer_handle));
+        // The innermost overlay focused itself last, so it holds focus.
+        assert_eq!(core.focus.current(), Some(inner_id));
 
         core.pending_closes = 1;
         flush_requests(&mut core, &mut store);
-        assert_eq!(core.focus.current(), Some(outer_handle));
+        assert_eq!(core.focus.current(), Some(outer_id));
         assert!(store.contains(outer_id));
         assert!(!store.contains(inner_id));
 
@@ -553,20 +540,18 @@ mod tests {
         flush_requests(&mut core, &mut store);
         assert!(core.overlays.overlays().is_empty());
         assert!(!store.contains(outer_id));
-        assert!(!store.contains(inner_id));
-        assert!(core.focus_map.is_empty());
-        assert!(core.focus.current().is_none());
+        assert_eq!(core.focus.current(), None);
     }
 
     #[test]
     fn closing_without_an_overlay_does_not_restore_focus() {
         let mut core = core_for::<TestAction, ()>();
-        let handle = crate::FocusHandle::new();
-        core.focus.focus(handle);
+        let focused = EntityId::allocate();
+        core.focus.focus(focused);
         core.pending_closes = 1;
         let mut store = EntityStore::new();
         flush_requests(&mut core, &mut store);
-        assert_eq!(core.focus.current(), Some(handle));
+        assert_eq!(core.focus.current(), Some(focused));
     }
 
     #[test]
