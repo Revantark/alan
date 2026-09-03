@@ -38,11 +38,7 @@ impl Greet {
 }
 
 impl Component<Event> for Greet {
-    fn handle_action(
-        &mut self,
-        event: &Event,
-        cx: &mut Context<'_, Self, Event, ()>,
-    ) -> ActionStatus {
+    fn handle_action(&mut self, event: &Event, cx: &mut Context<'_, Self, Event>) -> ActionStatus {
         let Event::Key(key) = event else {
             return ActionStatus::Handled;
         };
@@ -79,7 +75,7 @@ impl Component<Event> for Greet {
         ActionStatus::Handled
     }
 
-    fn render(&self, frame: &mut Frame, area: Rect, _cx: &RenderContext<'_, Event, ()>) {
+    fn render(&self, frame: &mut Frame, area: Rect, _cx: &RenderContext<'_, Event>) {
         let [header, messages, input] = Layout::vertical([
             Constraint::Length(1),
             Constraint::Min(1),

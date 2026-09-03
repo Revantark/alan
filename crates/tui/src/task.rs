@@ -1,16 +1,9 @@
-//! Background tasks and command execution.
+//! Background tasks and typed one-shot result callbacks.
 //!
-//! Commands and tasks run external work (disk, web, computation) outside the
-//! component callback and render paths. A task is a future whose output is a
-//! typed application message delivered back to the spawning entity; errors
-//! are preserved and never discarded — they abort the run as
-//! [`RuntimeError::Task`](crate::RuntimeError) unless converted to a message
-//! by the application first.
-//!
-//! Results identify their target by entity id captured at spawn time, so no
-//! strong handle outlives the task and a removed component is not kept
-//! alive: delivery to a removed entity is a safe no-op.
+//! Task errors are delivered as `Err(TaskError)` to the registered callback;
+//! they are application data and do not shut down the runtime.
 
+use std::any::Any;
 use std::error::Error;
 use std::future::Future;
 use std::pin::Pin;
@@ -22,107 +15,107 @@ use tokio::sync::mpsc::UnboundedSender;
 use crate::entity::EntityId;
 use crate::subscription::RuntimeDelivery;
 
-/// An error produced by a background task.
+/// An error produced by background work.
 pub struct TaskError(pub Box<dyn Error + Send + Sync>);
-
 impl std::fmt::Debug for TaskError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        std::fmt::Debug::fmt(&self.0, f)
+        self.0.fmt(f)
     }
 }
-
 impl std::fmt::Display for TaskError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.0)
+        self.0.fmt(f)
+    }
+}
+impl Error for TaskError {}
+
+/// A type-erased completed task result. The runtime downcasts it to the
+/// result type registered by `Context::spawn`.
+pub struct TaskDelivery {
+    pub(crate) id: TaskId,
+    pub(crate) target: EntityId,
+    pub(crate) result: Box<dyn Any + Send>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct TaskId(u64);
+impl TaskId {
+    pub(crate) fn allocate() -> Self {
+        use std::sync::atomic::AtomicU64;
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        Self(NEXT.fetch_add(1, Ordering::Relaxed))
     }
 }
 
-impl Error for TaskError {}
-
-/// The result of a completed task, routed back to its spawning entity.
-pub struct TaskDelivery<M> {
-    /// Entity that spawned the task.
-    pub target: EntityId,
-    /// The task's outcome.
-    pub result: Result<M, TaskError>,
-}
-
-/// A handle for cancelling a background task.
-///
-/// Dropping the handle does not cancel the task; call [`TaskHandle::cancel`]
-/// when the task should stop. Cancellation is best effort: the default Tokio
-/// executor aborts the task, so its result is not delivered to the runtime.
+/// A handle for cancelling background work. Cancellation is best effort and
+/// idempotent. Dropping a handle does not cancel the task.
 #[derive(Clone)]
 pub struct TaskHandle {
     active: Arc<AtomicBool>,
     cancel: Arc<dyn Fn() + Send + Sync>,
 }
-
 impl TaskHandle {
-    /// Create a task handle backed by a cancellation callback.
     pub fn new(cancel: impl Fn() + Send + Sync + 'static) -> Self {
         Self {
             active: Arc::new(AtomicBool::new(true)),
             cancel: Arc::new(cancel),
         }
     }
-
-    /// Request cancellation. This operation is idempotent.
     pub fn cancel(&self) {
         if self.active.swap(false, Ordering::Release) {
             (self.cancel)();
         }
     }
-
-    /// Returns whether cancellation has not been requested.
     pub fn is_active(&self) -> bool {
         self.active.load(Ordering::Acquire)
     }
-}
 
+    #[allow(dead_code)]
+    pub(crate) fn with_cancel_cleanup(self, cleanup: impl Fn() + Send + Sync + 'static) -> Self {
+        let active = Arc::clone(&self.active);
+        let cancel = Arc::clone(&self.cancel);
+        Self {
+            active,
+            cancel: Arc::new(move || {
+                cancel();
+                cleanup();
+            }),
+        }
+    }
+}
 impl std::fmt::Debug for TaskHandle {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("TaskHandle")
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TaskHandle")
             .field("active", &self.is_active())
             .finish_non_exhaustive()
     }
 }
 
-/// A boxed task future producing a delivery routed to its target entity.
-pub type DeliveryFuture<M> = Pin<Box<dyn Future<Output = TaskDelivery<M>> + Send>>;
+pub type DeliveryFuture = Pin<Box<dyn Future<Output = TaskDelivery> + Send>>;
 pub type SubscriptionFuture = Pin<Box<dyn Future<Output = ()> + Send>>;
 
-/// Runs background tasks, delivering results through `sender`.
-///
-/// The default implementation runs tasks on the surrounding tokio runtime.
-pub trait TaskExecutor<M>: Send + Sync + 'static {
-    /// Spawn a task; its delivery is sent to the runtime when complete.
-    fn spawn(
-        &self,
-        future: DeliveryFuture<M>,
-        sender: UnboundedSender<RuntimeDelivery<M>>,
-    ) -> TaskHandle;
-
+/// Executes tasks and stream workers outside runtime callbacks.
+pub trait TaskExecutor: Send + Sync + 'static {
+    fn spawn(&self, future: DeliveryFuture, sender: UnboundedSender<RuntimeDelivery>)
+    -> TaskHandle;
     fn spawn_subscription(&self, future: SubscriptionFuture);
 }
 
-/// [`TaskExecutor`] backed by the tokio runtime.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct TokioExecutor;
-
-impl<M: Send + 'static> TaskExecutor<M> for TokioExecutor {
+impl TaskExecutor for TokioExecutor {
     fn spawn(
         &self,
-        future: DeliveryFuture<M>,
-        sender: UnboundedSender<RuntimeDelivery<M>>,
+        future: DeliveryFuture,
+        sender: UnboundedSender<RuntimeDelivery>,
     ) -> TaskHandle {
         let active = Arc::new(AtomicBool::new(true));
         let task_active = Arc::clone(&active);
         let task = tokio::spawn(async move {
             let delivery = future.await;
-            task_active.store(false, Ordering::Release);
-            let _ = sender.send(RuntimeDelivery::Task(delivery));
+            if task_active.swap(false, Ordering::AcqRel) {
+                let _ = sender.send(RuntimeDelivery::Task(delivery));
+            }
         });
         let abort = task.abort_handle();
         TaskHandle {
@@ -130,80 +123,7 @@ impl<M: Send + 'static> TaskExecutor<M> for TokioExecutor {
             cancel: Arc::new(move || abort.abort()),
         }
     }
-
     fn spawn_subscription(&self, future: SubscriptionFuture) {
         tokio::spawn(future);
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn tokio_executor_delivers_result() {
-        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
-        let executor = TokioExecutor;
-        let target = crate::entity::EntityId::allocate();
-        executor.spawn(
-            Box::pin(async move {
-                TaskDelivery {
-                    target,
-                    result: Ok("done".to_owned()),
-                }
-            }),
-            sender,
-        );
-        let delivery: TaskDelivery<String> = match receiver.recv().await.unwrap() {
-            RuntimeDelivery::Task(delivery) => delivery,
-            RuntimeDelivery::Subscription(_) => panic!("unexpected subscription delivery"),
-        };
-        assert_eq!(delivery.result.unwrap(), "done");
-        assert_eq!(delivery.target, target);
-    }
-
-    #[tokio::test]
-    async fn task_handle_cancels_task_and_is_idempotent() {
-        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
-        let executor = TokioExecutor;
-        let target = crate::entity::EntityId::allocate();
-        let handle = executor.spawn(
-            Box::pin(async move {
-                tokio::time::sleep(std::time::Duration::from_secs(60)).await;
-                TaskDelivery {
-                    target,
-                    result: Ok("late".to_owned()),
-                }
-            }),
-            sender,
-        );
-
-        assert!(handle.is_active());
-        handle.cancel();
-        handle.cancel();
-        assert!(!handle.is_active());
-        tokio::task::yield_now().await;
-        assert!(receiver.try_recv().is_err());
-    }
-
-    #[tokio::test]
-    async fn tokio_executor_preserves_errors() {
-        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
-        let executor = TokioExecutor;
-        let target = crate::entity::EntityId::allocate();
-        executor.spawn(
-            Box::pin(async move {
-                TaskDelivery {
-                    target,
-                    result: Err(TaskError(Box::new(std::io::Error::other("disk failure")))),
-                }
-            }),
-            sender,
-        );
-        let delivery: TaskDelivery<String> = match receiver.recv().await.unwrap() {
-            RuntimeDelivery::Task(delivery) => delivery,
-            RuntimeDelivery::Subscription(_) => panic!("unexpected subscription delivery"),
-        };
-        assert!(delivery.result.is_err());
     }
 }

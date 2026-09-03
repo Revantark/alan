@@ -18,7 +18,7 @@ use reqwest::Client;
 use serde::Deserialize;
 use tui::context::Context;
 use tui::keymap::KeyMapper;
-use tui::{ActionStatus, Component, InputContext, RenderContext, Runtime};
+use tui::{ActionStatus, Component, InputContext, RenderContext, Runtime, TaskError};
 
 const MODELS_URL: &str = "https://openrouter.ai/api/v1/models?limit=10";
 
@@ -29,11 +29,6 @@ enum Action {
     Down,
     Open,
     Back,
-}
-
-#[derive(Debug)]
-enum Message {
-    ModelsLoaded(Result<Vec<Model>, String>),
 }
 
 struct AppKeyMapper;
@@ -169,24 +164,37 @@ impl ModelsApp {
         }
     }
 
-    fn load_models(&mut self, cx: &mut Context<'_, Self, Action, Message>) {
-        cx.spawn(async {
-            let result = async {
+    fn load_models(&mut self, cx: &mut Context<'_, Self, Action>) {
+        cx.spawn(
+            async {
                 let response = Client::new()
                     .get(MODELS_URL)
                     .send()
                     .await
-                    .map_err(|error| format!("request failed: {error}"))?
+                    .map_err(|error| TaskError(Box::new(error)))?
                     .error_for_status()
-                    .map_err(|error| format!("OpenRouter returned an error: {error}"))?
+                    .map_err(|error| TaskError(Box::new(error)))?
                     .json::<ModelsResponse>()
                     .await
-                    .map_err(|error| format!("invalid models response: {error}"))?;
+                    .map_err(|error| TaskError(Box::new(error)))?;
                 Ok(response.data)
-            }
-            .await;
-            Ok(Message::ModelsLoaded(result))
-        });
+            },
+            |result, app, cx| {
+                match result {
+                    Ok(models) => {
+                        app.models = models;
+                        app.screen = Screen::List;
+                        app.error = None;
+                        app.select(0);
+                    }
+                    Err(error) => {
+                        app.screen = Screen::Error;
+                        app.error = Some(error.to_string());
+                    }
+                }
+                cx.notify();
+            },
+        );
     }
 
     fn select(&mut self, index: usize) {
@@ -213,34 +221,17 @@ impl ModelsApp {
     }
 }
 
-impl Component<Action, Message> for ModelsApp {
-    fn init(&mut self, cx: &mut Context<'_, Self, Action, Message>) {
+impl Component<Action> for ModelsApp {
+    fn init(&mut self, cx: &mut Context<'_, Self, Action>) {
         // The app is the root: with nothing focused, actions route straight
         // here, so no explicit focus is needed.
         self.load_models(cx);
     }
 
-    fn handle_message(&mut self, message: Message, cx: &mut Context<'_, Self, Action, Message>) {
-        let Message::ModelsLoaded(result) = message;
-        match result {
-            Ok(models) => {
-                self.models = models;
-                self.screen = Screen::List;
-                self.error = None;
-                self.select(0);
-            }
-            Err(error) => {
-                self.screen = Screen::Error;
-                self.error = Some(error);
-            }
-        }
-        cx.notify();
-    }
-
     fn handle_action(
         &mut self,
         action: &Action,
-        cx: &mut Context<'_, Self, Action, Message>,
+        cx: &mut Context<'_, Self, Action>,
     ) -> ActionStatus {
         match action {
             Action::Quit => {
@@ -273,7 +264,7 @@ impl Component<Action, Message> for ModelsApp {
         }
     }
 
-    fn render(&self, frame: &mut Frame, area: Rect, _cx: &RenderContext<'_, Action, Message>) {
+    fn render(&self, frame: &mut Frame, area: Rect, _cx: &RenderContext<'_, Action>) {
         match self.screen {
             Screen::Loading => render_loading(frame, area),
             Screen::List => self.render_list(frame, area),

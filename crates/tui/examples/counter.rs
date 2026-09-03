@@ -1,33 +1,25 @@
-//! Counter example demonstrating component-owned behavior:
+//! Counter example demonstrating explicit communication:
 //!
 //! ```text
-//! init -> first frame
-//! key press -> KeyMapper -> Action -> focused Counter
-//! -> Counter opens a confirmation overlay
-//! -> overlay sends ApplyChange to Counter or closes as cancelled
-//! -> Counter owns its state change -> root updates status
+//! keypress -> Action -> focused Counter -> confirmation overlay
+//! overlay -> typed ConfirmResult event -> Counter -> notify/observe -> redraw
 //! ```
 //!
-//! Two counters live in the entity store; the root inserts them in `init`,
-//! so the first frame already shows content. `+`/`-` are handled by the
-//! focused counter, which opens its own confirmation overlay. The overlay
-//! sends the confirmed change directly back to that counter, so the root does
-//! not know about the modal lifecycle or the counter's private state. `s`
-//! spawns a simulated save task whose result is delivered to the root.
-
-use std::time::Duration;
+//! The confirmation result is an occurrence, so it uses a typed event rather
+//! than a global message bus. The root observes each counter's state and reads
+//! it again to derive the status text.
 
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
+use std::time::Duration;
 use tui::context::Context;
 use tui::entity::Entity;
 use tui::keymap::KeyMapper;
-use tui::{ActionStatus, Component, InputContext, RenderContext, Runtime};
+use tui::{ActionStatus, Component, InputContext, RenderContext, Runtime, Subscription, TaskError};
 
-/// Semantic user input for this application.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Action {
     Quit,
@@ -39,29 +31,17 @@ enum Action {
     FocusNext,
 }
 
-/// Messages used by the example components.
 #[derive(Debug)]
-enum Message {
-    /// Root-owned save task result.
-    Saved(Result<(), String>),
-    /// Confirmation overlay -> counter.
-    ApplyChange { delta: i32 },
-    /// Counter -> root: the value changed.
-    Changed { value: u32 },
-    /// Root -> Status.
-    SetStatus(String),
-    /// Confirmation overlay -> root.
-    ChangeCancelled,
+enum ConfirmResult {
+    Accepted { delta: i32 },
+    Cancelled,
 }
 
 struct AppKeyMapper;
-
 impl KeyMapper<Action> for AppKeyMapper {
-    fn map(&self, event: &crossterm::event::Event, _context: &InputContext) -> Option<Action> {
+    fn map(&self, event: &crossterm::event::Event, _: &InputContext) -> Option<Action> {
         use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers};
-        let Event::Key(key) = event else {
-            return None;
-        };
+        let Event::Key(key) = event else { return None };
         if key.kind != KeyEventKind::Press {
             return None;
         }
@@ -82,38 +62,38 @@ impl KeyMapper<Action> for AppKeyMapper {
 struct Counter {
     label: &'static str,
     value: u32,
+    confirmation: Option<Subscription>,
 }
-
 impl Counter {
     fn new(label: &'static str) -> Self {
-        Self { label, value: 0 }
-    }
-
-    fn open_confirmation(&mut self, cx: &mut Context<'_, Self, Action, Message>, delta: i32) {
-        cx.open_overlay(ConfirmOverlay {
-            counter: cx.entity(),
-            delta,
-        });
-    }
-
-    fn apply(&mut self, delta: i32) -> u32 {
-        self.value = (self.value as i32 + delta).max(0) as u32;
-        self.value
-    }
-}
-impl Component<Action, Message> for Counter {
-    fn handle_message(&mut self, message: Message, cx: &mut Context<'_, Self, Action, Message>) {
-        if let Message::ApplyChange { delta } = message {
-            self.apply(delta);
-            cx.notify();
-            cx.emit(Message::Changed { value: self.value });
+        Self {
+            label,
+            value: 0,
+            confirmation: None,
         }
     }
-
+    fn open_confirmation(&mut self, cx: &mut Context<'_, Self, Action>, delta: i32) {
+        let overlay = cx.open_overlay(ConfirmOverlay { delta });
+        self.confirmation = Some(cx.subscribe::<ConfirmResult, _, _>(
+            overlay,
+            |result, counter, _, cx| {
+                match result {
+                    ConfirmResult::Accepted { delta } => {
+                        counter.value = (counter.value as i32 + delta).max(0) as u32;
+                    }
+                    ConfirmResult::Cancelled => {}
+                }
+                counter.confirmation = None;
+                cx.notify();
+            },
+        ));
+    }
+}
+impl Component<Action> for Counter {
     fn handle_action(
         &mut self,
         action: &Action,
-        cx: &mut Context<'_, Self, Action, Message>,
+        cx: &mut Context<'_, Self, Action>,
     ) -> ActionStatus {
         match action {
             Action::Increment => {
@@ -127,146 +107,130 @@ impl Component<Action, Message> for Counter {
             _ => ActionStatus::Continue,
         }
     }
-
-    fn render(&self, frame: &mut Frame, area: Rect, cx: &RenderContext<'_, Action, Message>) {
+    fn render(&self, frame: &mut Frame, area: Rect, cx: &RenderContext<'_, Action>) {
         let style = if cx.is_focused() {
             Style::default().add_modifier(Modifier::BOLD)
         } else {
             Style::default()
         };
-        let line = Line::from(vec![
-            Span::styled(
-                format!("{}: ", self.label),
-                Style::default().add_modifier(Modifier::DIM),
-            ),
-            Span::styled(self.value.to_string(), style),
-        ]);
-        frame.render_widget(Paragraph::new(line), area);
+        frame.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled(
+                    format!("{}: ", self.label),
+                    Style::default().add_modifier(Modifier::DIM),
+                ),
+                Span::styled(self.value.to_string(), style),
+            ])),
+            area,
+        );
     }
 }
 
 struct Status {
     text: String,
 }
-
-impl Component<Action, Message> for Status {
-    fn handle_message(&mut self, message: Message, cx: &mut Context<'_, Self, Action, Message>) {
-        if let Message::SetStatus(text) = message {
-            self.text = text;
-            cx.notify();
-        }
-    }
-
-    fn render(&self, frame: &mut Frame, area: Rect, _cx: &RenderContext<'_, Action, Message>) {
+impl Component<Action> for Status {
+    fn render(&self, frame: &mut Frame, area: Rect, _: &RenderContext<'_, Action>) {
         frame.render_widget(Paragraph::new(self.text.clone()), area);
     }
 }
 
-/// Modal confirmation overlay. While open it captures all input; `y`
-/// confirms the pending change, `n`/Esc dismisses it, and the overlay sends
-/// the command directly to its originating counter.
 struct ConfirmOverlay {
-    counter: Entity<Counter>,
     delta: i32,
 }
-
-impl Component<Action, Message> for ConfirmOverlay {
+impl Component<Action> for ConfirmOverlay {
     fn handle_action(
         &mut self,
         action: &Action,
-        cx: &mut Context<'_, Self, Action, Message>,
+        cx: &mut Context<'_, Self, Action>,
     ) -> ActionStatus {
         match action {
             Action::ConfirmChange => {
-                cx.send(self.counter, Message::ApplyChange { delta: self.delta });
+                cx.emit(ConfirmResult::Accepted { delta: self.delta });
                 cx.close_overlay();
                 ActionStatus::Handled
             }
             Action::CancelChange | Action::Quit => {
+                cx.emit(ConfirmResult::Cancelled);
                 cx.close_overlay();
-                cx.emit(Message::ChangeCancelled);
                 ActionStatus::Handled
             }
-            // Modal boundary: swallow everything else while open.
             _ => ActionStatus::Handled,
         }
     }
-
-    fn render(&self, frame: &mut Frame, area: Rect, _cx: &RenderContext<'_, Action, Message>) {
+    fn render(&self, frame: &mut Frame, area: Rect, _: &RenderContext<'_, Action>) {
         let verb = if self.delta > 0 {
             "increment"
         } else {
             "decrement"
         };
-
         let text = Line::from(vec![
             Span::raw(format!("{verb} the counter? ")),
             Span::styled("[y]es", Style::default().add_modifier(Modifier::BOLD)),
             Span::raw(" / "),
             Span::styled("[n]o", Style::default().add_modifier(Modifier::BOLD)),
         ]);
-
         let width = text.width() as u16 + 4;
         let height = 3;
-
         let popup = Rect {
             x: area.x + area.width.saturating_sub(width) / 2,
             y: area.y + area.height.saturating_sub(height) / 2,
             width,
             height,
         };
-
-        // Erase what is behind the popup.
         frame.render_widget(Clear, popup);
-
         let block = Block::default().borders(Borders::ALL).title(" confirm ");
-
         let inner = block.inner(popup);
-
         frame.render_widget(block, popup);
         frame.render_widget(Paragraph::new(text), inner);
     }
 }
 
-/// Root component: owns child entities, routes actions, interprets messages.
 struct Root {
     children: Option<Vec<Entity<Counter>>>,
     status: Option<Entity<Status>>,
+    observations: Vec<Subscription>,
 }
-
 impl Root {
     fn new() -> Self {
         Self {
             children: None,
             status: None,
+            observations: Vec::new(),
         }
     }
-
-    fn status_text() -> String {
-        "tab: focus | +/-: counter (asks y/n) | s: save | q: quit".to_owned()
-    }
 }
-
-impl Component<Action, Message> for Root {
-    fn init(&mut self, cx: &mut Context<'_, Self, Action, Message>) {
-        // Insert children before the first frame; their handles are stable
-        // afterwards.
+impl Component<Action> for Root {
+    fn init(&mut self, cx: &mut Context<'_, Self, Action>) {
         let first = cx.insert(Counter::new("first"));
         let second = cx.insert(Counter::new("second"));
         let status = cx.insert(Status {
-            text: Self::status_text(),
+            text: "tab: focus | +/-: counter (asks y/n) | s: save | q: quit".to_owned(),
         });
-        // The root decides focus and the tab order between its children.
         cx.focus_entity(first);
         cx.focus_order([first.id(), second.id()]);
         self.children = Some(vec![first, second]);
         self.status = Some(status);
+        for counter in [first, second] {
+            self.observations
+                .push(cx.observe(counter, move |root, source, cx| {
+                    let Some(value) = cx.read(source, |counter| counter.value) else {
+                        return;
+                    };
+                    let _ = cx.update(status, |status| {
+                        status.text = format!(
+                            "{}: {value}",
+                            if value == 0 { "ready" } else { "confirmed" }
+                        )
+                    });
+                    root_status_notify(root, cx);
+                }));
+        }
     }
-
     fn handle_action(
         &mut self,
         action: &Action,
-        cx: &mut Context<'_, Self, Action, Message>,
+        cx: &mut Context<'_, Self, Action>,
     ) -> ActionStatus {
         match action {
             Action::Quit => {
@@ -278,65 +242,50 @@ impl Component<Action, Message> for Root {
                 ActionStatus::Handled
             }
             Action::Save => {
-                cx.spawn(async {
-                    tokio::time::sleep(Duration::from_millis(300)).await;
-                    Ok(Message::Saved(Ok(())))
-                });
+                cx.spawn(
+                    async {
+                        tokio::time::sleep(Duration::from_millis(300)).await;
+                        Ok::<_, TaskError>(())
+                    },
+                    |result, root, cx| {
+                        let _ = result;
+                        if let Some(status) = root.status {
+                            let _ = cx.update(status, |status| status.text = "saved".to_owned());
+                        }
+                        cx.notify();
+                    },
+                );
                 ActionStatus::Handled
             }
-            // The runtime already sent the action to the focused counter.
-            // Never broadcast an unhandled action to sibling counters.
-            Action::Increment | Action::Decrement => ActionStatus::Continue,
-            // Confirmation actions belong to the active overlay. If there is
-            // no overlay, there is nothing for the root to handle.
             _ => ActionStatus::Continue,
         }
     }
-
-    /// Root receives meaningful state changes and task results. UI-local modal
-    /// flow stays inside Counter and ConfirmOverlay.
-    fn handle_message(&mut self, message: Message, cx: &mut Context<'_, Self, Action, Message>) {
-        let text = match message {
-            Message::Changed { value } => format!("confirmed: {value}"),
-            Message::ChangeCancelled => "change cancelled, focus restored".to_owned(),
-            Message::Saved(result) => match result {
-                Ok(()) => "saved".to_owned(),
-                Err(error) => format!("save failed: {error}"),
-            },
-            // These messages are owned by other components and are never
-            // delivered to the root in normal operation.
-            Message::ApplyChange { .. } | Message::SetStatus(_) => return,
-        };
-        if let Some(status) = self.status {
-            cx.send(status, Message::SetStatus(text));
-        }
-        cx.notify();
-    }
-
-    fn render(&self, frame: &mut Frame, area: Rect, cx: &RenderContext<'_, Action, Message>) {
+    fn render(&self, frame: &mut Frame, area: Rect, cx: &RenderContext<'_, Action>) {
         let Some(children) = &self.children else {
             return;
         };
         let rows = layout_rows(area, children.len() + 1);
-        for (index, child) in children.iter().enumerate() {
-            cx.render_entity(*child, frame, rows[index]);
+        for (i, child) in children.iter().enumerate() {
+            cx.render_entity(*child, frame, rows[i]);
         }
-        if let Some(status) = &self.status {
-            cx.render_entity(*status, frame, rows[rows.len() - 1]);
+        if let Some(status) = self.status {
+            cx.render_entity(status, frame, rows[rows.len() - 1]);
         }
     }
 }
+fn root_status_notify(_root: &mut Root, cx: &mut Context<'_, Root, Action>) {
+    cx.notify();
+}
 fn layout_rows(area: Rect, count: usize) -> Vec<Rect> {
     (0..count)
-        .map(|index| Rect {
+        .map(|i| Rect {
             x: area.x,
-            y: area.y + index as u16,
+            y: area.y + i as u16,
             width: area.width,
             height: 1,
         })
         .collect()
 }
-
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     tokio::runtime::Builder::new_current_thread()
         .enable_all()

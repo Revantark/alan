@@ -1,30 +1,11 @@
 //! A small UI runtime for Ratatui applications.
 //!
-//! The framework owns UI mechanics: terminal lifecycle, the event loop, raw
-//! input mapping, action dispatch and action propagation, focus management, popups
-//! and overlays, redraw scheduling, background tasks, and error handling.
-//! Components receive application-defined actions and messages. Actions are
-//! semantic input intents routed synchronously through the active overlay,
-//! focused component, parent components, and root. Messages are deferred
-//! internal communication delivered to the root or an explicitly targeted
-//! entity after the current callback returns.
-//!
-//! ```no_run
-//! # use std::time::Duration;
-//! # use ratatui::Frame;
-//! # use ratatui::layout::Rect;
-//! # use tui::{ActionStatus, Component, RenderContext, Runtime, RuntimeError};
-//! # use tui::context::Context;
-//! # struct Root;
-//! # impl Component<&'static str> for Root {
-//! #     fn render(&self, _frame: &mut Frame, _area: Rect, _cx: &RenderContext<'_, &'static str>) {}
-//! # }
-//! let runtime = Runtime::builder(Root).tick_rate(Duration::from_millis(16)).build();
-//! # async fn example(runtime: Runtime<Root, &'static str>) -> Result<(), RuntimeError> {
-//! runtime.run().await?;
-//! # Ok(())
-//! # }
-//! ```
+//! Communication is explicit: semantic [`ActionStatus`] actions route
+//! synchronously; `Context::dispatch` and `Context::update` target known
+//! entities; `notify`/`observe` communicates state invalidation;
+//! `emit`/`subscribe` communicates typed entity events;
+//! `subscribe_stream` consumes external streams; and `spawn` delivers a
+//! one-shot typed result. Deferred callbacks are delivered non-reentrantly.
 
 pub mod app;
 pub mod component;
@@ -45,4 +26,4 @@ pub use component::{ActionStatus, Component, RenderContext};
 pub use error::RuntimeError;
 pub use keymap::{InputContext, KeyMapper, NoopMapper, PassthroughMapper};
 pub use subscription::{Subscription, SubscriptionEvent};
-pub use task::{TaskExecutor, TaskHandle, TokioExecutor};
+pub use task::{TaskError, TaskExecutor, TaskHandle, TokioExecutor};
