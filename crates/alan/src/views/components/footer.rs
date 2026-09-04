@@ -1,7 +1,6 @@
 use crate::core::{Activity, Controller};
 use crate::views::UiState;
 use crate::views::component::Component;
-use crate::views::components::PopupList;
 use crate::views::theme;
 use agent::Mode;
 use ratatui::Frame;
@@ -12,9 +11,7 @@ use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::Paragraph;
 
 #[derive(Debug, Default)]
-pub struct Footer {
-    popup: PopupList,
-}
+pub struct Footer;
 
 /// How an [`Activity`] presents itself in the status line.
 struct Status {
@@ -33,7 +30,7 @@ impl From<Activity> for Status {
             },
             Activity::Suggesting => Status {
                 label: "  ●",
-                hints: "  Enter accept · ↑↓ move · Esc dismiss",
+                hints: " Enter accept · ↑↓ move · Esc dismiss",
                 style: Style::default().fg(theme::PROMPT_FG),
             },
             Activity::Idle => Status {
@@ -139,11 +136,6 @@ impl Component for Footer {
         state.editor().render(input_area, frame.buffer_mut());
         if let Some(position) = state.cursor_screen_position() {
             frame.set_cursor_position(position);
-        }
-        let completion = controller.completion();
-        let rows = PopupList::required_rows(completion.status(), completion.item_count());
-        if let Some(popup_area) = PopupList::area_above(area, frame.area(), rows) {
-            self.popup.render(frame, popup_area, controller, state);
         }
     }
 }

@@ -14,8 +14,8 @@ use crate::core::{
 };
 use base64::Engine;
 use component::Component;
-pub(crate) use components::Header;
 use components::{Chat, Footer};
+pub(crate) use components::{Header, PopupList, PopupStatus};
 use crossterm::event::{
     Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
@@ -772,6 +772,11 @@ fn is_multiline_enter(key: KeyEvent) -> bool {
                 || key.modifiers.contains(KeyModifiers::ALT)))
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BodyAreas {
+    pub footer: Rect,
+}
+
 #[derive(Debug, Default)]
 pub struct AppView {
     chat: Chat,
@@ -789,7 +794,7 @@ impl AppView {
         area: Rect,
         controller: &Controller,
         state: &mut UiState,
-    ) {
+    ) -> BodyAreas {
         // Measure against the width the editor actually gets, not the frame's.
         let editor_width = area.width.saturating_sub(theme::PROMPT_GUTTER);
         let [chat_area, footer_area] = Layout::vertical([
@@ -800,6 +805,9 @@ impl AppView {
 
         self.chat.render(frame, chat_area, controller, state);
         self.footer.render(frame, footer_area, controller, state);
+        BodyAreas {
+            footer: footer_area,
+        }
     }
 
     pub fn lines(&self) -> &[ratatui::text::Line<'static>] {
