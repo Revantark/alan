@@ -74,7 +74,9 @@ impl<A: 'static> RuntimeState<A> {
             .filter_map(|(id, record)| {
                 let (active, source, target) = match record {
                     SubscriptionRecord::Stream(s) => (&s.active, None, s.target),
-                    SubscriptionRecord::Event(s) => (&s.active, Some(s.source), s.target),
+                    SubscriptionRecord::Event(s) | SubscriptionRecord::OneShotEvent(s) => {
+                        (&s.active, Some(s.source), s.target)
+                    }
                     SubscriptionRecord::Observation(s) => (&s.active, Some(s.source), s.target),
                 };
                 (!active.load(std::sync::atomic::Ordering::Acquire)
@@ -95,13 +97,15 @@ impl<A: 'static> RuntimeState<A> {
         if let Some(record) = self.subscriptions.remove(&id) {
             let active = match &record {
                 SubscriptionRecord::Stream(s) => &s.active,
-                SubscriptionRecord::Event(s) => &s.active,
+                SubscriptionRecord::Event(s) | SubscriptionRecord::OneShotEvent(s) => &s.active,
                 SubscriptionRecord::Observation(s) => &s.active,
             };
             active.store(false, std::sync::atomic::Ordering::Release);
             let cancellation = match record {
                 SubscriptionRecord::Stream(s) => s.cancellation,
-                SubscriptionRecord::Event(s) => s.cancellation,
+                SubscriptionRecord::Event(s) | SubscriptionRecord::OneShotEvent(s) => {
+                    s.cancellation
+                }
                 SubscriptionRecord::Observation(s) => s.cancellation,
             };
             let _ = cancellation.send(true);
@@ -262,6 +266,32 @@ impl<'a, T: Component<A>, A: 'static> Context<'a, T, A> {
             }),
         );
         Subscription::new(active, cancellation)
+    }
+
+    /// Subscribe to the next typed event from one specific source entity.
+    ///
+    /// Unlike [`Context::subscribe`], the subscription is runtime-owned: it
+    /// needs no returned handle, fires at most once, then removes itself.
+    /// Use this for terminal single events instead of retaining an
+    /// `Option<Subscription>` just to unsubscribe after delivery.
+    pub fn subscribe_once<Ev, Source, F>(&mut self, source: Entity<Source>, callback: F)
+    where
+        Ev: Send + 'static,
+        Source: Component<A>,
+        F: for<'b> FnMut(&Ev, &'b mut T, Entity<Source>, &'b mut Context<'b, T, A>) + 'static,
+    {
+        let (active, cancellation, _) = subscription::cancellation();
+        let id = SubscriptionId::allocate();
+        self.runtime_state.subscriptions.insert(
+            id,
+            SubscriptionRecord::OneShotEvent(subscription::EventSubscription {
+                source: source.id(),
+                target: self.entity.id(),
+                active: active.clone(),
+                cancellation: cancellation.clone(),
+                handler: subscription::event_handler(callback),
+            }),
+        );
     }
 
     /// Subscribe to an external asynchronous stream.

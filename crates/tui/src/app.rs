@@ -120,6 +120,8 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::context::Context;
+    use crate::entity::Entity;
     use ratatui::{Frame, layout::Rect};
     struct TestRoot;
     impl Component<()> for TestRoot {
@@ -130,5 +132,73 @@ mod tests {
     #[should_panic(expected = "tick rate must be greater than zero")]
     fn zero_tick_rate_is_rejected() {
         Runtime::builder(TestRoot).tick_rate(Duration::ZERO).build();
+    }
+
+    struct Probe {
+        hits: usize,
+    }
+    impl Component<()> for Probe {
+        fn render(&self, _: &mut Frame, _: Rect, _: &crate::component::RenderContext<'_, ()>) {}
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct Ping;
+
+    fn harness() -> (
+        RuntimeState<()>,
+        EntityStore<()>,
+        Entity<Probe>,
+        Entity<TestRoot>,
+    ) {
+        let (sender, _) = mpsc::unbounded_channel();
+        let mut store = EntityStore::new();
+        let target = store.insert(Probe { hits: 0 });
+        let source = store.insert(TestRoot);
+        let state = RuntimeState::new(sender, Arc::new(TokioExecutor));
+        (state, store, target, source)
+    }
+
+    #[test]
+    fn subscribe_once_fires_without_a_stored_handle() {
+        let (mut state, store, target, source) = harness();
+        {
+            let mut cx: Context<'_, Probe, ()> = Context::new(&mut state, &store, target.id());
+            cx.subscribe_once::<Ping, TestRoot, _>(source, |_, probe, _, _| {
+                probe.hits += 1;
+            });
+        }
+        // No Subscription handle retained; the runtime record owns liveness.
+        let mut cx: Context<'_, TestRoot, ()> = Context::new(&mut state, &store, source.id());
+        cx.emit(Ping);
+        let batch = std::mem::take(&mut state.deliveries);
+        for delivery in batch {
+            if let crate::subscription::RuntimeDelivery::Event(delivery) = delivery {
+                crate::event_loop::deliver_event_for_test(delivery, &mut state, &store);
+            }
+        }
+        assert_eq!(store.typed_read(target.id(), |p: &Probe| p.hits), Some(1));
+        assert!(state.subscriptions.is_empty());
+    }
+
+    #[test]
+    fn subscribe_once_fires_at_most_once() {
+        let (mut state, store, target, source) = harness();
+        {
+            let mut cx: Context<'_, Probe, ()> = Context::new(&mut state, &store, target.id());
+            cx.subscribe_once::<Ping, TestRoot, _>(source, |_, probe, _, _| {
+                probe.hits += 1;
+            });
+        }
+        for _ in 0..2 {
+            let mut cx: Context<'_, TestRoot, ()> = Context::new(&mut state, &store, source.id());
+            cx.emit(Ping);
+        }
+        let batch = std::mem::take(&mut state.deliveries);
+        for delivery in batch {
+            if let crate::subscription::RuntimeDelivery::Event(delivery) = delivery {
+                crate::event_loop::deliver_event_for_test(delivery, &mut state, &store);
+            }
+        }
+        assert_eq!(store.typed_read(target.id(), |p: &Probe| p.hits), Some(1));
     }
 }

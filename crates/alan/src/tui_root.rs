@@ -12,13 +12,13 @@ use providers::{CredentialStore, ProviderRegistry};
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
-use tui::entity::Entity;
 
 use crossterm::event::{Event, MouseEventKind};
 use futures_util::Stream;
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use tui::context::Context;
+use tui::entity::Entity;
 use tui::keymap::{InputContext, KeyMapper};
 use tui::{ActionStatus, Component, RenderContext, Subscription, SubscriptionEvent};
 
@@ -76,7 +76,6 @@ pub struct AlanRoot {
     providers: Arc<ProviderRegistry>,
     credentials: Arc<dyn CredentialStore>,
     login: Option<Entity<LoginOverlay>>,
-    login_result: Option<Subscription>,
     /// Retained so the poll stream keeps running. Dropping it cancels the stream.
     poll: Option<Subscription>,
 }
@@ -102,7 +101,6 @@ impl AlanRoot {
             providers,
             credentials,
             login: None,
-            login_result: None,
             poll: None,
         }
     }
@@ -118,18 +116,15 @@ impl AlanRoot {
             Arc::clone(&self.credentials),
         ));
         self.login = Some(overlay);
-        self.login_result = Some(
-            cx.subscribe::<LoginDone, _, _>(overlay, |done, root, _, cx| match done {
-                LoginDone::Succeeded { provider } => {
-                    root.login_result = None;
-                    root.login_done(provider.clone(), cx);
-                }
-                LoginDone::Dismissed => {
-                    root.login = None;
-                    root.login_result = None;
-                }
-            }),
-        );
+        cx.subscribe_once::<LoginDone, _, _>(overlay, |done, root, _, cx| match done {
+            LoginDone::Succeeded { provider } => {
+                root.login = None;
+                root.login_done(provider.clone(), cx);
+            }
+            LoginDone::Dismissed => {
+                root.login = None;
+            }
+        });
     }
 
     fn login_done(
