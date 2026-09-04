@@ -30,18 +30,20 @@ type PollTick = ();
 
 /// Semantic input for the Alan frontend.
 ///
-/// Context-free inputs (resize, mouse wheel) are semantic variants decoded in
-/// [`AlanKeyMapper`]; everything else stays a 1:1 [`AlanAction::Raw`] wrapper
-/// until a later slice moves it over.
+/// Context-free inputs (resize, mouse wheel, bracketed paste) are semantic
+/// variants decoded in [`AlanKeyMapper`]; everything else stays a 1:1
+/// [`AlanAction::Raw`] wrapper until a later slice moves it over.
 #[derive(Debug, Clone)]
 pub enum AlanAction {
     Resize,
     MouseScrollUp,
     MouseScrollDown,
+    Paste(String),
     Raw(Event),
 }
 
-/// Passes every terminal event through as [`AlanAction::Raw`].
+/// Passes terminal events through as [`AlanAction::Raw`], except for the
+/// context-free inputs decoded above.
 ///
 /// Owns the `KeyMapper` seam so future refinements happen here, at the
 /// runtime boundary, and components never depend on raw crossterm mapping.
@@ -57,6 +59,7 @@ impl KeyMapper<AlanAction> for AlanKeyMapper {
                 MouseEventKind::ScrollDown => Some(AlanAction::MouseScrollDown),
                 _ => Some(AlanAction::Raw(event.clone())),
             },
+            Event::Paste(data) => Some(AlanAction::Paste(data.clone())),
             event => Some(AlanAction::Raw(event.clone())),
         }
     }
@@ -122,12 +125,44 @@ impl Component<AlanAction> for AlanRoot {
                     AlanAction::Resize => Action::Resize,
                     AlanAction::MouseScrollUp => Action::MouseScrollUp,
                     AlanAction::MouseScrollDown => Action::MouseScrollDown,
-                    AlanAction::Raw(_) => unreachable!("matched above"),
+                    AlanAction::Paste(_) | AlanAction::Raw(_) => unreachable!("matched above"),
                 };
                 let mut inner = self.inner.lock().expect("alan root poisoned");
                 inner.ui.apply(action, false);
                 if inner.ui.take_dirty() {
                     cx.notify();
+                }
+                ActionStatus::Handled
+            }
+            AlanAction::Paste(text) => {
+                let mut inner = self.inner.lock().expect("alan root poisoned");
+                // Same dual-buffer split as `Raw`: the login overlay edits
+                // `UiState::input` via `apply`, otherwise the editor owns the
+                // paste via the existing `Event::Paste` path (insert,
+                // completion sync, highlight). Reconstructing the event here
+                // keeps behavior identical without a new `UiState` API yet.
+                let command = if inner.controller.overlay() == Overlay::Login {
+                    let selecting = inner.controller.login_selection_active();
+                    inner.ui.apply(Action::Paste(text.clone()), selecting)
+                } else {
+                    // Disjoint field borrows: `view`/`controller` reads feed `ui` mutation.
+                    let Inner {
+                        controller,
+                        ui,
+                        view,
+                    } = &mut *inner;
+                    ui.handle_event(
+                        Event::Paste(text.clone()),
+                        view.lines(),
+                        controller.completion_mut(),
+                    )
+                };
+                let should_quit = command.is_some_and(|command| inner.controller.handle(command));
+                if inner.ui.take_dirty() {
+                    cx.notify();
+                }
+                if should_quit {
+                    cx.quit();
                 }
                 ActionStatus::Handled
             }
@@ -291,6 +326,24 @@ mod tests {
             assert!(matches!(
                 mapper.map(&click, &context),
                 Some(AlanAction::Raw(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn mapper_maps_paste_regardless_of_context() {
+        let mapper = AlanKeyMapper;
+        for context in [
+            InputContext::default(),
+            InputContext {
+                overlay_active: true,
+                focus_active: true,
+            },
+        ] {
+            let event = Event::Paste("hello\nworld".into());
+            assert!(matches!(
+                mapper.map(&event, &context),
+                Some(AlanAction::Paste(actual)) if actual == "hello\nworld"
             ));
         }
     }
