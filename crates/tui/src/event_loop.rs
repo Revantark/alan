@@ -116,6 +116,15 @@ fn remove_entity_tree<A: 'static>(
     core.cleanup_subscriptions(store);
 }
 
+#[cfg(test)]
+pub(crate) fn deliver_event_for_test<A: 'static>(
+    delivery: EventDelivery,
+    core: &mut RuntimeState<A>,
+    store: &EntityStore<A>,
+) {
+    deliver_event(delivery, core, store);
+}
+
 fn deliver_task<A: 'static>(
     delivery: TaskDelivery,
     core: &mut RuntimeState<A>,
@@ -139,7 +148,7 @@ fn deliver_event<A: 'static>(
         .subscriptions
         .iter()
         .filter_map(|(id, record)| match record {
-            SubscriptionRecord::Event(event)
+            SubscriptionRecord::Event(event) | SubscriptionRecord::OneShotEvent(event)
                 if event.source == delivery.source
                     && event.handler.event_type() == delivery.event_type =>
             {
@@ -151,30 +160,40 @@ fn deliver_event<A: 'static>(
     let mut ids = ids;
     ids.sort_unstable();
     for id in ids {
-        let Some(SubscriptionRecord::Event(mut record)) = core.subscriptions.remove(&id) else {
+        let Some(record) = core.subscriptions.remove(&id) else {
             continue;
         };
-        if record.active.load(Ordering::Acquire)
-            && store.is_active_entity(record.target)
-            && store.is_active_entity(record.source)
+        let (mut event_record, once) = match record {
+            SubscriptionRecord::Event(record) => (record, false),
+            SubscriptionRecord::OneShotEvent(record) => (record, true),
+            other => {
+                core.subscriptions.insert(id, other);
+                continue;
+            }
+        };
+        if event_record.active.load(Ordering::Acquire)
+            && store.is_active_entity(event_record.target)
+            && store.is_active_entity(event_record.source)
         {
-            record.handler.invoke(
+            event_record.handler.invoke(
                 delivery.event.as_ref(),
-                record.target,
-                record.source,
+                event_record.target,
+                event_record.source,
                 core,
                 store,
             );
         }
-        if record.active.load(Ordering::Acquire)
-            && store.is_active_entity(record.target)
-            && store.is_active_entity(record.source)
+        // Persistent subscriptions re-arm; one-shots are consumed.
+        if !once
+            && event_record.active.load(Ordering::Acquire)
+            && store.is_active_entity(event_record.target)
+            && store.is_active_entity(event_record.source)
         {
             core.subscriptions
-                .insert(id, SubscriptionRecord::Event(record));
+                .insert(id, SubscriptionRecord::Event(event_record));
         } else {
-            record.active.store(false, Ordering::Release);
-            let _ = record.cancellation.send(true);
+            event_record.active.store(false, Ordering::Release);
+            let _ = event_record.cancellation.send(true);
         }
     }
 }

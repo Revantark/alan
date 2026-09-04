@@ -24,6 +24,12 @@ pub enum SubscriptionEvent<T> {
 }
 
 /// A cancellation handle for a stream, event, or observation subscription.
+///
+/// Holding the handle keeps the subscription alive: dropping it cancels
+/// delivery. One-shot subscriptions created with
+/// [`Context::subscribe_once`](crate::context::Context::subscribe_once) are
+/// runtime-owned instead and need no handle.
+#[must_use = "store the Subscription or it cancels on drop; use subscribe_once for one-shot events"]
 #[derive(Debug)]
 pub struct Subscription {
     active: Arc<AtomicBool>,
@@ -91,6 +97,7 @@ pub struct EventDelivery {
 pub(crate) enum SubscriptionRecord<A> {
     Stream(StreamSubscription<A>),
     Event(EventSubscription<A>),
+    OneShotEvent(EventSubscription<A>),
     Observation(ObservationSubscription<A>),
 }
 
