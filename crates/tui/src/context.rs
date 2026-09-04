@@ -108,9 +108,6 @@ impl<A: 'static> RuntimeState<A> {
     pub(crate) fn take_invalidated(&mut self) -> Vec<EntityId> {
         self.invalidated.drain().collect()
     }
-    pub(crate) fn mark_dirty(&mut self) {
-        self.dirty = true;
-    }
     pub(crate) fn take_dirty(&mut self) -> bool {
         std::mem::take(&mut self.dirty)
     }

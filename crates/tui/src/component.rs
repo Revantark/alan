@@ -86,6 +86,16 @@ pub trait Component<A: 'static>: 'static {
         ActionStatus::Continue
     }
 
+    /// Called before the entity is removed (overlay closed, parent removed).
+    /// Use it to abort streams or tasks and drop handles; `emit` here is
+    /// dropped because the source is gone, so reach the parent with
+    /// `update`/`dispatch` instead.
+    fn cleanup(&mut self, _cx: &mut Context<'_, Self, A>)
+    where
+        Self: Sized,
+    {
+    }
+
     /// Render the component's current state. Rendering must not perform I/O
     /// or mutate state.
     fn render(&self, frame: &mut Frame, area: Rect, cx: &RenderContext<'_, A>);

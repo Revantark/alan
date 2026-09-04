@@ -147,18 +147,21 @@ impl AgentMessage {
             Self::Assistant(message) => {
                 let text = message.text();
                 let calls: Vec<ToolCall> = message.tool_calls().cloned().collect();
+                // Reasoning history is never re-sent: it is verbose and the
+                // model does not need its own chain-of-thought back as input.
+                // The transcript on disk still preserves it.
                 if calls.is_empty() {
                     Message::assistant_with_reasoning(
                         (!text.is_empty()).then_some(text),
-                        message.reasoning.clone(),
-                        message.reasoning_details.clone(),
+                        None,
+                        Vec::new(),
                     )
                 } else {
                     Message::assistant_with_tool_calls_and_reasoning(
                         (!text.is_empty()).then_some(text),
                         calls,
-                        message.reasoning.clone(),
-                        message.reasoning_details.clone(),
+                        None,
+                        Vec::new(),
                     )
                 }
             }
@@ -244,7 +247,7 @@ mod tests {
     }
 
     #[test]
-    fn plain_assistant_message_preserves_reasoning() {
+    fn plain_assistant_message_strips_reasoning() {
         let assistant = LlmResponse {
             content: vec![ContentBlock::Text("hello".into())],
             stop_reason: StopReason::Stop,
@@ -258,8 +261,9 @@ mod tests {
 
         let message = AgentMessage::Assistant(assistant).to_llm();
 
-        assert_eq!(message.reasoning.as_deref(), Some("thought process"));
-        assert_eq!(message.reasoning_details.as_ref().map(|v| v.len()), Some(1));
+        assert_eq!(message.content.as_deref(), Some("hello"));
+        assert_eq!(message.reasoning, None);
+        assert!(message.reasoning_details.is_none());
         assert!(message.tool_calls.is_none());
     }
 }

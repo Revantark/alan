@@ -99,6 +99,12 @@ fn remove_entity_tree<A: 'static>(
         removed.extend(children);
         index += 1;
     }
+    // Children first so a parent can still reach its children during
+    // cleanup; only entities that ran `init` are cleaned up.
+    for id in removed.iter().rev() {
+        let mut cx = Ctx::new(core, store, *id);
+        store.cleanup_if_needed(*id, &mut cx);
+    }
     for id in removed {
         core.focus.remove_entity(id);
         core.parent_map.remove(&id);
@@ -292,7 +298,8 @@ where
                     dispatch(&action, &mut state, &store, root);
                 }
             },
-            _ = tick.tick() => state.mark_dirty(), delivery = rx.recv() => {
+            _ = tick.tick() => {}
+            delivery = rx.recv() => {
                 let Some(delivery) = delivery else { break };
                 state.deliveries.push_back(delivery);
             }

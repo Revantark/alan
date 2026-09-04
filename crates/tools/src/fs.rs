@@ -7,11 +7,12 @@ use std::path::Path;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
 
 const MAX_FILE_SIZE: usize = 1024 * 1024;
+const MAX_READ_LINES: u64 = 150;
 
 pub fn file_read_definition() -> ToolDefinition {
     ToolDefinition {
         name: "read".into(),
-        description: "Read a file/image, optionally limited to an inclusive line range".into(),
+        description: "Read a file/image, capped at 150 lines per call. Omit the range for lines 1-150; page larger files with line_start/line_end. Batch independent reads in one block".into(),
         parameters: json!({
             "type": "object",
             "properties": {
@@ -59,7 +60,7 @@ pub fn file_write_definition() -> ToolDefinition {
 pub fn file_edit_definition() -> ToolDefinition {
     ToolDefinition {
         name: "edit".into(),
-        description: "Replace one unique text range in an existing file".into(),
+        description: "Replace one unique text range in an existing file. One range per call; multiple independent-file edits may share a block, but never batch two edits to the same file".into(),
         parameters: json!({
             "type": "object",
             "properties": {
@@ -118,13 +119,20 @@ impl ToolExecutor for FileReadExecutor {
             ));
         }
 
+        let effective_end = line_end.unwrap_or(line_start + MAX_READ_LINES - 1);
+        if effective_end - line_start + 1 > MAX_READ_LINES {
+            return Err(ToolError(format!(
+                "range exceeds {MAX_READ_LINES} line limit, narrow line_start/line_end"
+            )));
+        }
+
         let file = tokio::fs::File::open(&path)
             .await
             .map_err(|e| ToolError(format!("failed to read file {path}: {e}")))?;
         let mut reader = BufReader::new(file);
-        let mut content = String::new();
+        let mut lines: Vec<String> = Vec::new();
         let mut line = String::new();
-        let mut line_number = 1;
+        let mut total_bytes = 0usize;
 
         loop {
             line.clear();
@@ -135,21 +143,39 @@ impl ToolExecutor for FileReadExecutor {
             if bytes_read == 0 {
                 break;
             }
-
-            if line_number >= line_start {
-                content.push_str(&line);
-                if content.len() > MAX_FILE_SIZE {
-                    return Err(ToolError(format!(
-                        "file content exceeds {MAX_FILE_SIZE} byte limit"
-                    )));
-                }
+            total_bytes += bytes_read;
+            if total_bytes > MAX_FILE_SIZE {
+                return Err(ToolError(format!(
+                    "file content exceeds {MAX_FILE_SIZE} byte limit"
+                )));
             }
-
-            if line_end == Some(line_number) {
-                break;
-            }
-            line_number = line_number.saturating_add(1);
+            lines.push(line.clone());
         }
+
+        let total = lines.len() as u64;
+        if total == 0 {
+            return Ok(ToolOutput::Text(format!(
+                "[read {path} empty file (0 lines)]\n"
+            )));
+        }
+        if line_start > total {
+            return Err(ToolError(format!(
+                "line_start {line_start} beyond end of file ({total} lines)"
+            )));
+        }
+
+        let actual_end = effective_end.min(total);
+        let mut content = String::new();
+        for number in line_start..=actual_end {
+            let index = (number - 1) as usize;
+            content.push_str(&format!("{number}:{}", lines[index]));
+            if !lines[index].ends_with('\n') {
+                content.push('\n');
+            }
+        }
+        content.push_str(&format!(
+            "[read {path} lines {line_start}-{actual_end} of {total} \u{2014} use line_start/line_end to page]\n"
+        ));
 
         Ok(ToolOutput::Text(content))
     }
@@ -366,12 +392,19 @@ mod tests {
         let call = tool_call(&path, r#""line_start":2,"line_end":3"#);
         let result = FileReadExecutor.execute(&call).await.unwrap();
 
-        assert_eq!(result, ToolOutput::Text("two\nthree\n".into()));
+        let ToolOutput::Text(text) = result else {
+            panic!("expected text, got {result:?}");
+        };
+        assert!(text.starts_with("2:two\n3:three\n"), "got: {text}");
+        assert!(
+            text.contains(&format!("[read {} lines 2-3 of 4", path.display())),
+            "got: {text}"
+        );
         tokio::fs::remove_file(path).await.unwrap();
     }
 
     #[tokio::test]
-    async fn reads_full_file_when_range_is_omitted() {
+    async fn reads_first_window_when_range_is_omitted() {
         let path = temp_path();
         tokio::fs::write(&path, "one\ntwo\n").await.unwrap();
 
@@ -380,7 +413,70 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(result, ToolOutput::Text("one\ntwo\n".into()));
+        let ToolOutput::Text(text) = result else {
+            panic!("expected text, got {result:?}");
+        };
+        assert!(text.starts_with("1:one\n2:two\n"), "got: {text}");
+        assert!(
+            text.contains(&format!("[read {} lines 1-2 of 2", path.display())),
+            "got: {text}"
+        );
+        tokio::fs::remove_file(path).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn defaults_to_first_150_lines_with_paging_footer() {
+        let path = temp_path();
+        let body = (1..=200).map(|n| format!("line {n}\n")).collect::<String>();
+        tokio::fs::write(&path, body).await.unwrap();
+
+        let result = FileReadExecutor
+            .execute(&tool_call(&path, ""))
+            .await
+            .unwrap();
+
+        let ToolOutput::Text(text) = result else {
+            panic!("expected text, got {result:?}");
+        };
+        assert!(text.starts_with("1:line 1\n"), "got start: {text}");
+        assert!(text.contains("150:line 150\n"), "got: {text}");
+        assert!(!text.contains("151:line 151"), "must cap at 150: {text}");
+        assert!(
+            text.contains(&format!("[read {} lines 1-150 of 200", path.display())),
+            "got: {text}"
+        );
+        tokio::fs::remove_file(path).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn rejects_range_over_150_lines() {
+        let path = temp_path();
+        tokio::fs::write(&path, "one\ntwo\n").await.unwrap();
+        let call = tool_call(&path, r#""line_start":1,"line_end":151"#);
+
+        let error = FileReadExecutor.execute(&call).await.unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "tool execution failed: range exceeds 150 line limit, narrow line_start/line_end"
+        );
+        tokio::fs::remove_file(path).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn pages_second_window() {
+        let path = temp_path();
+        let body = (1..=200).map(|n| format!("line {n}\n")).collect::<String>();
+        tokio::fs::write(&path, body).await.unwrap();
+
+        let call = tool_call(&path, r#""line_start":151,"line_end":200"#);
+        let result = FileReadExecutor.execute(&call).await.unwrap();
+
+        let ToolOutput::Text(text) = result else {
+            panic!("expected text, got {result:?}");
+        };
+        assert!(text.starts_with("151:line 151\n"), "got: {text}");
+        assert!(text.contains("200:line 200\n"), "got: {text}");
         tokio::fs::remove_file(path).await.unwrap();
     }
 
