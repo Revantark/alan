@@ -85,12 +85,15 @@ impl Provider for OpenRouterProvider {
     fn id(&self) -> &ProviderId {
         &self.id
     }
+
     fn models(&self) -> &[ModelInfo] {
         &self.models
     }
+
     fn server_tools(&self) -> &[ServerToolInfo] {
         &self.server_tools
     }
+
     fn bind(&self, model_id: &str) -> Result<Model, ProviderError> {
         bind_model(
             &self.models,
@@ -114,6 +117,7 @@ impl Provider for OpenRouterProvider {
             options,
         )
     }
+
     fn auth(&self) -> &dyn ProviderAuth {
         &self.login
     }

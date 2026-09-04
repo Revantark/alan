@@ -64,6 +64,7 @@ struct Counter {
     value: u32,
     confirmation: Option<Subscription>,
 }
+
 impl Counter {
     fn new(label: &'static str) -> Self {
         Self {
@@ -72,6 +73,7 @@ impl Counter {
             confirmation: None,
         }
     }
+
     fn open_confirmation(&mut self, cx: &mut Context<'_, Self, Action>, delta: i32) {
         let overlay = cx.open_overlay(ConfirmOverlay { delta });
         self.confirmation = Some(cx.subscribe::<ConfirmResult, _, _>(
@@ -89,6 +91,7 @@ impl Counter {
         ));
     }
 }
+
 impl Component<Action> for Counter {
     fn handle_action(
         &mut self,
@@ -107,6 +110,7 @@ impl Component<Action> for Counter {
             _ => ActionStatus::Continue,
         }
     }
+
     fn render(&self, frame: &mut Frame, area: Rect, cx: &RenderContext<'_, Action>) {
         let style = if cx.is_focused() {
             Style::default().add_modifier(Modifier::BOLD)
@@ -129,6 +133,7 @@ impl Component<Action> for Counter {
 struct Status {
     text: String,
 }
+
 impl Component<Action> for Status {
     fn render(&self, frame: &mut Frame, area: Rect, _: &RenderContext<'_, Action>) {
         frame.render_widget(Paragraph::new(self.text.clone()), area);
@@ -138,6 +143,7 @@ impl Component<Action> for Status {
 struct ConfirmOverlay {
     delta: i32,
 }
+
 impl Component<Action> for ConfirmOverlay {
     fn handle_action(
         &mut self,
@@ -158,6 +164,7 @@ impl Component<Action> for ConfirmOverlay {
             _ => ActionStatus::Handled,
         }
     }
+
     fn render(&self, frame: &mut Frame, area: Rect, _: &RenderContext<'_, Action>) {
         let verb = if self.delta > 0 {
             "increment"
@@ -191,6 +198,7 @@ struct Root {
     status: Option<Entity<Status>>,
     observations: Vec<Subscription>,
 }
+
 impl Root {
     fn new() -> Self {
         Self {
@@ -200,6 +208,7 @@ impl Root {
         }
     }
 }
+
 impl Component<Action> for Root {
     fn init(&mut self, cx: &mut Context<'_, Self, Action>) {
         let first = cx.insert(Counter::new("first"));
@@ -227,6 +236,7 @@ impl Component<Action> for Root {
                 }));
         }
     }
+
     fn handle_action(
         &mut self,
         action: &Action,
@@ -260,6 +270,7 @@ impl Component<Action> for Root {
             _ => ActionStatus::Continue,
         }
     }
+
     fn render(&self, frame: &mut Frame, area: Rect, cx: &RenderContext<'_, Action>) {
         let Some(children) = &self.children else {
             return;
@@ -273,9 +284,11 @@ impl Component<Action> for Root {
         }
     }
 }
+
 fn root_status_notify(_root: &mut Root, cx: &mut Context<'_, Root, Action>) {
     cx.notify();
 }
+
 fn layout_rows(area: Rect, count: usize) -> Vec<Rect> {
     (0..count)
         .map(|i| Rect {
@@ -286,6 +299,7 @@ fn layout_rows(area: Rect, count: usize) -> Vec<Rect> {
         })
         .collect()
 }
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     tokio::runtime::Builder::new_current_thread()
         .enable_all()

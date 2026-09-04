@@ -157,6 +157,7 @@ pub(crate) async fn set_permissions(path: &Path, is_dir: bool) -> Result<(), Sto
                 source,
             })
     }
+
     #[cfg(not(unix))]
     {
         let _ = (path, is_dir);

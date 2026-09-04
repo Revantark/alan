@@ -103,6 +103,7 @@ fn parse_bool_env(name: &str) -> anyhow::Result<bool> {
         )),
     }
 }
+
 fn configured_reasoning_effort() -> anyhow::Result<Option<ReasoningEffort>> {
     let Some(value) = std::env::var_os("ALAN_REASONING_EFFORT") else {
         return Ok(None);
@@ -120,6 +121,7 @@ fn configured_reasoning_effort() -> anyhow::Result<Option<ReasoningEffort>> {
         )),
     }
 }
+
 fn auth_path() -> anyhow::Result<PathBuf> {
     Ok(alan_data_dir()?.join("auth.json"))
 }

@@ -66,6 +66,7 @@ impl<A: 'static> RuntimeState<A> {
             quit: false,
         }
     }
+
     pub(crate) fn cleanup_subscriptions(&mut self, store: &EntityStore<A>) {
         let stale: Vec<_> = self
             .subscriptions
@@ -89,6 +90,7 @@ impl<A: 'static> RuntimeState<A> {
             .retain(|_, handler| handler.is_active() && store.is_active_entity(handler.target()));
         self.invalidated.retain(|id| store.is_active_entity(*id));
     }
+
     pub(crate) fn remove_subscription(&mut self, id: SubscriptionId) {
         if let Some(record) = self.subscriptions.remove(&id) {
             let active = match &record {
@@ -105,15 +107,19 @@ impl<A: 'static> RuntimeState<A> {
             let _ = cancellation.send(true);
         }
     }
+
     pub(crate) fn take_invalidated(&mut self) -> Vec<EntityId> {
         self.invalidated.drain().collect()
     }
+
     pub(crate) fn take_dirty(&mut self) -> bool {
         std::mem::take(&mut self.dirty)
     }
+
     pub(crate) fn should_quit(&self) -> bool {
         self.quit
     }
+
     pub(crate) fn input_target(&self) -> Option<EntityId> {
         self.overlays.top().or_else(|| self.focus.current())
     }
@@ -121,7 +127,9 @@ impl<A: 'static> RuntimeState<A> {
 
 pub(crate) trait TaskHandler<A>: 'static {
     fn target(&self) -> EntityId;
+
     fn is_active(&self) -> bool;
+
     fn invoke(
         self: Box<Self>,
         result: Box<dyn Any + Send>,
@@ -147,9 +155,11 @@ where
     fn target(&self) -> EntityId {
         self.target
     }
+
     fn is_active(&self) -> bool {
         self.active.load(std::sync::atomic::Ordering::Acquire)
     }
+
     fn invoke(
         self: Box<Self>,
         result: Box<dyn Any + Send>,
@@ -194,6 +204,7 @@ impl<'a, T: Component<A>, A: 'static> Context<'a, T, A> {
             _marker: PhantomData,
         }
     }
+
     pub fn entity(&self) -> Entity<T> {
         self.entity
     }
@@ -331,25 +342,31 @@ impl<'a, T: Component<A>, A: 'static> Context<'a, T, A> {
         self.runtime_state.invalidated.insert(self.entity.id());
         self.runtime_state.dirty = true;
     }
+
     pub fn quit(&mut self) {
         self.runtime_state.quit = true;
     }
+
     pub fn focus_entity<E>(&mut self, target: Entity<E>) {
         self.runtime_state.focus.focus(target.id());
         self.runtime_state.dirty = true;
     }
+
     pub fn focus_order<I: IntoIterator<Item = EntityId>>(&mut self, order: I) {
         self.runtime_state
             .focus
             .register_order(self.entity.id(), order.into_iter().collect());
     }
+
     pub fn is_focused(&self) -> bool {
         self.runtime_state.focus.current() == Some(self.entity.id())
     }
+
     pub fn focus_next(&mut self) {
         self.runtime_state.focus.focus_next();
         self.runtime_state.dirty = true;
     }
+
     pub fn focus_prev(&mut self) {
         self.runtime_state.focus.focus_prev();
         self.runtime_state.dirty = true;
@@ -364,6 +381,7 @@ impl<'a, T: Component<A>, A: 'static> Context<'a, T, A> {
         self.runtime_state.dirty = true;
         Entity::from_id(id)
     }
+
     pub fn close_overlay(&mut self) {
         self.runtime_state.pending_closes += 1;
         self.runtime_state.dirty = true;
@@ -386,6 +404,7 @@ impl<'a, T: Component<A>, A: 'static> Context<'a, T, A> {
         }
         result
     }
+
     pub fn read<E: 'static, R>(&self, target: Entity<E>, f: impl FnOnce(&E) -> R) -> Option<R> {
         if target.id() == self.entity.id() {
             None
@@ -393,6 +412,7 @@ impl<'a, T: Component<A>, A: 'static> Context<'a, T, A> {
             self.store.typed_read(target.id(), f)
         }
     }
+
     pub fn insert<E: Component<A>>(&mut self, state: E) -> Entity<E> {
         let id = EntityId::allocate();
         self.runtime_state
@@ -420,6 +440,7 @@ pub(crate) struct Ctx<'a, A> {
     store: &'a EntityStore<A>,
     entity: EntityId,
 }
+
 impl<'a, A: 'static> Ctx<'a, A> {
     pub(crate) fn new(
         state: &'a mut RuntimeState<A>,
@@ -432,6 +453,7 @@ impl<'a, A: 'static> Ctx<'a, A> {
             entity,
         }
     }
+
     pub(crate) fn typed<T: Component<A>>(&mut self) -> Context<'_, T, A> {
         Context::new(self.runtime_state, self.store, self.entity)
     }

@@ -29,6 +29,7 @@ pub struct Subscription {
     active: Arc<AtomicBool>,
     cancellation: watch::Sender<bool>,
 }
+
 impl Subscription {
     pub(crate) fn new(active: Arc<AtomicBool>, cancellation: watch::Sender<bool>) -> Self {
         Self {
@@ -36,15 +37,18 @@ impl Subscription {
             cancellation,
         }
     }
+
     pub fn cancel(&self) {
         if self.active.swap(false, Ordering::Release) {
             let _ = self.cancellation.send(true);
         }
     }
+
     pub fn is_active(&self) -> bool {
         self.active.load(Ordering::Acquire)
     }
 }
+
 impl Drop for Subscription {
     fn drop(&mut self) {
         self.cancel();
@@ -72,6 +76,7 @@ pub struct StreamDelivery {
     pub(crate) id: SubscriptionId,
     pub(crate) event: StreamDeliveryEvent,
 }
+
 pub enum StreamDeliveryEvent {
     Item(Box<dyn Any + Send>),
     Closed,
@@ -95,6 +100,7 @@ pub(crate) struct StreamSubscription<A> {
     pub(crate) cancellation: watch::Sender<bool>,
     pub(crate) handler: Box<dyn StreamHandler<A>>,
 }
+
 pub(crate) struct EventSubscription<A> {
     pub(crate) source: EntityId,
     pub(crate) target: EntityId,
@@ -102,6 +108,7 @@ pub(crate) struct EventSubscription<A> {
     pub(crate) cancellation: watch::Sender<bool>,
     pub(crate) handler: Box<dyn EventHandler<A>>,
 }
+
 pub(crate) struct ObservationSubscription<A> {
     pub(crate) source: EntityId,
     pub(crate) target: EntityId,
@@ -118,10 +125,13 @@ pub(crate) trait StreamHandler<A>: 'static {
         state: &mut RuntimeState<A>,
         store: &EntityStore<A>,
     );
+
     fn close(&mut self, target: EntityId, state: &mut RuntimeState<A>, store: &EntityStore<A>);
 }
+
 pub(crate) trait EventHandler<A>: 'static {
     fn event_type(&self) -> TypeId;
+
     fn invoke(
         &mut self,
         event: &dyn Any,
@@ -131,6 +141,7 @@ pub(crate) trait EventHandler<A>: 'static {
         store: &EntityStore<A>,
     );
 }
+
 pub(crate) trait ObservationHandler<A>: 'static {
     fn invoke(
         &mut self,
@@ -145,6 +156,7 @@ struct TypedStreamHandler<T, Item, F> {
     callback: F,
     marker: std::marker::PhantomData<fn(T, Item)>,
 }
+
 impl<T, Item, F, A> StreamHandler<A> for TypedStreamHandler<T, Item, F>
 where
     T: Component<A>,
@@ -174,6 +186,7 @@ where
         let mut cx = Context::new(state, store, target);
         (self.callback)(SubscriptionEvent::Item(*item), component, &mut cx);
     }
+
     fn close(&mut self, target: EntityId, state: &mut RuntimeState<A>, store: &EntityStore<A>) {
         let Some(mut slot) = store.lock(target) else {
             return;
@@ -206,6 +219,7 @@ struct TypedEventHandler<T, Source, Ev, F> {
     callback: F,
     marker: std::marker::PhantomData<fn(T, Source, Ev)>,
 }
+
 impl<T, Source, Ev, F, A> EventHandler<A> for TypedEventHandler<T, Source, Ev, F>
 where
     T: Component<A>,
@@ -217,6 +231,7 @@ where
     fn event_type(&self) -> TypeId {
         TypeId::of::<Ev>()
     }
+
     fn invoke(
         &mut self,
         event: &dyn Any,
@@ -241,6 +256,7 @@ where
         (self.callback)(event, component, Entity::from_id(source), &mut cx);
     }
 }
+
 pub(crate) fn event_handler<T, Source, Ev, F, A>(callback: F) -> Box<dyn EventHandler<A>>
 where
     T: Component<A>,
@@ -259,6 +275,7 @@ struct TypedObservationHandler<T, Source, F> {
     callback: F,
     marker: std::marker::PhantomData<fn(T, Source)>,
 }
+
 impl<T, Source, F, A> ObservationHandler<A> for TypedObservationHandler<T, Source, F>
 where
     T: Component<A>,
@@ -286,6 +303,7 @@ where
         (self.callback)(component, Entity::from_id(source), &mut cx);
     }
 }
+
 pub(crate) fn observation_handler<T, Source, F, A>(callback: F) -> Box<dyn ObservationHandler<A>>
 where
     T: Component<A>,

@@ -24,11 +24,13 @@ impl EntityId {
         static NEXT: AtomicU64 = AtomicU64::new(0);
         Self(NEXT.fetch_add(1, Ordering::Relaxed))
     }
+
     #[cfg(test)]
     pub(crate) fn from_u64(value: u64) -> Self {
         Self(value)
     }
 }
+
 impl fmt::Display for EntityId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "entity-{}", self.0)
@@ -41,23 +43,29 @@ pub struct Entity<T> {
     id: EntityId,
     _marker: std::marker::PhantomData<fn() -> T>,
 }
+
 impl<T> Clone for Entity<T> {
     fn clone(&self) -> Self {
         *self
     }
 }
+
 impl<T> Copy for Entity<T> {}
+
 impl<T> PartialEq for Entity<T> {
     fn eq(&self, other: &Self) -> bool {
         self.id == other.id
     }
 }
+
 impl<T> Eq for Entity<T> {}
+
 impl<T> std::hash::Hash for Entity<T> {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         self.id.hash(state)
     }
 }
+
 impl<T> Entity<T> {
     pub(crate) fn from_id(id: EntityId) -> Self {
         Self {
@@ -65,6 +73,7 @@ impl<T> Entity<T> {
             _marker: std::marker::PhantomData,
         }
     }
+
     pub fn id(&self) -> EntityId {
         self.id
     }
@@ -72,12 +81,18 @@ impl<T> Entity<T> {
 
 pub(crate) trait ComponentSlot<A>: 'static {
     fn init(&mut self, cx: &mut Ctx<'_, A>);
+
     fn cleanup(&mut self, cx: &mut Ctx<'_, A>);
+
     fn handle_action(&mut self, action: &A, cx: &mut Ctx<'_, A>) -> ActionStatus;
+
     fn render(&self, frame: &mut Frame, area: Rect, cx: &RenderContext<'_, A>);
+
     fn as_any(&self) -> &dyn Any;
+
     fn as_any_mut(&mut self) -> &mut dyn Any;
 }
+
 impl<S, A> ComponentSlot<A> for S
 where
     S: Component<A>,
@@ -87,20 +102,25 @@ where
         let mut typed = cx.typed::<S>();
         S::init(self, &mut typed);
     }
+
     fn cleanup(&mut self, cx: &mut Ctx<'_, A>) {
         let mut typed = cx.typed::<S>();
         S::cleanup(self, &mut typed);
     }
+
     fn handle_action(&mut self, action: &A, cx: &mut Ctx<'_, A>) -> ActionStatus {
         let mut typed = cx.typed::<S>();
         S::handle_action(self, action, &mut typed)
     }
+
     fn render(&self, frame: &mut Frame, area: Rect, cx: &RenderContext<'_, A>) {
         S::render(self, frame, area, cx);
     }
+
     fn as_any(&self) -> &dyn Any {
         self
     }
+
     fn as_any_mut(&mut self) -> &mut dyn Any {
         self
     }
@@ -113,6 +133,7 @@ pub(crate) struct EntityStore<A> {
     slots: HashMap<EntityId, Slot<A>>,
     initialised: RefCell<HashSet<EntityId>>,
 }
+
 impl<A> Default for EntityStore<A> {
     fn default() -> Self {
         Self {
@@ -121,6 +142,7 @@ impl<A> Default for EntityStore<A> {
         }
     }
 }
+
 impl<A: 'static> EntityStore<A> {
     pub(crate) fn new() -> Self {
         Self::default()
@@ -238,6 +260,7 @@ mod tests {
     struct Counter {
         value: i32,
     }
+
     impl Component<()> for Counter {
         fn render(&self, _: &mut Frame, _: Rect, _: &RenderContext<'_, ()>) {}
     }
@@ -247,6 +270,7 @@ mod tests {
         fn handle_action(&mut self, _: &(), _: &mut Context<'_, Self, ()>) -> ActionStatus {
             ActionStatus::Handled
         }
+
         fn render(&self, _: &mut Frame, _: Rect, _: &RenderContext<'_, ()>) {}
     }
 
@@ -293,6 +317,7 @@ mod tests {
             Some(ActionStatus::Handled)
         );
     }
+
     #[test]
     fn missing_entity_is_a_safe_no_op() {
         let store = EntityStore::new();

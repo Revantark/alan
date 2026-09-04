@@ -56,12 +56,15 @@ pub enum CredentialError {
 #[async_trait]
 pub trait CredentialStore: Send + Sync {
     async fn read(&self, provider: &ProviderId) -> Result<Option<Credential>, CredentialError>;
+
     async fn list(&self) -> Result<Vec<CredentialInfo>, CredentialError>;
+
     async fn put(
         &self,
         provider: &ProviderId,
         credential: Credential,
     ) -> Result<(), CredentialError>;
+
     async fn delete(&self, provider: &ProviderId) -> Result<(), CredentialError>;
 }
 

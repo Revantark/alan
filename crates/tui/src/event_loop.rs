@@ -72,6 +72,7 @@ fn flush_requests<A: 'static>(core: &mut RuntimeState<A>, store: &mut EntityStor
         }
     }
 }
+
 fn close_overlays<A: 'static>(core: &mut RuntimeState<A>, store: &mut EntityStore<A>) {
     while core.pending_closes > 0 {
         core.pending_closes -= 1;
@@ -82,6 +83,7 @@ fn close_overlays<A: 'static>(core: &mut RuntimeState<A>, store: &mut EntityStor
         remove_entity_tree(core, store, id);
     }
 }
+
 fn remove_entity_tree<A: 'static>(
     core: &mut RuntimeState<A>,
     store: &mut EntityStore<A>,
@@ -126,6 +128,7 @@ fn deliver_task<A: 'static>(
         handler.invoke(delivery.result, core, store);
     }
 }
+
 fn deliver_event<A: 'static>(
     delivery: EventDelivery,
     core: &mut RuntimeState<A>,
@@ -175,6 +178,7 @@ fn deliver_event<A: 'static>(
         }
     }
 }
+
 fn deliver_observations<A: 'static>(
     source: EntityId,
     core: &mut RuntimeState<A>,
@@ -217,6 +221,7 @@ fn deliver_observations<A: 'static>(
         }
     }
 }
+
 fn deliver_stream<A: 'static>(
     delivery: StreamDelivery,
     core: &mut RuntimeState<A>,
