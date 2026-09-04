@@ -24,6 +24,7 @@ pub struct RuntimeBuilder<C, A> {
     tick_rate: Duration,
     terminal_options: TerminalOptions,
 }
+
 impl<C, A> RuntimeBuilder<C, A>
 where
     C: Component<A>,
@@ -38,22 +39,27 @@ where
             terminal_options: TerminalOptions::default(),
         }
     }
+
     pub fn key_mapper(mut self, key_mapper: impl KeyMapper<A> + 'static) -> Self {
         self.key_mapper = Arc::new(key_mapper);
         self
     }
+
     pub fn executor(mut self, executor: impl TaskExecutor + 'static) -> Self {
         self.executor = Arc::new(executor);
         self
     }
+
     pub fn tick_rate(mut self, tick_rate: Duration) -> Self {
         self.tick_rate = tick_rate;
         self
     }
+
     pub fn terminal_options(mut self, terminal_options: TerminalOptions) -> Self {
         self.terminal_options = terminal_options;
         self
     }
+
     pub fn build(self) -> Runtime<C, A> {
         assert!(
             !self.tick_rate.is_zero(),
@@ -77,6 +83,7 @@ pub struct Runtime<C, A> {
     tick_rate: Duration,
     terminal_options: TerminalOptions,
 }
+
 impl<C, A> Runtime<C, A>
 where
     C: Component<A>,
@@ -85,6 +92,7 @@ where
     pub fn builder(root: C) -> RuntimeBuilder<C, A> {
         RuntimeBuilder::new(root)
     }
+
     pub async fn run(self) -> Result<(), RuntimeError> {
         let guard = TerminalGuard::with_options(self.terminal_options)?;
         let _panic_hook = install_panic_hook();
@@ -117,6 +125,7 @@ mod tests {
     impl Component<()> for TestRoot {
         fn render(&self, _: &mut Frame, _: Rect, _: &crate::component::RenderContext<'_, ()>) {}
     }
+
     #[test]
     #[should_panic(expected = "tick rate must be greater than zero")]
     fn zero_tick_rate_is_rejected() {

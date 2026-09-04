@@ -137,6 +137,7 @@ When converting assistant messages to LLM messages, omit `tool_calls` when list 
 ## Code Style
 
 - Rust edition 2024.
+- Use one blank line between items (functions, trait signatures, impls, structs/enums, top-level functions). `cargo fmt` allows zero, so do it by hand.
 - Prefer small functions with one responsibility.
 - Keep UI rendering separate from state mutation.
 - Keep business logic out of `main.rs`.

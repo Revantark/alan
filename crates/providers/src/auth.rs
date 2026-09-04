@@ -50,6 +50,7 @@ pub enum AuthEvent {
 #[async_trait]
 pub trait AuthInteraction: Send {
     async fn prompt(&mut self, prompt: AuthPrompt) -> Result<String, InteractionError>;
+
     fn notify(&mut self, event: AuthEvent);
 }
 

@@ -19,9 +19,13 @@ pub enum ProviderError {
 
 pub trait Provider: Send + Sync {
     fn id(&self) -> &ProviderId;
+
     fn models(&self) -> &[ModelInfo];
+
     fn server_tools(&self) -> &[ServerToolInfo];
+
     fn bind(&self, model_id: &str) -> Result<Model, ProviderError>;
+
     fn bind_with_options(
         &self,
         model_id: &str,
@@ -30,6 +34,7 @@ pub trait Provider: Send + Sync {
         let _ = options;
         self.bind(model_id)
     }
+
     fn auth(&self) -> &dyn ProviderAuth;
 }
 
@@ -44,9 +49,11 @@ impl ProviderRegistry {
             providers: providers.into_iter().collect(),
         }
     }
+
     pub fn providers(&self) -> &[Arc<dyn Provider>] {
         &self.providers
     }
+
     pub fn get(&self, id: &ProviderId) -> Option<Arc<dyn Provider>> {
         self.providers.iter().find(|p| p.id() == id).cloned()
     }

@@ -22,11 +22,13 @@ impl std::fmt::Debug for TaskError {
         self.0.fmt(f)
     }
 }
+
 impl std::fmt::Display for TaskError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         self.0.fmt(f)
     }
 }
+
 impl Error for TaskError {}
 
 /// A type-erased completed task result. The runtime downcasts it to the
@@ -54,6 +56,7 @@ pub struct TaskHandle {
     active: Arc<AtomicBool>,
     cancel: Arc<dyn Fn() + Send + Sync>,
 }
+
 impl TaskHandle {
     pub fn new(cancel: impl Fn() + Send + Sync + 'static) -> Self {
         Self {
@@ -61,11 +64,13 @@ impl TaskHandle {
             cancel: Arc::new(cancel),
         }
     }
+
     pub fn cancel(&self) {
         if self.active.swap(false, Ordering::Release) {
             (self.cancel)();
         }
     }
+
     pub fn is_active(&self) -> bool {
         self.active.load(Ordering::Acquire)
     }
@@ -83,6 +88,7 @@ impl TaskHandle {
         }
     }
 }
+
 impl std::fmt::Debug for TaskHandle {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("TaskHandle")
@@ -98,6 +104,7 @@ pub type SubscriptionFuture = Pin<Box<dyn Future<Output = ()> + Send>>;
 pub trait TaskExecutor: Send + Sync + 'static {
     fn spawn(&self, future: DeliveryFuture, sender: UnboundedSender<RuntimeDelivery>)
     -> TaskHandle;
+
     fn spawn_subscription(&self, future: SubscriptionFuture);
 }
 
@@ -123,6 +130,7 @@ impl TaskExecutor for TokioExecutor {
             cancel: Arc::new(move || abort.abort()),
         }
     }
+
     fn spawn_subscription(&self, future: SubscriptionFuture) {
         tokio::spawn(future);
     }

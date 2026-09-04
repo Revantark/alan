@@ -333,6 +333,7 @@ impl ChatController {
         }
         true
     }
+
     fn ensure_response_entry(entries: &mut Vec<Entry>) -> bool {
         if matches!(entries.last(), Some(Entry::Response(_))) {
             return false;

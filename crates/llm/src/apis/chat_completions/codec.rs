@@ -478,6 +478,7 @@ mod tests {
         .unwrap_err();
         assert!(error.to_string().contains("missing index"));
     }
+
     #[test]
     fn accepts_usage_only_chunk() {
         let chunk = deserialize_stream_chunk(

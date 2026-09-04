@@ -21,6 +21,7 @@ pub(crate) fn draw<A: 'static>(
         }
     }
 }
+
 fn render_entity<A: 'static>(
     store: &EntityStore<A>,
     id: EntityId,
