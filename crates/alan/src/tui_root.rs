@@ -24,10 +24,10 @@ use tui::entity::Entity;
 use tui::keymap::{InputContext, KeyMapper};
 use tui::{ActionStatus, Component, RenderContext, Subscription, SubscriptionEvent};
 
-use crate::core::{Action, CommandOutcome, Controller};
+use crate::core::{Action, CommandOutcome, CompletionController, Controller};
 use crate::login_overlay::{LoginDone, LoginOverlay};
 use crate::views::Header;
-use crate::views::{AppView, UiState};
+use crate::views::{AppView, PopupList, PopupStatus, UiState};
 
 /// How often streamed agent output is collected while the app is idle.
 const TICK_INTERVAL: Duration = Duration::from_millis(16);
@@ -81,6 +81,7 @@ pub struct AlanRoot {
     /// Retained so the poll stream keeps running. Dropping it cancels the stream.
     poll: Option<Subscription>,
     header: Option<Entity<Header>>,
+    popup: Option<Entity<PopupList>>,
 }
 
 struct Inner {
@@ -105,6 +106,7 @@ impl AlanRoot {
             credentials,
             poll: None,
             header: None,
+            popup: None,
         }
     }
 
@@ -134,6 +136,27 @@ impl AlanRoot {
         // 16ms tick stream would catch it within a frame, but notify now.
         cx.notify();
     }
+
+    /// Push the completion snapshot into the popup entity. Plain-data mapping
+    /// lives here so `PopupList` never names core types. Skips the push when
+    /// the snapshot is unchanged so the 16ms poll tick stays quiet.
+    fn push_snapshot(&self, cx: &mut Context<'_, Self, AlanAction>, inner: &mut Inner) {
+        let Some(popup) = self.popup else {
+            return;
+        };
+        let (open, status, items, selected) = popup_snapshot(inner.controller.completion());
+        let unchanged = cx
+            .read(popup, |popup| {
+                popup.matches_snapshot(open, &status, &items, selected)
+            })
+            .unwrap_or(false);
+        if unchanged {
+            return;
+        }
+        cx.update(popup, |popup| {
+            popup.set(open, status, items, selected);
+        });
+    }
 }
 
 impl Component<AlanAction> for AlanRoot {
@@ -142,6 +165,7 @@ impl Component<AlanAction> for AlanRoot {
         Self: Sized,
     {
         self.header = Some(cx.insert(Header));
+        self.popup = Some(cx.insert(PopupList::default()));
         self.poll = Some(cx.subscribe_stream(poll_ticks(), |event, root, cx| {
             let SubscriptionEvent::Item(()) = event else {
                 return;
@@ -151,6 +175,7 @@ impl Component<AlanAction> for AlanRoot {
             inner.ui.on_poll(poll);
             inner.ui.tick();
             inner.ui.flush_wheel();
+            root.push_snapshot(cx, &mut inner);
             if inner.ui.take_dirty() {
                 cx.notify();
             }
@@ -187,6 +212,7 @@ impl Component<AlanAction> for AlanRoot {
                     controller,
                     ui,
                     view,
+                    ..
                 } = &mut *inner;
                 let command = ui.handle_event(
                     Event::Paste(text.clone()),
@@ -195,6 +221,7 @@ impl Component<AlanAction> for AlanRoot {
                 );
                 let outcome: Option<CommandOutcome> =
                     command.map(|command| inner.controller.handle(command));
+                self.push_snapshot(cx, &mut inner);
                 if inner.ui.take_dirty() {
                     cx.notify();
                 }
@@ -215,11 +242,13 @@ impl Component<AlanAction> for AlanRoot {
                     controller,
                     ui,
                     view,
+                    ..
                 } = &mut *inner;
                 let command =
                     ui.handle_event(event.clone(), view.lines(), controller.completion_mut());
                 let outcome: Option<CommandOutcome> =
                     command.map(|command| inner.controller.handle(command));
+                self.push_snapshot(cx, &mut inner);
                 if inner.ui.take_dirty() {
                     cx.notify();
                 }
@@ -238,6 +267,7 @@ impl Component<AlanAction> for AlanRoot {
     }
 
     fn render(&self, frame: &mut Frame, area: Rect, cx: &RenderContext<'_, AlanAction>) {
+        let popup = self.popup;
         if let Some(header) = self.header {
             let [header_area, body_area] =
                 Layout::vertical([Constraint::Length(1), Constraint::Min(1)]).areas(area);
@@ -248,7 +278,8 @@ impl Component<AlanAction> for AlanRoot {
                 ui,
                 view,
             } = &mut *inner;
-            view.render(frame, body_area, controller, ui);
+            let body = view.render(frame, body_area, controller, ui);
+            paint_popup(popup, body.footer, frame, cx);
         } else {
             let mut inner = self.inner.lock().expect("alan root poisoned");
             let Inner {
@@ -256,8 +287,45 @@ impl Component<AlanAction> for AlanRoot {
                 ui,
                 view,
             } = &mut *inner;
-            view.render(frame, area, controller, ui);
+            let body = view.render(frame, area, controller, ui);
+            paint_popup(popup, body.footer, frame, cx);
         }
+    }
+}
+
+/// Snapshot the completion controller into plain popup data. The only place
+/// that maps core completion types onto popup types.
+fn popup_snapshot(completion: &CompletionController) -> (bool, PopupStatus, Vec<String>, usize) {
+    use crate::core::CompletionStatus as CoreStatus;
+
+    let open = completion.is_open();
+    let status = match completion.status() {
+        CoreStatus::Loading => PopupStatus::Loading,
+        CoreStatus::Ready => PopupStatus::Ready,
+        CoreStatus::Error(error) => PopupStatus::Error(error),
+    };
+    let items = completion
+        .items(0, completion.item_count())
+        .iter()
+        .map(|item| item.display.clone())
+        .collect();
+    (open, status, items, completion.selected())
+}
+
+/// Paint the popup above the footer after the body, so it sits visually on
+/// top without capturing input. Zero rows means hidden: nothing to anchor.
+fn paint_popup(
+    popup: Option<Entity<PopupList>>,
+    footer: Rect,
+    frame: &mut Frame,
+    cx: &RenderContext<'_, AlanAction>,
+) {
+    let Some(popup) = popup else {
+        return;
+    };
+
+    if let Some(area) = PopupList::area_above(footer, frame.area(), 5) {
+        cx.render_entity(popup, frame, area);
     }
 }
 
