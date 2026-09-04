@@ -9,6 +9,8 @@
 //! root keeps it behind a `Mutex`. `render` is `&self` by framework contract.
 
 use providers::{CredentialStore, ProviderRegistry};
+use ratatui::layout::Constraint;
+use ratatui::layout::Layout;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
@@ -18,11 +20,13 @@ use futures_util::Stream;
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use tui::context::Context;
+use tui::entity::Entity;
 use tui::keymap::{InputContext, KeyMapper};
 use tui::{ActionStatus, Component, RenderContext, Subscription, SubscriptionEvent};
 
 use crate::core::{Action, CommandOutcome, Controller};
 use crate::login_overlay::{LoginDone, LoginOverlay};
+use crate::views::Header;
 use crate::views::{AppView, UiState};
 
 /// How often streamed agent output is collected while the app is idle.
@@ -76,6 +80,7 @@ pub struct AlanRoot {
     credentials: Arc<dyn CredentialStore>,
     /// Retained so the poll stream keeps running. Dropping it cancels the stream.
     poll: Option<Subscription>,
+    header: Option<Entity<Header>>,
 }
 
 struct Inner {
@@ -99,6 +104,7 @@ impl AlanRoot {
             providers,
             credentials,
             poll: None,
+            header: None,
         }
     }
 
@@ -135,6 +141,7 @@ impl Component<AlanAction> for AlanRoot {
     where
         Self: Sized,
     {
+        self.header = Some(cx.insert(Header));
         self.poll = Some(cx.subscribe_stream(poll_ticks(), |event, root, cx| {
             let SubscriptionEvent::Item(()) = event else {
                 return;
@@ -230,14 +237,27 @@ impl Component<AlanAction> for AlanRoot {
         }
     }
 
-    fn render(&self, frame: &mut Frame, _area: Rect, _cx: &RenderContext<'_, AlanAction>) {
-        let mut inner = self.inner.lock().expect("alan root poisoned");
-        let Inner {
-            controller,
-            ui,
-            view,
-        } = &mut *inner;
-        view.render(frame, controller, ui);
+    fn render(&self, frame: &mut Frame, area: Rect, cx: &RenderContext<'_, AlanAction>) {
+        if let Some(header) = self.header {
+            let [header_area, body_area] =
+                Layout::vertical([Constraint::Length(1), Constraint::Min(1)]).areas(area);
+            cx.render_entity(header, frame, header_area);
+            let mut inner = self.inner.lock().expect("alan root poisoned");
+            let Inner {
+                controller,
+                ui,
+                view,
+            } = &mut *inner;
+            view.render(frame, body_area, controller, ui);
+        } else {
+            let mut inner = self.inner.lock().expect("alan root poisoned");
+            let Inner {
+                controller,
+                ui,
+                view,
+            } = &mut *inner;
+            view.render(frame, area, controller, ui);
+        }
     }
 }
 

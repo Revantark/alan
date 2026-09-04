@@ -14,7 +14,8 @@ use crate::core::{
 };
 use base64::Engine;
 use component::Component;
-use components::{Chat, Footer, Header};
+pub(crate) use components::Header;
+use components::{Chat, Footer};
 use crossterm::event::{
     Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
@@ -773,7 +774,6 @@ fn is_multiline_enter(key: KeyEvent) -> bool {
 
 #[derive(Debug, Default)]
 pub struct AppView {
-    header: Header,
     chat: Chat,
     footer: Footer,
 }
@@ -783,17 +783,21 @@ impl AppView {
         Self::default()
     }
 
-    pub fn render(&mut self, frame: &mut Frame, controller: &Controller, state: &mut UiState) {
+    pub fn render(
+        &mut self,
+        frame: &mut Frame,
+        area: Rect,
+        controller: &Controller,
+        state: &mut UiState,
+    ) {
         // Measure against the width the editor actually gets, not the frame's.
-        let editor_width = frame.area().width.saturating_sub(theme::PROMPT_GUTTER);
-        let [header_area, chat_area, footer_area] = Layout::vertical([
-            Constraint::Length(1),
+        let editor_width = area.width.saturating_sub(theme::PROMPT_GUTTER);
+        let [chat_area, footer_area] = Layout::vertical([
             Constraint::Min(1),
             Constraint::Length(4 + state.editor_rows(editor_width) + state.attachment_height()),
         ])
-        .areas(frame.area());
+        .areas(area);
 
-        self.header.render(frame, header_area, controller, state);
         self.chat.render(frame, chat_area, controller, state);
         self.footer.render(frame, footer_area, controller, state);
     }

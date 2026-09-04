@@ -1,24 +1,16 @@
-use crate::core::Controller;
-use crate::views::UiState;
-use crate::views::component::Component;
 use crate::views::theme;
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
+use tui::{Component, RenderContext};
 
 #[derive(Debug, Default)]
 pub struct Header;
 
-impl Component for Header {
-    fn render(
-        &mut self,
-        frame: &mut Frame,
-        area: Rect,
-        _controller: &Controller,
-        _state: &mut UiState,
-    ) {
+impl<A: 'static> Component<A> for Header {
+    fn render(&self, frame: &mut Frame, area: Rect, _cx: &RenderContext<'_, A>) {
         let header = Paragraph::new(Line::from(vec![Span::styled(
             " alan ",
             Style::default()
