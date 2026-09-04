@@ -4,10 +4,8 @@ use super::action::{Command, ImageAttachment};
 use super::chat::{ChatController, Entry};
 use super::command::SlashCommand;
 use super::completion::{Commands, CompletionController, Paths};
-use super::login::{LoginController, LoginState};
 use agent::Agent;
 use llm::Usage;
-use providers::{CredentialStore, ProviderRegistry};
 use std::sync::Arc;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -31,12 +29,6 @@ impl Poll {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Overlay {
-    None,
-    Login,
-}
-
 /// What the prompt is doing, and so what Enter does to it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Activity {
@@ -48,39 +40,46 @@ pub enum Activity {
     Idle,
 }
 
+/// Outcome of [`Controller::handle`]: whether the app should quit and
+/// whether the root should open the login overlay entity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CommandOutcome {
+    pub quit: bool,
+    pub open_login: bool,
+}
+
+impl CommandOutcome {
+    pub const NONE: Self = Self {
+        quit: false,
+        open_login: false,
+    };
+    pub const OPEN_LOGIN: Self = Self {
+        quit: false,
+        open_login: true,
+    };
+
+    fn quit(quit: bool) -> Self {
+        Self {
+            quit,
+            open_login: false,
+        }
+    }
+}
+
 /// Coordinates feature controllers. It does not render or handle terminal types.
 pub struct Controller {
     chat: ChatController,
-    login: LoginController,
     completion: CompletionController,
-    overlay: Overlay,
 }
 
 impl Controller {
-    // TODO: drop the attribute once a non-test caller exists. Only `#[cfg(test)]`
-    // code reaches this today, so the binary build reports it as dead.
-    #[allow(dead_code)]
     pub fn new(agent: Agent) -> Self {
-        Self::with_runtime(
-            agent,
-            ProviderRegistry::default(),
-            Arc::new(providers::InMemoryCredentialStore::new()),
-        )
-    }
-
-    pub fn with_runtime(
-        agent: Agent,
-        providers: ProviderRegistry,
-        credentials: Arc<dyn CredentialStore>,
-    ) -> Self {
         Self {
             chat: ChatController::new(agent),
-            login: LoginController::new(providers, credentials),
             completion: CompletionController::new(vec![
                 Box::new(Paths::default()),
                 Box::new(Commands::default()),
             ]),
-            overlay: Overlay::None,
         }
     }
 
@@ -119,14 +118,6 @@ impl Controller {
         self.chat.agent()
     }
 
-    pub fn login_state(&self) -> &LoginState {
-        self.login.state()
-    }
-
-    pub fn login_selection_active(&self) -> bool {
-        matches!(self.login.state(), LoginState::Selecting { .. })
-    }
-
     pub fn completion(&self) -> &CompletionController {
         &self.completion
     }
@@ -135,91 +126,65 @@ impl Controller {
         &mut self.completion
     }
 
-    pub fn overlay(&self) -> Overlay {
-        self.overlay
-    }
-
     pub fn poll(&mut self) -> Poll {
-        self.chat
-            .poll()
-            .combine(self.login.poll())
-            .combine(self.completion.poll())
+        self.chat.poll().combine(self.completion.poll())
     }
 
-    pub fn handle(&mut self, command: Command) -> bool {
+    pub fn handle(&mut self, command: Command) -> CommandOutcome {
         match command {
-            Command::Interrupt => self.abort_or_quit(),
-            Command::Cancel => {
-                if self.overlay == Overlay::Login {
-                    self.close_login();
-                }
+            Command::Interrupt => CommandOutcome::quit(if self.chat.is_busy() {
+                self.chat.abort();
                 false
-            }
+            } else {
+                true
+            }),
+            // Esc with no login overlay left to close; overlays cancel
+            // themselves via `cleanup`, so this is inert.
+            Command::Cancel => CommandOutcome::NONE,
             Command::Submit { text, images } => {
-                self.submit(text, images);
-                false
-            }
-            Command::MoveLoginSelection(delta) => {
-                self.move_login_selection(delta);
-                false
+                if self
+                    .submit(text, images)
+                    .is_some_and(|command| matches!(command, Command::OpenLogin))
+                {
+                    CommandOutcome::OPEN_LOGIN
+                } else {
+                    CommandOutcome::NONE
+                }
             }
             Command::TogglePlanMode => {
                 self.chat.toggle_mode();
-                false
+                CommandOutcome::NONE
             }
+            // Produced by `Controller::submit`, interpreted by `AlanRoot`.
+            // Reaching `handle` directly is a stale no-op.
+            Command::OpenLogin => CommandOutcome::NONE,
         }
     }
 
-    fn abort_or_quit(&mut self) -> bool {
-        if self.overlay == Overlay::Login {
-            self.close_login();
-            return false;
-        }
-        if self.chat.is_busy() {
-            self.chat.abort();
-            return false;
-        }
-        true
-    }
-
-    pub fn submit(&mut self, text: String, images: Vec<ImageAttachment>) {
-        if self.overlay == Overlay::Login {
-            self.login.submit(text);
-            return;
-        }
-
+    pub fn submit(&mut self, text: String, images: Vec<ImageAttachment>) -> Option<Command> {
         // Not trimmed: a leading space means this is a prompt.
         if let Some(command) = SlashCommand::parse(&text) {
             match command {
-                SlashCommand::Login => self.open_login(),
+                SlashCommand::Login => return Some(Command::OpenLogin),
                 SlashCommand::Plan => self.chat.set_mode(agent::Mode::Plan),
                 SlashCommand::Review => self.chat.set_mode(agent::Mode::Review),
                 SlashCommand::Normal => self.chat.set_mode(agent::Mode::Normal),
                 SlashCommand::Help => self.chat.push_info(SlashCommand::help()),
             }
-            return;
+            return None;
         }
 
         let text = text.trim();
         if (text.is_empty() && images.is_empty()) || self.chat.is_busy() {
-            return;
+            return None;
         }
 
         self.chat.submit(text.to_owned(), images);
+        None
     }
 
-    pub fn open_login(&mut self) {
-        self.login.open();
-        self.overlay = Overlay::Login;
-    }
-
-    pub fn move_login_selection(&mut self, delta: isize) {
-        self.login.move_selection(delta);
-    }
-
-    fn close_login(&mut self) {
-        self.login.cancel();
-        self.overlay = Overlay::None;
+    pub fn push_info(&mut self, text: impl Into<String>) {
+        self.chat.push_info(text);
     }
 }
 

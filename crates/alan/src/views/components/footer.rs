@@ -1,10 +1,9 @@
-use crate::core::{Activity, Controller, LoginState};
+use crate::core::{Activity, Controller};
 use crate::views::UiState;
 use crate::views::component::Component;
 use crate::views::components::PopupList;
 use crate::views::theme;
 use agent::Mode;
-use providers::AuthPrompt;
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::prelude::Widget;
@@ -128,33 +127,6 @@ impl Component for Footer {
             Paragraph::new(status_line(controller)).style(Style::default().bg(theme::EDITOR_BG)),
             status_area,
         );
-
-        let secret_input = matches!(
-            controller.login_state(),
-            LoginState::Prompting {
-                prompt: AuthPrompt::Secret { .. },
-                ..
-            }
-        );
-        if secret_input {
-            let value = "•".repeat(state.input().chars().count());
-            let input_line = Line::from(vec![
-                Span::styled("  › ", Style::default().fg(theme::PROMPT_FG)),
-                Span::styled(value.clone(), Style::default().fg(theme::EDITOR_FG)),
-            ]);
-            frame.render_widget(
-                Paragraph::new(Text::from(input_line))
-                    .style(Style::default().fg(theme::EDITOR_FG).bg(theme::EDITOR_BG)),
-                editor_area,
-            );
-            let cursor_x = editor_area
-                .x
-                .saturating_add(4)
-                .saturating_add(value.chars().count() as u16)
-                .min(editor_area.right().saturating_sub(1));
-            frame.set_cursor_position((cursor_x, editor_area.y));
-            return;
-        }
 
         let [prompt_area, input_area] =
             Layout::horizontal([Constraint::Length(theme::PROMPT_GUTTER), Constraint::Min(1)])

@@ -1,4 +1,11 @@
-//! UI-independent actions produced by frontend input adapters.
+//! Frontend semantic actions feeding `UiState::apply` / `handle_event`.
+//!
+//! Most variants are only constructed on the `Event::Key` bridge
+//! (`tui_root::action_from_event`, tests) or in unit tests directly —
+//! production input flows through `handle_event` — so dead-code warnings
+//! here would be noise. Keep every variant while the `Raw(Event)` migration
+//! is in flight; prune once the mapper is total.
+#![allow(dead_code)]
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Action {
@@ -37,6 +44,9 @@ pub enum Command {
         text: String,
         images: Vec<ImageAttachment>,
     },
-    MoveLoginSelection(isize),
+    /// Request the root to open the login overlay entity. Only `AlanRoot`
+    /// interprets it: reaching `Controller::handle` as `OpenLogin` is a stale
+    /// no-op, and `/login` is produced by `Controller::submit`.
+    OpenLogin,
     TogglePlanMode,
 }

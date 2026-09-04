@@ -1,5 +1,6 @@
 mod core;
 mod logging;
+mod login_overlay;
 mod tui_root;
 mod views;
 
@@ -36,7 +37,9 @@ async fn main() -> anyhow::Result<()> {
             reasoning_effort,
         },
     )?;
-    let registry = ProviderRegistry::new([Arc::new(provider) as Arc<dyn Provider>]);
+    let registry = Arc::new(ProviderRegistry::new([
+        Arc::new(provider) as Arc<dyn Provider>
+    ]));
     let session_manager = Arc::new(SessionManager::new(sessions_path()?));
     let resumed_session = if let Some(session_id) = configured_session_id()? {
         let cwd = std::env::current_dir()?;
@@ -57,14 +60,14 @@ async fn main() -> anyhow::Result<()> {
     }
     let agent = agent_builder.build()?;
 
-    let mut app = Controller::with_runtime(agent, registry, credential_store);
+    let mut app = Controller::new(agent);
     if was_resumed {
         app.restore_session_history().await;
     }
     // `Runtime::run` consumes the root, so keep the agent for the saved-session
     // message printed after the TUI exits.
     let agent = app.agent();
-    let result = Runtime::builder(AlanRoot::new(app))
+    let result = Runtime::builder(AlanRoot::new(app, registry, credential_store))
         .key_mapper(AlanKeyMapper)
         .tick_rate(Duration::from_millis(16))
         .build()

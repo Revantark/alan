@@ -6,14 +6,15 @@
 mod component;
 mod components;
 pub mod selection;
-mod theme;
+pub mod theme;
 
 use crate::core::{
     Accept, Action, Command, CompletionController, CompletionItem, Controller, ImageAttachment,
-    Overlay, Poll, SlashCommand,
+    Poll, SlashCommand,
 };
 use base64::Engine;
-use components::{Chat, Footer, Header, LoginOverlay};
+use component::Component;
+use components::{Chat, Footer, Header};
 use crossterm::event::{
     Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
@@ -39,8 +40,6 @@ const WHEEL_LINES_PER_NOTCH: isize = 1;
 const MAX_PENDING_WHEEL: isize = 48;
 
 pub struct UiState {
-    /// Login prompt input. Main editor uses [`TextArea`].
-    input: String,
     editor: TextArea<'static>,
     /// Current rendered top line.
     scroll_offset: usize,
@@ -73,7 +72,6 @@ impl UiState {
         let editor = Self::new_editor();
 
         Self {
-            input: String::new(),
             editor,
             scroll_offset: 0,
             scroll_target: 0,
@@ -89,16 +87,17 @@ impl UiState {
         }
     }
 
-    pub fn apply(&mut self, action: Action, login_selection_active: bool) -> Option<Command> {
+    pub fn apply(&mut self, action: Action) -> Option<Command> {
+        // `apply` only serves the sparse mapped-action path (`Resize`, wheel,
+        // `PageUp/Down`) plus the pre-completion key shim. Main editor input
+        // flows through `handle_event` into the `TextArea`, so the editor
+        // arms below are unreachable in production; they stay for tests.
         let eager_dirty = !matches!(
             action,
             Action::MouseScrollUp | Action::MouseScrollDown | Action::ScrollUp | Action::ScrollDown
         );
         let command = match action {
-            Action::Interrupt => {
-                self.input.clear();
-                Some(Command::Interrupt)
-            }
+            Action::Interrupt => Some(Command::Interrupt),
             Action::TogglePlanMode => Some(Command::TogglePlanMode),
             Action::Resize => None,
             Action::Submit => {
@@ -107,34 +106,26 @@ impl UiState {
                 self.cancel_wheel();
                 let images = std::mem::take(&mut self.attachments);
                 Some(Command::Submit {
-                    text: std::mem::take(&mut self.input),
+                    text: self.editor_text(),
                     images,
                 })
             }
             Action::ClearInput => {
                 // Esc first removes the newest attachment; with none pending
-                // it clears the input as before.
+                // it clears the editor as before.
                 if self.attachments.pop().is_some() {
                     self.dirty = true;
                     None
                 } else {
-                    self.input.clear();
+                    self.editor = Self::new_editor();
+                    self.dirty = true;
                     Some(Command::Cancel)
                 }
             }
-            Action::Backspace => {
+            Action::Backspace | Action::Insert(_) | Action::Paste(_) => {
+                // Editor-owned input flows through `handle_event`, never
+                // `apply`; just drop stale wheel momentum.
                 self.cancel_wheel();
-                self.input.pop();
-                None
-            }
-            Action::Insert(character) => {
-                self.cancel_wheel();
-                self.input.push(character);
-                None
-            }
-            Action::Paste(text) => {
-                self.cancel_wheel();
-                self.input.push_str(&text);
                 None
             }
             Action::PasteOrAttachImage => {
@@ -143,26 +134,18 @@ impl UiState {
                 } else {
                     // No image on the clipboard: fall back to pasting text.
                     match arboard::Clipboard::new().and_then(|mut c| c.get_text()) {
-                        Ok(text) if !text.is_empty() => self.apply(Action::Paste(text), false),
+                        Ok(text) if !text.is_empty() => self.apply(Action::Paste(text)),
                         _ => None,
                     }
                 }
             }
             Action::ScrollUp => {
-                if login_selection_active {
-                    Some(Command::MoveLoginSelection(-1))
-                } else {
-                    self.scroll_by(-(self.viewport_height.max(1) as isize));
-                    None
-                }
+                self.scroll_by(-(self.viewport_height.max(1) as isize));
+                None
             }
             Action::ScrollDown => {
-                if login_selection_active {
-                    Some(Command::MoveLoginSelection(1))
-                } else {
-                    self.scroll_by(self.viewport_height.max(1) as isize);
-                    None
-                }
+                self.scroll_by(self.viewport_height.max(1) as isize);
+                None
             }
             Action::MouseScrollUp => {
                 self.push_wheel(-WHEEL_LINES_PER_NOTCH);
@@ -255,7 +238,7 @@ impl UiState {
                         && key.modifiers.contains(KeyModifiers::SHIFT)) =>
             {
                 completion.dismiss();
-                self.apply(Action::TogglePlanMode, false)
+                self.apply(Action::TogglePlanMode)
             }
             Event::Key(key) if is_multiline_enter(key) => {
                 self.editor.insert_newline();
@@ -267,10 +250,8 @@ impl UiState {
                 completion.dismiss();
                 self.submit_editor_or_accept()
             }
-            Event::Key(key) if key.code == KeyCode::PageUp => self.apply(Action::ScrollUp, false),
-            Event::Key(key) if key.code == KeyCode::PageDown => {
-                self.apply(Action::ScrollDown, false)
-            }
+            Event::Key(key) if key.code == KeyCode::PageUp => self.apply(Action::ScrollUp),
+            Event::Key(key) if key.code == KeyCode::PageDown => self.apply(Action::ScrollDown),
             Event::Key(key)
                 if key.code == KeyCode::Char('c')
                     && key.modifiers.contains(KeyModifiers::CONTROL) =>
@@ -449,8 +430,8 @@ impl UiState {
         rendered_lines: &[ratatui::text::Line<'static>],
     ) -> Option<Command> {
         match mouse.kind {
-            MouseEventKind::ScrollUp => self.apply(Action::MouseScrollUp, false),
-            MouseEventKind::ScrollDown => self.apply(Action::MouseScrollDown, false),
+            MouseEventKind::ScrollUp => self.apply(Action::MouseScrollUp),
+            MouseEventKind::ScrollDown => self.apply(Action::MouseScrollDown),
             MouseEventKind::Down(MouseButton::Left) => {
                 if self.is_mouse_in_chat(mouse.column, mouse.row) {
                     let now = Instant::now();
@@ -634,10 +615,6 @@ impl UiState {
         self.scroll_offset
     }
 
-    pub(super) fn input(&self) -> &str {
-        &self.input
-    }
-
     pub(super) fn editor(&self) -> &TextArea<'static> {
         &self.editor
     }
@@ -799,7 +776,6 @@ pub struct AppView {
     header: Header,
     chat: Chat,
     footer: Footer,
-    login: LoginOverlay,
 }
 
 impl AppView {
@@ -808,14 +784,6 @@ impl AppView {
     }
 
     pub fn render(&mut self, frame: &mut Frame, controller: &Controller, state: &mut UiState) {
-        use component::Component;
-
-        if controller.overlay() == Overlay::Login {
-            frame.render_widget(ratatui::widgets::Clear, frame.area());
-            self.login.render(frame, frame.area(), controller, state);
-            return;
-        }
-
         // Measure against the width the editor actually gets, not the frame's.
         let editor_width = frame.area().width.saturating_sub(theme::PROMPT_GUTTER);
         let [header_area, chat_area, footer_area] = Layout::vertical([
@@ -903,7 +871,7 @@ mod tests {
 
         // Queued wheel at the edge is dropped as stale momentum, so no
         // redraw is queued after hitting the bottom.
-        state.apply(Action::MouseScrollDown, false);
+        state.apply(Action::MouseScrollDown);
         assert!(!state.take_dirty());
         assert!(!state.flush_wheel());
         assert!(!state.take_dirty());
@@ -919,7 +887,7 @@ mod tests {
 
         // A 100-notch swipe queues without dirtying: no redraw per event.
         for _ in 0..100 {
-            state.apply(Action::MouseScrollDown, false);
+            state.apply(Action::MouseScrollDown);
         }
         assert_eq!(state.pending_wheel, MAX_PENDING_WHEEL);
         assert!(!state.take_dirty());
@@ -937,7 +905,7 @@ mod tests {
         state.sync_scroll(200, 20);
         state.scroll_by(-100);
         let _ = state.take_dirty();
-        state.apply(Action::MouseScrollDown, false);
+        state.apply(Action::MouseScrollDown);
         assert_eq!(state.pending_wheel, WHEEL_LINES_PER_NOTCH);
 
         state.handle_editor_event_for_test(key(crossterm::event::KeyCode::Char('a')));
@@ -1275,7 +1243,7 @@ mod tests {
     #[test]
     fn escape_removes_last_attachment_before_clearing_input() {
         let mut state = UiState::new();
-        state.input.push_str("hi");
+        state.editor.insert_str("hi");
         state.attachments.push(ImageAttachment {
             name: "image-1".into(),
             mime_type: "image/png".into(),
@@ -1293,14 +1261,14 @@ mod tests {
         );
         assert_eq!(state.attachments.len(), 1);
         assert_eq!(state.attachments[0].name, "image-1");
-        assert_eq!(state.input, "hi");
+        assert_eq!(state.editor_text(), "hi");
 
         assert_eq!(
             state.handle_editor_event_for_test(key(crossterm::event::KeyCode::Esc)),
             None
         );
         assert!(state.attachments.is_empty());
-        assert_eq!(state.input, "hi");
+        assert_eq!(state.editor_text(), "hi");
         assert!(state.take_dirty());
 
         // No attachments left: Esc is ignored again, as before.
@@ -1308,7 +1276,7 @@ mod tests {
             state.handle_editor_event_for_test(key(crossterm::event::KeyCode::Esc)),
             None
         );
-        assert_eq!(state.input, "hi");
+        assert_eq!(state.editor_text(), "hi");
     }
 
     /// Esc still dismisses a text selection even while attachments are
