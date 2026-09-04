@@ -56,8 +56,8 @@ impl ChatController {
         }
     }
 
-    pub async fn session_id(&self) -> Option<String> {
-        self.agent.session_id().await
+    pub fn agent(&self) -> Arc<Agent> {
+        Arc::clone(&self.agent)
     }
 
     pub async fn restore_session_history(&mut self) {

@@ -115,8 +115,8 @@ impl Controller {
         self.chat.restore_session_history().await;
     }
 
-    pub async fn session_id(&self) -> Option<String> {
-        self.chat.session_id().await
+    pub fn agent(&self) -> Arc<Agent> {
+        self.chat.agent()
     }
 
     pub fn login_state(&self) -> &LoginState {
