@@ -35,7 +35,7 @@ async fn main() -> anyhow::Result<()> {
         .with_model(&settings.current().model)
         .build()?;
     let registry = ProviderRegistry::new([Arc::new(provider) as Arc<dyn Provider>]);
-    let model = settings::bind(&registry, settings.current())?;
+    let model = settings.current().bind(&registry)?;
     let session_manager = Arc::new(SessionManager::new(alan_dir.join("sessions")));
     let resumed_session = if let Some(session_id) = configured_session_id()? {
         Some(session_manager.get_session(&session_id, &cwd).await?)

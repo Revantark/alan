@@ -5,7 +5,7 @@ use super::chat::{ChatController, Entry};
 use super::command::SlashCommand;
 use super::completion::{Commands, CompletionController, Paths};
 use super::login::{LoginController, LoginState};
-use super::settings::{self, SettingsController};
+use super::settings::{self, SettingsController, SettingsState};
 use agent::Agent;
 use llm::Usage;
 use providers::{CredentialStore, ProviderRegistry};
@@ -167,7 +167,7 @@ impl Controller {
             }
             Ok(poll) => poll,
             Err(error) => {
-                self.chat.push_error(format!("settings: {error}"));
+                self.chat.push_error(format!("settings: {error:#}"));
                 Poll::Error
             }
         }
@@ -175,7 +175,7 @@ impl Controller {
 
     fn apply_settings(&mut self) {
         let next = self.settings.current().clone();
-        match settings::bind(&self.providers, &next) {
+        match next.bind(&self.providers) {
             Ok(model) => self.chat.set_model(model),
             Err(error) => self
                 .chat
@@ -291,8 +291,8 @@ impl Controller {
         self.overlay = Overlay::None;
     }
 
-    pub fn settings(&self) -> &SettingsController {
-        &self.settings
+    pub fn settings_state(&self) -> Option<SettingsState> {
+        self.settings.state()
     }
 
     /// Take the value a just-opened overlay prompt should start from.
@@ -305,7 +305,7 @@ impl Controller {
         match outcome {
             Ok(true) => self.apply_settings(),
             Ok(false) => {}
-            Err(reason) => self.chat.push_error(format!("settings: {reason}")),
+            Err(reason) => self.chat.push_error(format!("settings: {reason:#}")),
         }
     }
 
@@ -552,11 +552,11 @@ mod tests {
     fn shift_tab_cycles_the_settings_scope_while_that_list_is_open() {
         let mut controller = make_controller();
         controller.submit("/settings".into(), vec![]);
-        let before = controller.settings().overlay().expect("open").scope;
+        let before = controller.settings_state().expect("open").scope;
 
         controller.handle(Command::Cycle);
 
-        let overlay = controller.settings().overlay().expect("open");
+        let overlay = controller.settings_state().expect("open");
         assert_ne!(overlay.scope, before, "the scope moved");
         assert_eq!(controller.mode(), agent::Mode::Normal, "the agent did not");
     }
@@ -582,11 +582,14 @@ mod tests {
         controller.submit("/settings".into(), vec![]);
         // Enter on `model`, a text row, opens its prompt.
         controller.submit(String::new(), vec![]);
-        assert!(controller.settings().editing());
+        assert!(controller.settings_state().is_some_and(|s| s.editing));
 
         controller.handle(Command::Cycle);
 
-        assert!(!controller.settings().editing(), "the prompt closed");
+        assert!(
+            !controller.settings_state().is_some_and(|s| s.editing),
+            "the prompt closed"
+        );
         assert_eq!(controller.overlay(), Overlay::Settings, "the list stayed");
     }
 
@@ -598,7 +601,7 @@ mod tests {
 
         controller.handle(Command::MoveSelection(1));
         assert_eq!(
-            controller.settings().overlay().expect("open").selected,
+            controller.settings_state().expect("open").selected,
             1,
             "the settings list moved"
         );
@@ -623,10 +626,13 @@ mod tests {
 
         // Enter on `model`, a text row, opens its prompt.
         controller.submit(String::new(), vec![]);
-        assert!(controller.settings().editing());
+        assert!(controller.settings_state().is_some_and(|s| s.editing));
 
         controller.handle(Command::Cancel);
-        assert!(!controller.settings().editing(), "the prompt closed");
+        assert!(
+            !controller.settings_state().is_some_and(|s| s.editing),
+            "the prompt closed"
+        );
         assert_eq!(
             controller.overlay(),
             Overlay::Settings,

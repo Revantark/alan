@@ -1,6 +1,7 @@
-//! Finding, reading and writing the settings files.
+//! Where the settings files live, and how one gets written.
+//!
+//! Reading one into a layer lives in [`layers`](super::layers).
 
-use super::{Layers, SETTINGS, SettingsLayer, env};
 use std::path::{Path, PathBuf};
 
 pub(super) const SETTINGS_FILE: &str = "settings.json";
@@ -12,59 +13,12 @@ pub fn global_path(dir: &Path) -> PathBuf {
     dir.join(SETTINGS_FILE)
 }
 
-/// Read every source. Errors are fatal at startup and non-fatal on reload;
-/// the caller decides which.
-pub fn load_settings_layers(global_dir: &Path, cwd: &Path) -> anyhow::Result<Layers> {
-    let global_path = global_path(global_dir);
-    let global = read_layer(&global_path)?;
-
-    let project = match project_settings(cwd, &global_path) {
-        Some(path) => project_layer(&path)?,
-        None => SettingsLayer::default(),
-    };
-
-    Ok(Layers::new(global, project, env::env_layer()?))
-}
-
-/// Rejects rather than ignores keys a project file may not set, so the mistake
-/// is visible.
-fn project_layer(path: &Path) -> anyhow::Result<SettingsLayer> {
-    let layer = read_layer(path)?;
-    let refused: Vec<_> = SETTINGS
-        .iter()
-        .filter(|def| !def.project_safe && layer.has(def.key))
-        .map(|def| format!("`{}`", def.key))
-        .collect();
-    if !refused.is_empty() {
-        anyhow::bail!(
-            "{}: {} cannot be set by a project file",
-            path.display(),
-            refused.join(", ")
-        );
-    }
-    Ok(layer)
-}
-
-/// Not having a settings file is normal and silent. Anything else — unreadable,
-/// bad syntax, a wrong type, an unknown key — is an error naming the file.
-/// Running on defaults because a file could not be read would be worse.
-fn read_layer(path: &Path) -> anyhow::Result<SettingsLayer> {
-    let text = match std::fs::read_to_string(path) {
-        Ok(text) => text,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(SettingsLayer::default());
-        }
-        Err(error) => anyhow::bail!("{}: {error}", path.display()),
-    };
-    serde_json::from_str(&text).map_err(|error| anyhow::anyhow!("{}: {error}", path.display()))
-}
-
 /// The nearest project settings file, if any.
 ///
 /// Stops at a `.git` boundary: an ancestor's settings apply to a package in a
 /// monorepo, but not to an unrelated checkout that happens to sit below it.
-pub fn project_settings(cwd: &Path, global: &Path) -> Option<PathBuf> {
-    for dir in cwd.ancestors() {
+pub fn project_settings(current_dir: &Path, global: &Path) -> Option<PathBuf> {
+    for dir in current_dir.ancestors() {
         let candidate = dir.join(SETTINGS_DIR).join(SETTINGS_FILE);
         if candidate.is_file() && !same_file(&candidate, global) {
             return Some(candidate);
@@ -78,16 +32,18 @@ pub fn project_settings(cwd: &Path, global: &Path) -> Option<PathBuf> {
 
 /// The nearest enclosing repository, if any. `Some` also answers whether a
 /// project write has somewhere sensible to go.
-pub(super) fn repo_root(cwd: &Path) -> Option<&Path> {
-    cwd.ancestors().find(|dir| dir.join(".git").exists())
+pub(super) fn repo_root(current_dir: &Path) -> Option<&Path> {
+    current_dir
+        .ancestors()
+        .find(|dir| dir.join(".git").exists())
 }
 
 /// Where a project write lands when no project file exists yet. Prefers the
 /// repo root, so running in `repo/crates/agent` does not bury it four levels
 /// down.
-pub fn project_target(cwd: &Path) -> PathBuf {
-    repo_root(cwd)
-        .unwrap_or(cwd)
+pub fn project_target(current_dir: &Path) -> PathBuf {
+    repo_root(current_dir)
+        .unwrap_or(current_dir)
         .join(SETTINGS_DIR)
         .join(SETTINGS_FILE)
 }
@@ -194,7 +150,6 @@ fn atomic_write(path: &Path, contents: &str) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::settings::SETTINGS;
 
     /// Removes the directory on drop, so a test leaves the filesystem as it
     /// found it even when it panics part-way through.
@@ -214,78 +169,6 @@ mod tests {
         let path = dir.join(SETTINGS_FILE);
         std::fs::write(&path, contents).expect("write");
         (Scratch(dir), path)
-    }
-
-    #[test]
-    fn a_missing_file_is_silent() {
-        let layer = read_layer(std::path::Path::new("/nonexistent/alan/settings.json"))
-            .expect("not having a settings file is normal");
-        assert_eq!(layer, SettingsLayer::default());
-    }
-
-    #[test]
-    fn a_valid_file_becomes_a_layer() {
-        let (_dir, path) = temp_file("valid", r#"{"model":"opus","tools":{"web_search":true}}"#);
-        let layer = read_layer(&path).expect("valid file");
-
-        assert_eq!(layer.model.as_deref(), Some("opus"));
-        assert_eq!(layer.tools.unwrap().web_search, Some(true));
-    }
-
-    /// Starting with silently different settings is worse than not starting:
-    /// you would see the default model and wonder why the file did nothing.
-    #[test]
-    fn malformed_json_refuses_to_start() {
-        let (_dir, path) = temp_file("malformed", "{ this is not json");
-        let error = read_layer(&path).expect_err("malformed config must be fatal");
-        assert!(
-            error.to_string().contains("settings.json"),
-            "the message must name the file: {error}"
-        );
-    }
-
-    #[test]
-    fn a_wrongly_typed_value_refuses_to_start() {
-        let (_dir, path) = temp_file("typed", r#"{"model":42}"#);
-        assert!(read_layer(&path).is_err());
-    }
-
-    /// A typo means the setting you wrote is not applied, so it is an error.
-    /// The message names the valid keys, including inside a nested group.
-    #[test]
-    fn an_unknown_key_refuses_to_start_and_names_the_valid_ones() {
-        let (_dir, path) = temp_file("unknown", r#"{"model":"opus","reasoning_efort":"high"}"#);
-        let error = read_layer(&path)
-            .expect_err("a typo must be fatal")
-            .to_string();
-        assert!(error.contains("reasoning_efort"), "{error}");
-        assert!(
-            error.contains("reasoning_effort"),
-            "names the real key: {error}"
-        );
-
-        let (_dir, path) = temp_file("unknown-nested", r#"{"tools":{"web_serch":true}}"#);
-        let error = read_layer(&path)
-            .expect_err("a nested typo must be fatal")
-            .to_string();
-        assert!(error.contains("web_serch"), "{error}");
-        assert!(error.contains("web_search"), "names the real key: {error}");
-    }
-
-    #[test]
-    fn a_known_group_is_not_itself_an_unknown_key() {
-        let (_dir, path) = temp_file("group", r#"{"tools":{"web_search":true}}"#);
-        read_layer(&path).expect("`tools` is a group, not a typo");
-    }
-
-    #[test]
-    fn load_reads_the_global_file_from_the_directory_it_is_given() {
-        let (_dir, path) = temp_file("load", "{ not json");
-        let dir = path.parent().expect("temp dir");
-        assert!(
-            load_settings_layers(dir, dir).is_err(),
-            "the global file's parse failure must reach the caller"
-        );
     }
 
     /// Writing from the typed struct would drop anything this build does not
@@ -357,19 +240,5 @@ mod tests {
         let raw: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&real).unwrap()).unwrap();
         assert_eq!(raw["model"], "after", "the target got the write");
-    }
-
-    /// A project file may not set anything that executes, redirects the
-    /// network, or touches credentials — and saying so beats ignoring it.
-    #[test]
-    fn a_project_file_is_refused_when_it_sets_something_it_may_not() {
-        // Every v1 setting is project-safe, so this asserts the gate is wired
-        // rather than that any particular key is blocked.
-        assert!(
-            SETTINGS.iter().all(|def| def.project_safe),
-            "update this test when the first user-scope-only setting lands"
-        );
-        let (_dir, path) = temp_file("project-safe", r#"{"model":"opus"}"#);
-        assert!(project_layer(&path).is_ok());
     }
 }

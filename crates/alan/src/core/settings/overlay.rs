@@ -1,6 +1,9 @@
-//! State for the `/settings` list. Rendering lives in `views`.
+//! State for the `/settings` list, and the value handed to `views` to draw it.
+//!
+//! Reads [`Layers`] rather than the store, so nothing here depends on how the
+//! files are watched. Rendering lives in `views`.
 
-use super::{Kind, Layer, Outcome, SETTINGS, SettingDef, Settings, SettingsController, Value};
+use super::{Kind, Layer, Layers, SETTINGS, SettingDef, Settings, Value};
 use std::path::PathBuf;
 
 /// Whether editing this row does anything.
@@ -23,22 +26,33 @@ pub struct Row {
     pub cycles: bool,
 }
 
-pub struct SettingsOverlay {
+/// Everything the `/settings` overlay needs to draw itself, handed over as one
+/// value so the view never reaches into the store.
+pub struct SettingsState {
     pub scope: Layer,
+    /// Where a write in this scope lands.
+    pub path: PathBuf,
+    /// `false` when that file has not been created yet.
+    pub file_exists: bool,
+    pub rows: Vec<Row>,
     pub selected: usize,
-    /// A prompt is open for this row. The text lives in the shared editor.
+    /// A prompt is open for the selected row.
     pub editing: bool,
+}
+
+pub struct SettingsOverlay {
+    pub(super) scope: Layer,
+    pub(super) selected: usize,
+    /// A prompt is open for this row. The text lives in the shared editor.
+    pub(super) editing: bool,
     /// What a just-opened prompt should start from, taken once by the view.
-    pub seed: Option<String>,
+    pub(super) seed: Option<String>,
 }
 
 impl SettingsOverlay {
-    /// Opens in project scope only when a project write has somewhere to go.
-    fn new(settings: &SettingsController) -> Self {
-        let has_project =
-            settings.project_file().is_some() || super::repo_root(&settings.cwd).is_some();
+    pub(super) fn new(has_project_scope: bool) -> Self {
         Self {
-            scope: if has_project {
+            scope: if has_project_scope {
                 Layer::Project
             } else {
                 Layer::Global
@@ -49,16 +63,16 @@ impl SettingsOverlay {
         }
     }
 
-    fn def(&self) -> &'static SettingDef {
+    pub(super) fn def(&self) -> &'static SettingDef {
         &SETTINGS[self.selected.min(SETTINGS.len() - 1)]
     }
 
-    fn move_by(&mut self, delta: isize) {
+    pub(super) fn move_by(&mut self, delta: isize) {
         let count = SETTINGS.len() as isize;
         self.selected = (self.selected as isize + delta).rem_euclid(count) as usize;
     }
 
-    fn toggle_scope(&mut self) {
+    pub(super) fn toggle_scope(&mut self) {
         self.scope = match self.scope {
             Layer::Project => Layer::Global,
             _ => Layer::Project,
@@ -66,12 +80,12 @@ impl SettingsOverlay {
         self.editing = false;
     }
 
-    fn rows(&self, settings: &SettingsController) -> Vec<Row> {
-        let in_scope = settings.as_of(self.scope);
+    pub(super) fn rows(&self, layers: &Layers) -> Vec<Row> {
+        let in_scope = layers.resolve_as_of(self.scope);
         SETTINGS
             .iter()
             .map(|def| {
-                let origin = settings.origin(def.key);
+                let origin = layers.origin_layer(def.key);
                 Row {
                     label: def.label,
                     help: def.help,
@@ -87,12 +101,12 @@ impl SettingsOverlay {
             .collect()
     }
 
-    fn shown_value(&self, in_scope: &Settings) -> String {
+    pub(super) fn shown_value(&self, in_scope: &Settings) -> String {
         show((self.def().read)(in_scope))
     }
 
     /// `None` when the row needs a prompt rather than a cycle.
-    fn next_value(&self, current: &Settings) -> Option<serde_json::Value> {
+    pub(super) fn next_value(&self, current: &Settings) -> Option<serde_json::Value> {
         let def = self.def();
         match def.kind {
             Kind::Bool => match (def.read)(current) {
@@ -111,7 +125,7 @@ impl SettingsOverlay {
     }
 
     /// An empty string clears the key, as `Backspace` does.
-    fn parse_edit(text: &str) -> Option<serde_json::Value> {
+    pub(super) fn parse_edit(text: &str) -> Option<serde_json::Value> {
         let text = text.trim();
         (!text.is_empty()).then(|| serde_json::Value::String(text.to_owned()))
     }
@@ -126,124 +140,31 @@ fn show(value: Value) -> String {
     }
 }
 
-/// Driving the `/settings` list. Kept beside [`SettingsOverlay`] rather than
-/// with the store, whose job is files and layers.
-impl SettingsController {
-    pub fn overlay(&self) -> Option<&SettingsOverlay> {
-        self.overlay.as_ref()
-    }
-
-    pub fn open(&mut self) {
-        self.overlay = Some(SettingsOverlay::new(self));
-    }
-
-    pub fn close(&mut self) {
-        self.overlay = None;
-    }
-
-    /// Where the open overlay writes, and whether that file exists yet.
-    pub fn target(&self) -> Option<PathBuf> {
-        self.overlay.as_ref().map(|o| self.path(o.scope))
-    }
-
-    /// A prompt is open for the selected row.
-    pub fn editing(&self) -> bool {
-        self.overlay.as_ref().is_some_and(|o| o.editing)
-    }
-
-    pub fn rows(&self) -> Vec<Row> {
-        self.overlay
-            .as_ref()
-            .map(|overlay| overlay.rows(self))
-            .unwrap_or_default()
-    }
-
-    pub fn move_selection(&mut self, delta: isize) {
-        if let Some(overlay) = self.overlay.as_mut() {
-            overlay.move_by(delta);
-        }
-    }
-
-    pub fn toggle_scope(&mut self) {
-        if let Some(overlay) = self.overlay.as_mut() {
-            overlay.toggle_scope();
-        }
-    }
-
-    /// Abandon a row's prompt, leaving the list open.
-    pub fn cancel_edit(&mut self) {
-        if let Some(overlay) = self.overlay.as_mut() {
-            overlay.editing = false;
-        }
-    }
-
-    /// Take the value a just-opened prompt should start from.
-    pub fn take_seed(&mut self) -> Option<String> {
-        self.overlay.as_mut()?.seed.take()
-    }
-
-    /// Cycles the row, or opens a prompt when it needs typing. Both read the
-    /// scope's value, so what you cycle from is what the row shows.
-    pub fn activate(&mut self) -> Outcome {
-        let Some(overlay) = self.overlay.as_ref() else {
-            return Ok(false);
-        };
-        let in_scope = self.as_of(overlay.scope);
-        let key = overlay.def().key;
-        match overlay.next_value(&in_scope) {
-            Some(value) => self.write(key, Some(value)),
-            None => {
-                let seed = overlay.shown_value(&in_scope);
-                if let Some(overlay) = self.overlay.as_mut() {
-                    overlay.seed = Some(seed);
-                    overlay.editing = true;
-                }
-                Ok(false)
-            }
-        }
-    }
-
-    /// Only a row this scope owns can be cleared.
-    pub fn clear(&mut self) -> Outcome {
-        let Some(overlay) = self.overlay.as_ref() else {
-            return Ok(false);
-        };
-        let key = overlay.def().key;
-        if self.origin(key) != overlay.scope {
-            return Ok(false);
-        }
-        self.write(key, None)
-    }
-
-    pub fn submit_edit(&mut self, text: &str) -> Outcome {
-        let Some(overlay) = self.overlay.as_ref() else {
-            return Ok(false);
-        };
-        let key = overlay.def().key;
-        let value = SettingsOverlay::parse_edit(text);
-        if let Some(overlay) = self.overlay.as_mut() {
-            overlay.editing = false;
-        }
-        self.write(key, value)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn controller(global: &str, project: Option<&str>) -> (SettingsController, tempdirs::Dirs) {
+    fn layers(global: &str, project: Option<&str>) -> (Layers, tempdirs::Dirs) {
         let dirs = tempdirs::Dirs::new();
         dirs.write_global(global);
         if let Some(project) = project {
             dirs.write_project(project);
         }
-        let controller = SettingsController::new(&dirs.home, &dirs.project).expect("valid");
-        (controller, dirs)
+        let layers = Layers::load(&dirs.home, &dirs.project).expect("valid");
+        (layers, dirs)
+    }
+
+    fn overlay_at(scope: Layer, key: &str) -> SettingsOverlay {
+        SettingsOverlay {
+            scope,
+            selected: SETTINGS.iter().position(|def| def.key == key).expect("key"),
+            editing: false,
+            seed: None,
+        }
     }
 
     mod tempdirs {
-        use crate::core::settings::files::{SETTINGS_DIR, SETTINGS_FILE};
+        use crate::core::settings::storage::{SETTINGS_DIR, SETTINGS_FILE};
         use std::path::PathBuf;
         use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -297,17 +218,12 @@ mod tests {
 
     #[test]
     fn markers_distinguish_owned_inherited_and_overridden() {
-        let (settings, _dirs) = controller(
+        let (layers, _dirs) = layers(
             r#"{"model":"from-global","tools":{"web_fetch":true}}"#,
             Some(r#"{"tools":{"web_search":true}}"#),
         );
-        let mut overlay = SettingsOverlay {
-            scope: Layer::Project,
-            selected: 0,
-            editing: false,
-            seed: None,
-        };
-        let rows = overlay.rows(&settings);
+        let mut overlay = overlay_at(Layer::Project, "model");
+        let rows = overlay.rows(&layers);
 
         assert_eq!(row(&rows, "web search").marker, Marker::SetHere);
         assert_eq!(
@@ -318,7 +234,7 @@ mod tests {
 
         // From global scope the project file is now the one imposing a value.
         overlay.toggle_scope();
-        let rows = overlay.rows(&settings);
+        let rows = overlay.rows(&layers);
         assert_eq!(row(&rows, "model").marker, Marker::SetHere);
         assert_eq!(
             row(&rows, "web search").marker,
@@ -329,21 +245,13 @@ mod tests {
 
     #[test]
     fn a_row_shows_its_own_scopes_value_not_the_resolved_one() {
-        let (settings, _dirs) = controller(
+        let (layers, _dirs) = layers(
             r#"{"reasoning_effort":"low"}"#,
             Some(r#"{"reasoning_effort":"max"}"#),
         );
-        let mut overlay = SettingsOverlay {
-            scope: Layer::Global,
-            selected: SETTINGS
-                .iter()
-                .position(|d| d.key == "reasoning_effort")
-                .unwrap(),
-            editing: false,
-            seed: None,
-        };
+        let mut overlay = overlay_at(Layer::Global, "reasoning_effort");
 
-        let rows = overlay.rows(&settings);
+        let rows = overlay.rows(&layers);
         let effort = row(&rows, "reasoning effort");
         assert_eq!(
             effort.value, "low",
@@ -353,50 +261,36 @@ mod tests {
 
         // And cycling starts from what the row showed.
         assert_eq!(
-            overlay.next_value(&settings.as_of(Layer::Global)),
+            overlay.next_value(&layers.resolve_as_of(Layer::Global)),
             Some(serde_json::json!("medium")),
             "cycles from low, not from max"
         );
 
         overlay.toggle_scope();
-        assert_eq!(
-            row(&overlay.rows(&settings), "reasoning effort").value,
-            "max"
-        );
+        assert_eq!(row(&overlay.rows(&layers), "reasoning effort").value, "max");
     }
 
     #[test]
     fn enter_cycles_bools_and_enums_but_not_text() {
-        let (settings, _dirs) = controller(r#"{"reasoning_effort":"low"}"#, None);
-        let mut overlay = SettingsOverlay {
-            scope: Layer::Global,
-            selected: 0,
-            editing: false,
-            seed: None,
-        };
+        let (layers, _dirs) = layers(r#"{"reasoning_effort":"low"}"#, None);
+        let current = layers.resolve();
 
-        overlay.selected = SETTINGS
-            .iter()
-            .position(|d| d.key == "tools.web_search")
-            .unwrap();
+        let overlay = overlay_at(Layer::Global, "tools.web_search");
         assert_eq!(
-            overlay.next_value(settings.current()),
+            overlay.next_value(&current),
             Some(serde_json::Value::Bool(true))
         );
 
-        overlay.selected = SETTINGS
-            .iter()
-            .position(|d| d.key == "reasoning_effort")
-            .unwrap();
+        let overlay = overlay_at(Layer::Global, "reasoning_effort");
         assert_eq!(
-            overlay.next_value(settings.current()),
+            overlay.next_value(&current),
             Some(serde_json::json!("medium")),
             "cycles to the next option, not a toggle"
         );
 
-        overlay.selected = SETTINGS.iter().position(|d| d.key == "model").unwrap();
+        let overlay = overlay_at(Layer::Global, "model");
         assert_eq!(
-            overlay.next_value(settings.current()),
+            overlay.next_value(&current),
             None,
             "text rows need a prompt"
         );
@@ -413,12 +307,7 @@ mod tests {
 
     #[test]
     fn selection_wraps_in_both_directions() {
-        let mut overlay = SettingsOverlay {
-            scope: Layer::Global,
-            selected: 0,
-            editing: false,
-            seed: None,
-        };
+        let mut overlay = SettingsOverlay::new(false);
         overlay.move_by(-1);
         assert_eq!(overlay.selected, SETTINGS.len() - 1);
         overlay.move_by(1);

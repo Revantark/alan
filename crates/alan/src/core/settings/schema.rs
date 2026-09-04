@@ -24,9 +24,6 @@ pub struct SettingDef {
     pub label: &'static str,
     pub help: &'static str,
     pub kind: Kind,
-    /// May a project's `.alan/settings.json` set this? `false` for anything
-    /// that can execute code, change an endpoint, or touch credentials.
-    pub project_safe: bool,
     pub read: fn(&Settings) -> Value,
 }
 
@@ -49,7 +46,6 @@ pub const SETTINGS: &[SettingDef] = &[
         label: "model",
         help: "Provider model id used for new sessions.",
         kind: Kind::Text,
-        project_safe: true,
         read: |s| Value::Text(s.model.clone()),
     },
     SettingDef {
@@ -57,7 +53,6 @@ pub const SETTINGS: &[SettingDef] = &[
         label: "reasoning effort",
         help: "Hidden thinking spent before answering. `auto` defers to the model; `none` disables it.",
         kind: Kind::Enum(EFFORTS),
-        project_safe: true,
         read: |s| Value::Enum(s.reasoning_effort.as_str()),
     },
     SettingDef {
@@ -65,7 +60,6 @@ pub const SETTINGS: &[SettingDef] = &[
         label: "web search",
         help: "Offer the provider's web search tool.",
         kind: Kind::Bool,
-        project_safe: true,
         read: |s| Value::Bool(s.tools.web_search),
     },
     SettingDef {
@@ -73,7 +67,6 @@ pub const SETTINGS: &[SettingDef] = &[
         label: "web fetch",
         help: "Offer the provider's web fetch tool.",
         kind: Kind::Bool,
-        project_safe: true,
         read: |s| Value::Bool(s.tools.web_fetch),
     },
 ];
@@ -91,7 +84,7 @@ mod tests {
         assert_eq!(keys.len(), count, "duplicate key in SETTINGS");
     }
 
-    /// Or the UI could offer a value the resolver rejects.
+    /// A stale option would have the UI offer a value the resolver rejects.
     #[test]
     fn enum_options_all_parse() {
         for def in SETTINGS {

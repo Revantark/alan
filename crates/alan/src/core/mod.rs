@@ -14,3 +14,4 @@ pub use command::SlashCommand;
 pub use completion::{Accept, CompletionController, CompletionItem, CompletionStatus};
 pub use controller::{Activity, Controller, Overlay, Poll};
 pub use login::LoginState;
+pub use settings::{Layer, Marker};

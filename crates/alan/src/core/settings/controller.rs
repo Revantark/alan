@@ -1,45 +1,48 @@
-//! Keeps the running agent in step with the settings files.
+//! Keeps the running agent in step with the settings files, and drives the
+//! `/settings` list over them.
 //!
 //! Polls mtime rather than watching for events: editors save atomically, so an
 //! ordinary `:w` arrives as remove-then-create and an event watcher would need
 //! to watch the directory, filter and debounce to catch it. A renamed file has
 //! a different mtime either way.
 
-use super::{Layer, Layers, Settings, SettingsOverlay};
+use super::{Layer, Layers, Settings, SettingsOverlay, SettingsState};
 use crate::core::Poll;
+use anyhow::Context;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
 
 const CHECK_INTERVAL: Duration = Duration::from_secs(1);
 
 /// `Ok(true)` means the settings changed and need applying.
-pub type Outcome = Result<bool, String>;
+pub type Outcome = anyhow::Result<bool>;
 
 /// Includes the paths themselves, so a project file appearing or being deleted
-/// counts as a change
+/// counts as a change.
 type Fingerprint = Vec<(PathBuf, Option<SystemTime>)>;
 
 pub struct SettingsController {
-    global_dir: PathBuf,
-    pub(super) cwd: PathBuf,
-    current: Settings,
+    alan_dir: PathBuf,
+    current_dir: PathBuf,
+
+    settings: Settings,
     /// Unfolded, so a single scope can be read and a key's origin found.
     layers: Layers,
     seen: Fingerprint,
     next_check: Instant,
-    pub(super) overlay: Option<SettingsOverlay>,
+    overlay: Option<SettingsOverlay>,
 }
 
 impl SettingsController {
     /// Loads the files itself, by the same route [`reload`](Self::reload) uses.
-    pub fn new(global_dir: &Path, cwd: &Path) -> anyhow::Result<Self> {
-        let layers = super::load_settings_layers(global_dir, cwd)?;
-        let seen = fingerprint(global_dir, cwd);
+    pub fn new(alan_dir: &Path, current_dir: &Path) -> anyhow::Result<Self> {
+        let layers = Layers::load(alan_dir, current_dir)?;
+        let seen = fingerprint(alan_dir, current_dir);
 
         Ok(Self {
-            global_dir: global_dir.to_path_buf(),
-            cwd: cwd.to_path_buf(),
-            current: layers.resolve(),
+            alan_dir: alan_dir.to_path_buf(),
+            current_dir: current_dir.to_path_buf(),
+            settings: layers.resolve(),
             layers,
             seen,
             next_check: Instant::now() + CHECK_INTERVAL,
@@ -53,27 +56,27 @@ impl SettingsController {
         let Some(path) = self.target() else {
             return Ok(false);
         };
-        super::write_key(&path, key, value).map_err(|error| error.to_string())?;
-        self.seen = fingerprint(&self.global_dir, &self.cwd);
+        super::write_key(&path, key, value)?;
+        self.seen = fingerprint(&self.alan_dir, &self.current_dir);
         self.reload()
     }
 
     /// What a row in `scope` displays and edits — not the resolved value.
-    pub fn as_of(&self, scope: Layer) -> Settings {
+    fn as_of(&self, scope: Layer) -> Settings {
         self.layers.resolve_as_of(scope)
     }
 
     pub fn current(&self) -> &Settings {
-        &self.current
+        &self.settings
     }
 
-    pub fn origin(&self, key: &str) -> Layer {
-        self.layers.origin_of(key)
+    fn origin(&self, key: &str) -> Layer {
+        self.layers.origin_layer(key)
     }
 
     /// The project file in force, if one exists.
-    pub fn project_file(&self) -> Option<PathBuf> {
-        super::project_settings(&self.cwd, &super::global_path(&self.global_dir))
+    fn project_file(&self) -> Option<PathBuf> {
+        super::project_settings(&self.current_dir, &super::global_path(&self.alan_dir))
     }
 
     /// Where a write in this scope lands: the project file if there is one,
@@ -82,20 +85,20 @@ impl SettingsController {
         match scope {
             Layer::Project => self
                 .project_file()
-                .unwrap_or_else(|| super::project_target(&self.cwd)),
-            _ => super::global_path(&self.global_dir),
+                .unwrap_or_else(|| super::project_target(&self.current_dir)),
+            _ => super::global_path(&self.alan_dir),
         }
     }
 
     /// `Ok(Poll::Changed)` means the caller should apply the new settings.
-    pub fn poll(&mut self) -> Result<Poll, String> {
+    pub fn poll(&mut self) -> anyhow::Result<Poll> {
         let now = Instant::now();
         if now < self.next_check {
             return Ok(Poll::Idle);
         }
         self.next_check = now + CHECK_INTERVAL;
 
-        let current = fingerprint(&self.global_dir, &self.cwd);
+        let current = fingerprint(&self.alan_dir, &self.current_dir);
         if current == self.seen {
             return Ok(Poll::Idle);
         }
@@ -110,22 +113,127 @@ impl SettingsController {
     /// Keeps the previous values if anything is wrong: a live session should
     /// survive a typo made mid-edit.
     fn reload(&mut self) -> Outcome {
-        let layers = super::load_settings_layers(&self.global_dir, &self.cwd)
-            .map_err(|error| format!("{error} — previous settings kept"))?;
+        let layers =
+            Layers::load(&self.alan_dir, &self.current_dir).context("previous settings kept")?;
         let next = layers.resolve();
         self.layers = layers;
-        if next == self.current {
+        if next == self.settings {
             return Ok(false);
         }
-        self.current = next;
+        self.settings = next;
         Ok(true)
+    }
+
+    /// Opens in project scope only when a project write has somewhere to go.
+    pub fn open(&mut self) {
+        let has_project =
+            self.project_file().is_some() || super::repo_root(&self.current_dir).is_some();
+        self.overlay = Some(SettingsOverlay::new(has_project));
+    }
+
+    pub fn close(&mut self) {
+        self.overlay = None;
+    }
+
+    /// Where the open overlay writes. `None` when it is closed.
+    fn target(&self) -> Option<PathBuf> {
+        self.overlay.as_ref().map(|o| self.path(o.scope))
+    }
+
+    /// A prompt is open for the selected row.
+    pub fn editing(&self) -> bool {
+        self.overlay.as_ref().is_some_and(|o| o.editing)
+    }
+
+    /// `None` when the overlay is closed. One value rather than a handle on
+    /// the store, so `views` cannot reach past what it needs to draw.
+    pub fn state(&self) -> Option<SettingsState> {
+        let overlay = self.overlay.as_ref()?;
+        let path = self.path(overlay.scope);
+        Some(SettingsState {
+            scope: overlay.scope,
+            file_exists: path.is_file(),
+            path,
+            rows: overlay.rows(&self.layers),
+            selected: overlay.selected,
+            editing: overlay.editing,
+        })
+    }
+
+    pub fn move_selection(&mut self, delta: isize) {
+        if let Some(overlay) = self.overlay.as_mut() {
+            overlay.move_by(delta);
+        }
+    }
+
+    pub fn toggle_scope(&mut self) {
+        if let Some(overlay) = self.overlay.as_mut() {
+            overlay.toggle_scope();
+        }
+    }
+
+    /// Abandon a row's prompt, leaving the list open.
+    pub fn cancel_edit(&mut self) {
+        if let Some(overlay) = self.overlay.as_mut() {
+            overlay.editing = false;
+        }
+    }
+
+    /// Take the value a just-opened prompt should start from.
+    pub fn take_seed(&mut self) -> Option<String> {
+        self.overlay.as_mut()?.seed.take()
+    }
+
+    /// Cycles the row, or opens a prompt when it needs typing. Both read the
+    /// scope's value, so what you cycle from is what the row shows.
+    pub fn activate(&mut self) -> Outcome {
+        let Some(overlay) = self.overlay.as_ref() else {
+            return Ok(false);
+        };
+        let in_scope = self.as_of(overlay.scope);
+        let key = overlay.def().key;
+        match overlay.next_value(&in_scope) {
+            Some(value) => self.write(key, Some(value)),
+            None => {
+                let seed = overlay.shown_value(&in_scope);
+                if let Some(overlay) = self.overlay.as_mut() {
+                    overlay.seed = Some(seed);
+                    overlay.editing = true;
+                }
+                Ok(false)
+            }
+        }
+    }
+
+    /// Only a row this scope owns can be cleared.
+    pub fn clear(&mut self) -> Outcome {
+        let Some(overlay) = self.overlay.as_ref() else {
+            return Ok(false);
+        };
+        let key = overlay.def().key;
+        if self.origin(key) != overlay.scope {
+            return Ok(false);
+        }
+        self.write(key, None)
+    }
+
+    pub fn submit_edit(&mut self, text: &str) -> Outcome {
+        let Some(overlay) = self.overlay.as_ref() else {
+            return Ok(false);
+        };
+        let key = overlay.def().key;
+        let value = SettingsOverlay::parse_edit(text);
+        if let Some(overlay) = self.overlay.as_mut() {
+            overlay.editing = false;
+        }
+        self.write(key, value)
     }
 }
 
-fn fingerprint(global_dir: &Path, cwd: &Path) -> Fingerprint {
-    let global = super::global_path(global_dir);
+fn fingerprint(alan_dir: &Path, current_dir: &Path) -> Fingerprint {
+    let global = super::global_path(alan_dir);
     let mut paths = vec![global.clone()];
-    if let Some(project) = super::project_settings(cwd, &global) {
+    if let Some(project) = super::project_settings(current_dir, &global) {
         paths.push(project);
     }
     paths
@@ -142,7 +250,7 @@ fn fingerprint(global_dir: &Path, cwd: &Path) -> Fingerprint {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::settings::files::{SETTINGS_DIR, SETTINGS_FILE};
+    use crate::core::settings::storage::{SETTINGS_DIR, SETTINGS_FILE};
 
     struct Scratch {
         root: PathBuf,
@@ -200,7 +308,7 @@ mod tests {
     }
 
     /// Bypasses the throttle so tests need not sleep.
-    fn poll_now(controller: &mut SettingsController) -> Result<Poll, String> {
+    fn poll_now(controller: &mut SettingsController) -> anyhow::Result<Poll> {
         controller.next_check = Instant::now();
         controller.poll()
     }
@@ -211,8 +319,8 @@ mod tests {
         scratch.write_global(r#"{"model":"opus"}"#);
         let mut controller = scratch.controller();
 
-        assert_eq!(poll_now(&mut controller), Ok(Poll::Idle));
-        assert_eq!(poll_now(&mut controller), Ok(Poll::Idle));
+        assert_eq!(poll_now(&mut controller).unwrap(), Poll::Idle);
+        assert_eq!(poll_now(&mut controller).unwrap(), Poll::Idle);
     }
 
     #[test]
@@ -224,7 +332,7 @@ mod tests {
 
         scratch.write_global(r#"{"model":"second"}"#);
 
-        assert_eq!(poll_now(&mut controller), Ok(Poll::Changed));
+        assert_eq!(poll_now(&mut controller).unwrap(), Poll::Changed);
         assert_eq!(controller.current().model, "second");
     }
 
@@ -237,7 +345,9 @@ mod tests {
         let mut controller = scratch.controller();
 
         scratch.write_global("{ broken");
-        let error = poll_now(&mut controller).expect_err("a broken file must report");
+        let error = poll_now(&mut controller)
+            .expect_err("a broken file must report")
+            .to_string();
 
         assert!(error.contains("previous settings kept"), "{error}");
         assert_eq!(controller.current().model, "good", "old values stay");
@@ -253,8 +363,8 @@ mod tests {
         assert!(poll_now(&mut controller).is_err());
 
         assert_eq!(
-            poll_now(&mut controller),
-            Ok(Poll::Idle),
+            poll_now(&mut controller).unwrap(),
+            Poll::Idle,
             "no second complaint until the file changes again"
         );
     }
@@ -266,7 +376,7 @@ mod tests {
         let mut controller = scratch.controller();
 
         scratch.write_global(r#"{"model":"same"}"#);
-        assert_eq!(poll_now(&mut controller), Ok(Poll::Idle));
+        assert_eq!(poll_now(&mut controller).unwrap(), Poll::Idle);
     }
 
     /// No file's mtime moved — the project file simply began to exist.
@@ -279,7 +389,7 @@ mod tests {
 
         scratch.write_project(r#"{"model":"project"}"#);
 
-        assert_eq!(poll_now(&mut controller), Ok(Poll::Changed));
+        assert_eq!(poll_now(&mut controller).unwrap(), Poll::Changed);
         assert_eq!(controller.current().model, "project");
         assert_eq!(controller.origin("model"), Layer::Project);
     }

@@ -1,6 +1,5 @@
 use super::centered_rect;
-use crate::core::Controller;
-use crate::core::settings::{Layer, Marker};
+use crate::core::{Controller, Layer, Marker};
 use crate::views::UiState;
 use crate::views::component::Component;
 use crate::views::theme;
@@ -24,8 +23,7 @@ impl Component for SettingsOverlayView {
         controller: &Controller,
         state: &mut UiState,
     ) {
-        let settings = controller.settings();
-        let (Some(overlay), Some(path)) = (settings.overlay(), settings.target()) else {
+        let Some(settings) = controller.settings_state() else {
             return;
         };
 
@@ -47,13 +45,13 @@ impl Component for SettingsOverlayView {
             vertical: 1,
         }));
 
-        let scope = if overlay.scope == Layer::Project {
+        let scope = if settings.scope == Layer::Project {
             "project"
         } else {
             "global"
         };
 
-        let exists = path.is_file();
+        let exists = settings.file_exists;
         frame.render_widget(
             Paragraph::new(Text::from(vec![
                 Line::from(vec![
@@ -64,9 +62,9 @@ impl Component for SettingsOverlayView {
                 ]),
                 Line::from(Span::styled(
                     if exists {
-                        path.display().to_string()
+                        settings.path.display().to_string()
                     } else {
-                        format!("{} (not created yet)", path.display())
+                        format!("{} (not created yet)", settings.path.display())
                     },
                     Style::default().fg(theme::MUTED_FG),
                 )),
@@ -74,13 +72,13 @@ impl Component for SettingsOverlayView {
             header_area,
         );
 
-        let rows = settings.rows();
+        let rows = &settings.rows;
         let lines: Vec<Line> = rows
             .iter()
             .enumerate()
             .map(|(index, row)| {
-                let selected = index == overlay.selected;
-                if selected && overlay.editing {
+                let selected = index == settings.selected;
+                if selected && settings.editing {
                     let typed = state.input().to_owned();
                     return Line::from(vec![
                         Span::styled(" › ", Style::default().fg(theme::PROMPT_FG)),
@@ -129,7 +127,7 @@ impl Component for SettingsOverlayView {
         frame.render_widget(Paragraph::new(Text::from(lines)), rows_area);
 
         let hint = rows
-            .get(overlay.selected)
+            .get(settings.selected)
             .map(|row| row.help)
             .unwrap_or_default();
         frame.render_widget(
