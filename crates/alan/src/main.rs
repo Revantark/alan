@@ -1,29 +1,23 @@
 mod core;
 mod logging;
+mod tui_root;
 mod views;
 
-use core::{Action, Controller, Overlay};
-use crossterm::cursor::SetCursorStyle;
-use crossterm::event::{
-    DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture, Event,
-    EventStream, KeyCode, KeyEventKind, KeyModifiers, KeyboardEnhancementFlags, MouseEventKind,
-    PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
-};
-use crossterm::execute;
+use core::Controller;
 use llm::ServerTool;
-use std::io::stdout;
 use std::time::Duration;
 
 use agent::{Agent, SessionManager, default_tools};
-use futures_util::StreamExt;
 use llm::ReasoningEffort;
 use providers::{
     FileCredentialStore, ModelOptions, OpenRouterProvider, Provider, ProviderRegistry,
 };
 use std::path::PathBuf;
 use std::sync::Arc;
+use tui::Runtime;
 
 use crate::logging::init;
+use crate::tui_root::{AlanKeyMapper, AlanRoot};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -67,8 +61,17 @@ async fn main() -> anyhow::Result<()> {
     if was_resumed {
         app.restore_session_history().await;
     }
-    let result = event_loop(&mut app).await;
-    if let Some(session_id) = app.session_id().await {
+    // `Runtime::run` consumes the root, so keep the agent for the saved-session
+    // message printed after the TUI exits.
+    let agent = app.agent();
+    let result = Runtime::builder(AlanRoot::new(app))
+        .key_mapper(AlanKeyMapper)
+        .tick_rate(Duration::from_millis(16))
+        .build()
+        .run()
+        .await;
+    let result = result.map_err(|error| anyhow::anyhow!("{error}"));
+    if let Some(session_id) = agent.session_id().await {
         println!("\nSession saved. Resume it with:\n\nALAN_SESSION={session_id} alan");
     }
     result
@@ -146,151 +149,4 @@ fn configured_session_id() -> anyhow::Result<Option<String>> {
         return Err(anyhow::anyhow!("ALAN_SESSION must not be empty"));
     }
     Ok(Some(id))
-}
-
-async fn event_loop(app: &mut Controller) -> anyhow::Result<()> {
-    let mut terminal = ratatui::init();
-    let keyboard_enhancement =
-        crossterm::terminal::supports_keyboard_enhancement().unwrap_or(false);
-    execute!(stdout(), EnableMouseCapture, EnableBracketedPaste)?;
-    if keyboard_enhancement {
-        execute!(
-            stdout(),
-            PushKeyboardEnhancementFlags(
-                KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
-                    | KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES,
-            ),
-        )?;
-    }
-    let result = async {
-        terminal.clear()?;
-        let mut ui = views::UiState::new();
-        let mut view = views::AppView::new();
-        execute!(stdout(), SetCursorStyle::SteadyBar)?;
-        let mut events = EventStream::new();
-        let mut render_tick = tokio::time::interval(Duration::from_millis(16));
-        render_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-
-        loop {
-            let poll = app.poll();
-            ui.on_poll(poll);
-            ui.tick();
-
-            if ui.take_dirty() {
-                terminal.draw(|frame| view.render(frame, app, &mut ui))?;
-            }
-
-            tokio::select! {
-                maybe_event = events.next() => {
-                    let Some(result) = maybe_event else {
-                        break;
-                    };
-                    let event = result?;
-                    let command = if app.overlay() == Overlay::Login {
-                        action_from_event(&event).and_then(|action| {
-                            ui.apply(action, app.login_selection_active())
-                        })
-                    } else {
-                        ui.handle_event(event, view.lines(), app.completion_mut())
-                    };
-                    let should_quit = command.is_some_and(|command| app.handle(command));
-                    if ui.take_dirty() {
-                        terminal.draw(|frame| view.render(frame, app, &mut ui))?;
-                    }
-                    if should_quit {
-                        break;
-                    }
-                }
-                _ = render_tick.tick() => {}
-            }
-        }
-        Ok::<(), anyhow::Error>(())
-    }
-    .await;
-    if keyboard_enhancement {
-        execute!(stdout(), PopKeyboardEnhancementFlags)?;
-    }
-    execute!(stdout(), DisableMouseCapture, DisableBracketedPaste)?;
-    ratatui::restore();
-    result
-}
-
-fn action_from_event(event: &Event) -> Option<Action> {
-    match event {
-        Event::Key(key) => {
-            if key.kind != KeyEventKind::Press {
-                return None;
-            }
-            Some(match key.code {
-                KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    Action::Interrupt
-                }
-                KeyCode::Char('v') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    Action::PasteOrAttachImage
-                }
-                KeyCode::Tab | KeyCode::BackTab
-                    if key.modifiers.contains(KeyModifiers::SHIFT)
-                        || key.code == KeyCode::BackTab =>
-                {
-                    Action::TogglePlanMode
-                }
-                KeyCode::Enter => Action::Submit,
-                KeyCode::Esc => Action::ClearInput,
-                KeyCode::Backspace => Action::Backspace,
-                KeyCode::Char(c) => Action::Insert(c),
-                KeyCode::PageUp | KeyCode::Up => Action::ScrollUp,
-                KeyCode::PageDown | KeyCode::Down => Action::ScrollDown,
-                _ => return None,
-            })
-        }
-        Event::Mouse(mouse) => Some(match mouse.kind {
-            MouseEventKind::ScrollUp => Action::MouseScrollUp,
-            MouseEventKind::ScrollDown => Action::MouseScrollDown,
-            _ => return None,
-        }),
-        Event::Resize(_, _) => Some(Action::Resize),
-        Event::Paste(data) => Some(Action::Paste(data.clone())),
-        _ => None,
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn q_is_editor_input_not_quit() {
-        let event = Event::Key(crossterm::event::KeyEvent::new(
-            KeyCode::Char('q'),
-            KeyModifiers::NONE,
-        ));
-        assert_eq!(action_from_event(&event), Some(Action::Insert('q')));
-    }
-
-    #[test]
-    fn ctrl_c_interrupts_and_resize_invalidates() {
-        let interrupt = Event::Key(crossterm::event::KeyEvent::new(
-            KeyCode::Char('c'),
-            KeyModifiers::CONTROL,
-        ));
-        assert_eq!(action_from_event(&interrupt), Some(Action::Interrupt));
-        assert_eq!(
-            action_from_event(&Event::Resize(120, 40)),
-            Some(Action::Resize)
-        );
-    }
-
-    #[test]
-    fn arrow_keys_scroll_or_navigate() {
-        let up = Event::Key(crossterm::event::KeyEvent::new(
-            KeyCode::Up,
-            KeyModifiers::NONE,
-        ));
-        let down = Event::Key(crossterm::event::KeyEvent::new(
-            KeyCode::Down,
-            KeyModifiers::NONE,
-        ));
-        assert_eq!(action_from_event(&up), Some(Action::ScrollUp));
-        assert_eq!(action_from_event(&down), Some(Action::ScrollDown));
-    }
 }

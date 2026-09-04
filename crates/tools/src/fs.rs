@@ -12,7 +12,7 @@ const MAX_READ_LINES: u64 = 150;
 pub fn file_read_definition() -> ToolDefinition {
     ToolDefinition {
         name: "read".into(),
-        description: "Read a file/image, capped at 150 lines per call. Omit the range for lines 1-150; page larger files with line_start/line_end. Batch independent reads in one block".into(),
+        description: "Read a file/image, capped at 150 lines per call (oversized ranges return the first 150 lines with a notice). Omit the range for lines 1-150; page larger files with line_start/line_end. Batch independent reads in one block".into(),
         parameters: json!({
             "type": "object",
             "properties": {
@@ -119,12 +119,13 @@ impl ToolExecutor for FileReadExecutor {
             ));
         }
 
-        let effective_end = line_end.unwrap_or(line_start + MAX_READ_LINES - 1);
-        if effective_end - line_start + 1 > MAX_READ_LINES {
-            return Err(ToolError(format!(
-                "range exceeds {MAX_READ_LINES} line limit, narrow line_start/line_end"
-            )));
-        }
+        let requested_end = line_end.unwrap_or(line_start + MAX_READ_LINES - 1);
+        let truncated = requested_end - line_start + 1 > MAX_READ_LINES;
+        let effective_end = if truncated {
+            line_start + MAX_READ_LINES - 1
+        } else {
+            requested_end
+        };
 
         let file = tokio::fs::File::open(&path)
             .await
@@ -173,9 +174,15 @@ impl ToolExecutor for FileReadExecutor {
                 content.push('\n');
             }
         }
-        content.push_str(&format!(
-            "[read {path} lines {line_start}-{actual_end} of {total} \u{2014} use line_start/line_end to page]\n"
-        ));
+        if truncated {
+            content.push_str(&format!(
+                "[read {path} lines {line_start}-{actual_end} of {total} \u{2014} requested lines {line_start}-{requested_end} exceeds {MAX_READ_LINES} line limit, capped to {MAX_READ_LINES} lines \u{2014} use line_start/line_end to page]\n"
+            ));
+        } else {
+            content.push_str(&format!(
+                "[read {path} lines {line_start}-{actual_end} of {total} \u{2014} use line_start/line_end to page]\n"
+            ));
+        }
 
         Ok(ToolOutput::Text(content))
     }
@@ -449,16 +456,27 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rejects_range_over_150_lines() {
+    async fn caps_range_over_150_lines() {
         let path = temp_path();
-        tokio::fs::write(&path, "one\ntwo\n").await.unwrap();
-        let call = tool_call(&path, r#""line_start":1,"line_end":151"#);
+        let body = (1..=400).map(|n| format!("line {n}\n")).collect::<String>();
+        tokio::fs::write(&path, &body).await.unwrap();
+        let call = tool_call(&path, r#""line_start":100,"line_end":300"#);
 
-        let error = FileReadExecutor.execute(&call).await.unwrap_err();
+        let result = FileReadExecutor.execute(&call).await.unwrap();
 
-        assert_eq!(
-            error.to_string(),
-            "tool execution failed: range exceeds 150 line limit, narrow line_start/line_end"
+        let ToolOutput::Text(text) = result else {
+            panic!("expected text, got {result:?}");
+        };
+        assert!(text.starts_with("100:line 100\n"), "got: {text}");
+        assert!(text.contains("249:line 249\n"), "got: {text}");
+        assert!(!text.contains("250:line 250"), "must cap at 150: {text}");
+        assert!(
+            text.contains("requested lines 100-300 exceeds 150 line limit, capped to 150 lines"),
+            "got: {text}"
+        );
+        assert!(
+            text.contains(&format!("[read {} lines 100-249 of 400", path.display())),
+            "got: {text}"
         );
         tokio::fs::remove_file(path).await.unwrap();
     }

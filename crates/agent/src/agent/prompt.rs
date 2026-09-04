@@ -6,8 +6,8 @@ use crate::context::AgentContext;
 use crate::{AgentError, AgentStream};
 use futures_util::StreamExt;
 use llm::{
-    CompletionInput, LlmEvent, LlmResponse, LlmResponseBuilder, Message, RequestOptions, ToolSpec,
-    Usage,
+    CompletionInput, LlmEvent, LlmResponse, LlmResponseBuilder, Message, PromptCacheControl,
+    RequestOptions, ToolSpec, Usage,
 };
 use providers::{Model, ModelError};
 use tokio::sync::{mpsc::Sender, watch};
@@ -161,6 +161,7 @@ pub(super) async fn stream_round(
     let options = RequestOptions {
         prompt_cache_key: Some(session_id.clone()),
         session_id: Some(session_id),
+        cache_control: Some(PromptCacheControl::one_hour()),
         ..RequestOptions::default()
     };
 
