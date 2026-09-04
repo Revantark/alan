@@ -8,10 +8,13 @@
 //! `Controller` is not `Sync` (it holds `JoinHandle`s and plain state), so the
 //! root keeps it behind a `Mutex`. `render` is `&self` by framework contract.
 
+use providers::{CredentialStore, ProviderRegistry};
+use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
+use tui::entity::Entity;
 
-use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers, MouseEventKind};
+use crossterm::event::{Event, MouseEventKind};
 use futures_util::Stream;
 use ratatui::Frame;
 use ratatui::layout::Rect;
@@ -19,7 +22,8 @@ use tui::context::Context;
 use tui::keymap::{InputContext, KeyMapper};
 use tui::{ActionStatus, Component, RenderContext, Subscription, SubscriptionEvent};
 
-use crate::core::{Action, Controller, Overlay};
+use crate::core::{Action, CommandOutcome, Controller};
+use crate::login_overlay::{LoginDone, LoginOverlay};
 use crate::views::{AppView, UiState};
 
 /// How often streamed agent output is collected while the app is idle.
@@ -65,11 +69,15 @@ impl KeyMapper<AlanAction> for AlanKeyMapper {
     }
 }
 
-/// Owns the whole Alan frontend as one `tui` component.
+/// Owns the whole Alan frontend as one `tui` component, plus the
+/// dependencies needed to open feature overlays (today: login).
 pub struct AlanRoot {
     inner: Mutex<Inner>,
+    providers: Arc<ProviderRegistry>,
+    credentials: Arc<dyn CredentialStore>,
+    login: Option<Entity<LoginOverlay>>,
+    login_result: Option<Subscription>,
     /// Retained so the poll stream keeps running. Dropping it cancels the stream.
-    #[allow(dead_code)]
     poll: Option<Subscription>,
 }
 
@@ -80,15 +88,62 @@ struct Inner {
 }
 
 impl AlanRoot {
-    pub fn new(controller: Controller) -> Self {
+    pub fn new(
+        controller: Controller,
+        providers: Arc<ProviderRegistry>,
+        credentials: Arc<dyn CredentialStore>,
+    ) -> Self {
         Self {
             inner: Mutex::new(Inner {
                 controller,
                 ui: UiState::new(),
                 view: AppView::new(),
             }),
+            providers,
+            credentials,
+            login: None,
+            login_result: None,
             poll: None,
         }
+    }
+
+    fn open_login(&mut self, cx: &mut Context<'_, Self, AlanAction>) {
+        if let Some(entity) = self.login
+            && cx.read(entity, |_| ()).is_some()
+        {
+            return;
+        }
+        let overlay = cx.open_overlay(LoginOverlay::new(
+            Arc::clone(&self.providers),
+            Arc::clone(&self.credentials),
+        ));
+        self.login = Some(overlay);
+        self.login_result = Some(
+            cx.subscribe::<LoginDone, _, _>(overlay, |done, root, _, cx| match done {
+                LoginDone::Succeeded { provider } => {
+                    root.login_result = None;
+                    root.login_done(provider.clone(), cx);
+                }
+                LoginDone::Dismissed => {
+                    root.login = None;
+                    root.login_result = None;
+                }
+            }),
+        );
+    }
+
+    fn login_done(
+        &mut self,
+        provider: providers::ProviderId,
+        cx: &mut Context<'_, Self, AlanAction>,
+    ) {
+        let mut inner = self.inner.lock().expect("alan root poisoned");
+        inner
+            .controller
+            .push_info(format!("Logged in to {}", provider.0));
+        // The transcript revision bumped but `UiState` doesn't know; the
+        // 16ms tick stream would catch it within a frame, but notify now.
+        cx.notify();
     }
 }
 
@@ -129,7 +184,7 @@ impl Component<AlanAction> for AlanRoot {
                     AlanAction::Paste(_) | AlanAction::Raw(_) => unreachable!("matched above"),
                 };
                 let mut inner = self.inner.lock().expect("alan root poisoned");
-                inner.ui.apply(action, false);
+                inner.ui.apply(action);
                 if inner.ui.take_dirty() {
                     cx.notify();
                 }
@@ -137,56 +192,55 @@ impl Component<AlanAction> for AlanRoot {
             }
             AlanAction::Paste(text) => {
                 let mut inner = self.inner.lock().expect("alan root poisoned");
-                // Same dual-buffer split as `Raw`: the login overlay edits
-                // `UiState::input` via `apply`, otherwise the editor owns the
-                // paste via the existing `Event::Paste` path (insert,
-                // completion sync, highlight). Reconstructing the event here
-                // keeps behavior identical without a new `UiState` API yet.
-                let command = if inner.controller.overlay() == Overlay::Login {
-                    let selecting = inner.controller.login_selection_active();
-                    inner.ui.apply(Action::Paste(text.clone()), selecting)
-                } else {
-                    // Disjoint field borrows: `view`/`controller` reads feed `ui` mutation.
-                    let Inner {
-                        controller,
-                        ui,
-                        view,
-                    } = &mut *inner;
-                    ui.handle_event(
-                        Event::Paste(text.clone()),
-                        view.lines(),
-                        controller.completion_mut(),
-                    )
-                };
-                let should_quit = command.is_some_and(|command| inner.controller.handle(command));
+                // Disjoint field borrows: `view`/`controller` reads feed `ui` mutation.
+                let Inner {
+                    controller,
+                    ui,
+                    view,
+                } = &mut *inner;
+                let command = ui.handle_event(
+                    Event::Paste(text.clone()),
+                    view.lines(),
+                    controller.completion_mut(),
+                );
+                let outcome: Option<CommandOutcome> =
+                    command.map(|command| inner.controller.handle(command));
                 if inner.ui.take_dirty() {
                     cx.notify();
                 }
-                if should_quit {
-                    cx.quit();
+                if let Some(outcome) = outcome {
+                    if outcome.quit {
+                        cx.quit();
+                    }
+                    drop(inner);
+                    if outcome.open_login {
+                        self.open_login(cx);
+                    }
                 }
                 ActionStatus::Handled
             }
             AlanAction::Raw(event) => {
                 let mut inner = self.inner.lock().expect("alan root poisoned");
-                let command = if inner.controller.overlay() == Overlay::Login {
-                    let selecting = inner.controller.login_selection_active();
-                    action_from_event(event).and_then(|action| inner.ui.apply(action, selecting))
-                } else {
-                    // Disjoint field borrows: `view`/`controller` reads feed `ui` mutation.
-                    let Inner {
-                        controller,
-                        ui,
-                        view,
-                    } = &mut *inner;
-                    ui.handle_event(event.clone(), view.lines(), controller.completion_mut())
-                };
-                let should_quit = command.is_some_and(|command| inner.controller.handle(command));
+                let Inner {
+                    controller,
+                    ui,
+                    view,
+                } = &mut *inner;
+                let command =
+                    ui.handle_event(event.clone(), view.lines(), controller.completion_mut());
+                let outcome: Option<CommandOutcome> =
+                    command.map(|command| inner.controller.handle(command));
                 if inner.ui.take_dirty() {
                     cx.notify();
                 }
-                if should_quit {
-                    cx.quit();
+                if let Some(outcome) = outcome {
+                    if outcome.quit {
+                        cx.quit();
+                    }
+                    drop(inner);
+                    if outcome.open_login {
+                        self.open_login(cx);
+                    }
                 }
                 ActionStatus::Handled
             }
@@ -214,48 +268,57 @@ fn poll_ticks() -> impl Stream<Item = PollTick> + Send + 'static {
     })
 }
 
-fn action_from_event(event: &Event) -> Option<Action> {
-    match event {
-        Event::Key(key) => {
-            if key.kind != KeyEventKind::Press {
-                return None;
-            }
-            Some(match key.code {
-                KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    Action::Interrupt
-                }
-                KeyCode::Char('v') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    Action::PasteOrAttachImage
-                }
-                KeyCode::Tab | KeyCode::BackTab
-                    if key.modifiers.contains(KeyModifiers::SHIFT)
-                        || key.code == KeyCode::BackTab =>
-                {
-                    Action::TogglePlanMode
-                }
-                KeyCode::Enter => Action::Submit,
-                KeyCode::Esc => Action::ClearInput,
-                KeyCode::Backspace => Action::Backspace,
-                KeyCode::Char(c) => Action::Insert(c),
-                KeyCode::PageUp | KeyCode::Up => Action::ScrollUp,
-                KeyCode::PageDown | KeyCode::Down => Action::ScrollDown,
-                _ => return None,
-            })
-        }
-        Event::Mouse(mouse) => Some(match mouse.kind {
-            MouseEventKind::ScrollUp => Action::MouseScrollUp,
-            MouseEventKind::ScrollDown => Action::MouseScrollDown,
-            _ => return None,
-        }),
-        Event::Resize(_, _) => Some(Action::Resize),
-        Event::Paste(data) => Some(Action::Paste(data.clone())),
-        _ => None,
-    }
-}
-
 #[cfg(test)]
 mod tests {
+    use crossterm::event::{KeyCode, KeyModifiers};
+
     use super::*;
+
+    /// Map the login path (`UiState::apply`) onto pre-completion keys. Kept while
+    /// `AlanAction::Raw` still carries `Event::Key`; each arm is a 1:1 legacy
+    /// bridge, not new behavior. Used by the unit tests below; production routes
+    /// keys through `UiState::handle_event` instead.
+    #[cfg(test)]
+    fn action_from_event(event: &Event) -> Option<Action> {
+        match event {
+            Event::Key(key) => {
+                use crossterm::event::{KeyCode, KeyEventKind, KeyModifiers};
+
+                if key.kind != KeyEventKind::Press {
+                    return None;
+                }
+                Some(match key.code {
+                    KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        Action::Interrupt
+                    }
+                    KeyCode::Char('v') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        Action::PasteOrAttachImage
+                    }
+                    KeyCode::Tab | KeyCode::BackTab
+                        if key.modifiers.contains(KeyModifiers::SHIFT)
+                            || key.code == KeyCode::BackTab =>
+                    {
+                        Action::TogglePlanMode
+                    }
+                    KeyCode::Enter => Action::Submit,
+                    KeyCode::Esc => Action::ClearInput,
+                    KeyCode::Backspace => Action::Backspace,
+                    KeyCode::Char(c) => Action::Insert(c),
+                    KeyCode::PageUp | KeyCode::Up => Action::ScrollUp,
+                    KeyCode::PageDown | KeyCode::Down => Action::ScrollDown,
+                    _ => return None,
+                })
+            }
+            Event::Mouse(mouse) => Some(match mouse.kind {
+                MouseEventKind::ScrollUp => Action::MouseScrollUp,
+                MouseEventKind::ScrollDown => Action::MouseScrollDown,
+                _ => return None,
+            }),
+            Event::Resize(_, _) => Some(Action::Resize),
+            Event::Paste(data) => Some(Action::Paste(data.clone())),
+            _ => None,
+        }
+    }
 
     #[test]
     fn mapper_passes_other_events_through_unchanged() {
