@@ -28,6 +28,16 @@ use std::time::Instant;
 /// Only one custom highlight is ever active, so its priority is arbitrary.
 const COMMAND_HIGHLIGHT_PRIORITY: u8 = 1;
 
+/// Lines moved per mouse-wheel notch. Crossterm reports the wheel as
+/// discrete notches with no pressure data, so one line per notch keeps a
+/// single tick precise; bursts are rate-limited by the flush cap instead.
+const WHEEL_LINES_PER_NOTCH: isize = 1;
+
+/// Hard bound on accumulated wheel notches. A trackpad swipe can queue
+/// hundreds of events; without a bound the tail keeps scrolling long after
+/// the fingers stop.
+const MAX_PENDING_WHEEL: isize = 48;
+
 pub struct UiState {
     /// Login prompt input. Main editor uses [`TextArea`].
     input: String,
@@ -46,6 +56,10 @@ pub struct UiState {
     chat_area: Rect,
     /// Active text selection in transcript
     selection: Option<Selection>,
+    /// Wheel notches accumulated since the last flush. Trackpad swipes emit
+    /// hundreds of events; they are coalesced and applied once per tick
+    /// instead of one redraw per event.
+    pending_wheel: isize,
     /// Last click timestamp and position for double-click detection
     last_click: Option<(Instant, u16, u16)>,
     /// True when something changed since last draw and a redraw is needed.
@@ -68,6 +82,7 @@ impl UiState {
             max_scroll: 0,
             chat_area: Rect::default(),
             selection: None,
+            pending_wheel: 0,
             last_click: None,
             dirty: true,
             attachments: Vec::new(),
@@ -75,6 +90,10 @@ impl UiState {
     }
 
     pub fn apply(&mut self, action: Action, login_selection_active: bool) -> Option<Command> {
+        let eager_dirty = !matches!(
+            action,
+            Action::MouseScrollUp | Action::MouseScrollDown | Action::ScrollUp | Action::ScrollDown
+        );
         let command = match action {
             Action::Interrupt => {
                 self.input.clear();
@@ -85,6 +104,7 @@ impl UiState {
             Action::Submit => {
                 self.follow_output = true;
                 self.scroll_target = self.max_scroll;
+                self.cancel_wheel();
                 let images = std::mem::take(&mut self.attachments);
                 Some(Command::Submit {
                     text: std::mem::take(&mut self.input),
@@ -103,14 +123,17 @@ impl UiState {
                 }
             }
             Action::Backspace => {
+                self.cancel_wheel();
                 self.input.pop();
                 None
             }
             Action::Insert(character) => {
+                self.cancel_wheel();
                 self.input.push(character);
                 None
             }
             Action::Paste(text) => {
+                self.cancel_wheel();
                 self.input.push_str(&text);
                 None
             }
@@ -142,16 +165,49 @@ impl UiState {
                 }
             }
             Action::MouseScrollUp => {
-                self.scroll_by(-3);
+                self.push_wheel(-WHEEL_LINES_PER_NOTCH);
                 None
             }
             Action::MouseScrollDown => {
-                self.scroll_by(3);
+                self.push_wheel(WHEEL_LINES_PER_NOTCH);
                 None
             }
         };
-        self.dirty = true;
+        if eager_dirty {
+            self.dirty = true;
+        }
         command
+    }
+
+    fn push_wheel(&mut self, delta: isize) {
+        self.pending_wheel =
+            (self.pending_wheel + delta).clamp(-MAX_PENDING_WHEEL, MAX_PENDING_WHEEL);
+    }
+
+    /// Apply queued wheel notches, capped per flush so one swipe can't fling
+    /// across the whole transcript.
+    pub fn flush_wheel(&mut self) -> bool {
+        let pending = std::mem::take(&mut self.pending_wheel);
+        if pending == 0 {
+            return false;
+        }
+        let cap = self.viewport_height.clamp(1, 12) as isize;
+        let (now, rest) = if pending.abs() > cap {
+            (pending.signum() * cap, pending - pending.signum() * cap)
+        } else {
+            (pending, 0)
+        };
+        if self.scroll_by(now) {
+            self.pending_wheel = rest.clamp(-MAX_PENDING_WHEEL, MAX_PENDING_WHEEL);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Drop queued wheel momentum, e.g. when the user starts typing.
+    pub fn cancel_wheel(&mut self) {
+        self.pending_wheel = 0;
     }
 
     pub fn handle_event(
@@ -162,6 +218,9 @@ impl UiState {
     ) -> Option<Command> {
         if matches!(&event, Event::Key(key) if key.kind != KeyEventKind::Press) {
             return None;
+        }
+        if matches!(&event, Event::Key(_) | Event::Paste(_)) {
+            self.cancel_wheel();
         }
         if let Event::Key(key) = &event
             && completion.is_open()
@@ -496,6 +555,7 @@ impl UiState {
     fn submit_editor_or_accept(&mut self) -> Option<Command> {
         self.follow_output = true;
         self.scroll_target = self.max_scroll;
+        self.cancel_wheel();
         let text = self.editor_text();
         let images = std::mem::take(&mut self.attachments);
         self.editor = Self::new_editor();
@@ -529,20 +589,25 @@ impl UiState {
         }
     }
 
-    fn scroll_by(&mut self, delta: isize) {
+    fn scroll_by(&mut self, delta: isize) -> bool {
         let current = if self.follow_output {
             self.max_scroll
         } else {
             self.scroll_target
         };
-        self.scroll_target = if delta.is_negative() {
+        let target = if delta.is_negative() {
             current.saturating_sub(delta.unsigned_abs())
         } else {
             current.saturating_add(delta as usize).min(self.max_scroll)
         };
+        if target == self.scroll_offset && target == self.scroll_target {
+            return false;
+        }
+        self.scroll_target = target;
         self.scroll_offset = self.scroll_target;
         self.follow_output = self.scroll_offset == self.max_scroll;
         self.dirty = true;
+        true
     }
 
     /// Keep bottom-follow state synchronized on render ticks.
@@ -824,6 +889,60 @@ mod tests {
         assert_eq!(state.scroll_offset, 70);
         assert_eq!(state.scroll_target, 70);
         assert!(!state.follow_output);
+    }
+
+    #[test]
+    fn clamped_scroll_is_a_no_op_without_dirty() {
+        let mut state = UiState::new();
+        state.sync_scroll(100, 20);
+        assert!(state.take_dirty() || !state.take_dirty());
+
+        // At the bottom already: scrolling down moves nothing.
+        assert!(!state.scroll_by(10));
+        assert!(!state.take_dirty());
+
+        // Queued wheel at the edge is dropped as stale momentum, so no
+        // redraw is queued after hitting the bottom.
+        state.apply(Action::MouseScrollDown, false);
+        assert!(!state.take_dirty());
+        assert!(!state.flush_wheel());
+        assert!(!state.take_dirty());
+    }
+
+    #[test]
+    fn wheel_notches_coalesce_and_cap_per_flush() {
+        let mut state = UiState::new();
+        state.sync_scroll(200, 20);
+        state.scroll_by(-100);
+        assert_eq!(state.scroll_offset, 80);
+        let _ = state.take_dirty();
+
+        // A 100-notch swipe queues without dirtying: no redraw per event.
+        for _ in 0..100 {
+            state.apply(Action::MouseScrollDown, false);
+        }
+        assert_eq!(state.pending_wheel, MAX_PENDING_WHEEL);
+        assert!(!state.take_dirty());
+
+        // One flush moves at most a viewport-capped step and dirties once.
+        assert!(state.flush_wheel());
+        assert!(state.scroll_offset > 80);
+        assert!(state.scroll_offset <= 80 + 12);
+        assert!(state.take_dirty());
+    }
+
+    #[test]
+    fn typing_cancels_queued_wheel_momentum() {
+        let mut state = UiState::new();
+        state.sync_scroll(200, 20);
+        state.scroll_by(-100);
+        let _ = state.take_dirty();
+        state.apply(Action::MouseScrollDown, false);
+        assert_eq!(state.pending_wheel, WHEEL_LINES_PER_NOTCH);
+
+        state.handle_editor_event_for_test(key(crossterm::event::KeyCode::Char('a')));
+        assert_eq!(state.pending_wheel, 0);
+        assert!(!state.flush_wheel());
     }
 
     fn key(code: crossterm::event::KeyCode) -> crossterm::event::Event {
