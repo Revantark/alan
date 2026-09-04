@@ -18,7 +18,6 @@ use futures_util::Stream;
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use tui::context::Context;
-use tui::entity::Entity;
 use tui::keymap::{InputContext, KeyMapper};
 use tui::{ActionStatus, Component, RenderContext, Subscription, SubscriptionEvent};
 
@@ -75,7 +74,6 @@ pub struct AlanRoot {
     inner: Mutex<Inner>,
     providers: Arc<ProviderRegistry>,
     credentials: Arc<dyn CredentialStore>,
-    login: Option<Entity<LoginOverlay>>,
     /// Retained so the poll stream keeps running. Dropping it cancels the stream.
     poll: Option<Subscription>,
 }
@@ -100,30 +98,20 @@ impl AlanRoot {
             }),
             providers,
             credentials,
-            login: None,
             poll: None,
         }
     }
 
     fn open_login(&mut self, cx: &mut Context<'_, Self, AlanAction>) {
-        if let Some(entity) = self.login
-            && cx.read(entity, |_| ()).is_some()
-        {
-            return;
-        }
         let overlay = cx.open_overlay(LoginOverlay::new(
             Arc::clone(&self.providers),
             Arc::clone(&self.credentials),
         ));
-        self.login = Some(overlay);
         cx.subscribe_once::<LoginDone, _, _>(overlay, |done, root, _, cx| match done {
             LoginDone::Succeeded { provider } => {
-                root.login = None;
                 root.login_done(provider.clone(), cx);
             }
-            LoginDone::Dismissed => {
-                root.login = None;
-            }
+            LoginDone::Dismissed => {}
         });
     }
 
@@ -242,11 +230,8 @@ impl Component<AlanAction> for AlanRoot {
         }
     }
 
-    fn render(&self, frame: &mut Frame, area: Rect, _cx: &RenderContext<'_, AlanAction>) {
+    fn render(&self, frame: &mut Frame, _area: Rect, _cx: &RenderContext<'_, AlanAction>) {
         let mut inner = self.inner.lock().expect("alan root poisoned");
-        // Scroll follow is kept in sync by the poll stream (`init`) and by
-        // `Chat::render` via `UiState::sync_scroll`; drawing itself adds nothing.
-        let _ = area;
         let Inner {
             controller,
             ui,
