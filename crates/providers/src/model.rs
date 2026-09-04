@@ -18,7 +18,7 @@ pub enum ModelError {
 #[derive(Clone, Default)]
 pub struct ModelOptions {
     pub server_tools: Vec<ServerTool>,
-    pub reasoning_effort: Option<ReasoningEffort>,
+    pub reasoning_effort: ReasoningEffort,
 }
 
 #[derive(Clone)]
@@ -27,7 +27,7 @@ pub struct Model {
     api: Arc<dyn LlmApi>,
     auth: Arc<dyn AuthResolver>,
     server_tools: Vec<ServerTool>,
-    reasoning_effort: Option<ReasoningEffort>,
+    reasoning_effort: ReasoningEffort,
 }
 
 impl Model {
@@ -37,7 +37,12 @@ impl Model {
         auth: Arc<dyn AuthResolver>,
         options: ModelOptions,
     ) -> Self {
-        let reasoning_effort = options.reasoning_effort.or(info.capabilities.reasoning);
+        // `Auto` means "no opinion", so it defers to whatever the catalog
+        // declares for this model.
+        let reasoning_effort = match options.reasoning_effort {
+            ReasoningEffort::Auto => info.capabilities.reasoning,
+            chosen => chosen,
+        };
         Self {
             info,
             api,
@@ -51,7 +56,7 @@ impl Model {
         &self.info
     }
 
-    pub fn reasoning_effort(&self) -> Option<ReasoningEffort> {
+    pub fn reasoning_effort(&self) -> ReasoningEffort {
         self.reasoning_effort
     }
 

@@ -38,11 +38,11 @@ impl SessionManager {
         pwd: impl Into<PathBuf>,
         provider: impl Into<String>,
         model: impl Into<String>,
-        thinking_level: Option<ReasoningEffort>,
+        reasoning_effort: ReasoningEffort,
     ) -> Result<Session, SessionError> {
         let pwd = normalize(pwd.into())?;
         let key = pwd_key(&pwd);
-        let session = Session::new(pwd, provider, model, thinking_level);
+        let session = Session::new(pwd, provider, model, reasoning_effort);
         validate_session_id(&session.id)?;
         let path = self.file_path(&key, &session.id);
         // `file_path` always builds `root/key/name.jsonl`, so parent is
@@ -100,6 +100,25 @@ impl SessionManager {
             timestamp_ms: now_ms(),
         };
         self.append_record(session_id, pwd, &record).await
+    }
+
+    pub async fn append_model(
+        &self,
+        session_id: &str,
+        pwd: &Path,
+        provider: impl Into<String>,
+        model: impl Into<String>,
+        reasoning_effort: ReasoningEffort,
+    ) -> Result<SessionRecord, SessionError> {
+        let record = SessionRecord::Model {
+            provider: provider.into(),
+            model: model.into(),
+            reasoning_effort,
+            timestamp_ms: now_ms(),
+        };
+
+        self.append_record(session_id, pwd, &record).await?;
+        Ok(record)
     }
 
     pub async fn get_session(&self, session_id: &str, pwd: &Path) -> Result<Session, SessionError> {
@@ -203,7 +222,7 @@ fn parse_header(
         pwd,
         provider,
         model,
-        thinking_level,
+        reasoning_effort,
         created_at_ms,
         updated_at_ms,
     } = record
@@ -244,7 +263,7 @@ fn parse_header(
         pwd,
         provider,
         model,
-        thinking_level,
+        reasoning_effort,
         messages: Vec::new(),
         usage: Usage::default(),
         created_at_ms,
@@ -287,7 +306,12 @@ mod tests {
         let manager = SessionManager::new(&root);
 
         let session = manager
-            .create("/tmp/project", "openrouter", "test-model", None)
+            .create(
+                "/tmp/project",
+                "openrouter",
+                "test-model",
+                ReasoningEffort::Auto,
+            )
             .await
             .expect("create session");
 
@@ -314,7 +338,12 @@ mod tests {
         let manager = SessionManager::new(&root);
 
         manager
-            .create("/tmp/project", "openrouter", "test-model", None)
+            .create(
+                "/tmp/project",
+                "openrouter",
+                "test-model",
+                ReasoningEffort::Auto,
+            )
             .await
             .expect("create session without a pre-existing root");
 
@@ -338,11 +367,11 @@ mod tests {
         let manager = SessionManager::new(&root);
 
         manager
-            .create("/tmp/a", "openrouter", "m", None)
+            .create("/tmp/a", "openrouter", "m", ReasoningEffort::Auto)
             .await
             .expect("create a");
         manager
-            .create("/tmp/b", "openrouter", "m", None)
+            .create("/tmp/b", "openrouter", "m", ReasoningEffort::Auto)
             .await
             .expect("create b");
 
@@ -361,7 +390,7 @@ mod tests {
                 "/tmp/project",
                 "openrouter",
                 "test-model",
-                Some(ReasoningEffort::High),
+                ReasoningEffort::High,
             )
             .await
             .expect("create");
@@ -393,7 +422,7 @@ mod tests {
         assert_eq!(loaded.pwd, session.pwd);
         assert_eq!(loaded.provider, "openrouter");
         assert_eq!(loaded.model, "test-model");
-        assert_eq!(loaded.thinking_level, Some(ReasoningEffort::High));
+        assert_eq!(loaded.reasoning_effort, ReasoningEffort::High);
         assert_eq!(loaded.created_at_ms, session.created_at_ms);
         assert_eq!(
             loaded.messages,
@@ -408,7 +437,7 @@ mod tests {
         let root = temp_root("usage");
         let manager = SessionManager::new(&root);
         let session = manager
-            .create("/tmp/p", "o", "m", None)
+            .create("/tmp/p", "o", "m", ReasoningEffort::Auto)
             .await
             .expect("create");
 
@@ -434,7 +463,7 @@ mod tests {
         let root = temp_root("truncated");
         let manager = SessionManager::new(&root);
         let session = manager
-            .create("/tmp/p", "o", "m", None)
+            .create("/tmp/p", "o", "m", ReasoningEffort::Auto)
             .await
             .expect("create");
         let path = session_file(&root, "/tmp/p", &session.id);
@@ -471,7 +500,7 @@ mod tests {
         let root = temp_root("cross");
         let manager = SessionManager::new(&root);
         let session = manager
-            .create("/tmp/p", "o", "m", None)
+            .create("/tmp/p", "o", "m", ReasoningEffort::Auto)
             .await
             .expect("create");
 
@@ -496,14 +525,14 @@ mod tests {
         let pwd = "/tmp/p";
 
         let session = manager
-            .create(pwd, "o", "m", None)
+            .create(pwd, "o", "m", ReasoningEffort::Auto)
             .await
             .expect("first create");
         let before = std::fs::read_to_string(session_file(&root, pwd, &session.id)).unwrap();
 
         // Simulate a second create racing onto the same id: the exclusive
         // file creation must refuse rather than truncate the existing file.
-        let mut collision = Session::new(pwd, "o", "m", None);
+        let mut collision = Session::new(pwd, "o", "m", ReasoningEffort::Auto);
         collision.id = session.id.clone();
         collision.created_at_ms = 123_456;
         collision.updated_at_ms = 123_456;
@@ -526,7 +555,10 @@ mod tests {
         let root = temp_root("header");
         let manager = SessionManager::new(&root);
         let pwd = "/tmp/p";
-        let session = manager.create(pwd, "o", "m", None).await.expect("create");
+        let session = manager
+            .create(pwd, "o", "m", ReasoningEffort::Auto)
+            .await
+            .expect("create");
         let path = session_file(&root, pwd, &session.id);
 
         // Wrong schema version.
@@ -543,7 +575,10 @@ mod tests {
         assert!(matches!(err, SessionError::UnsupportedVersion { .. }));
 
         // Mismatched header id (fresh file).
-        let session = manager.create(pwd, "o", "m", None).await.expect("create");
+        let session = manager
+            .create(pwd, "o", "m", ReasoningEffort::Auto)
+            .await
+            .expect("create");
         let path = session_file(&root, pwd, &session.id);
         let content = std::fs::read_to_string(&path).unwrap();
         std::fs::write(&path, content.replace(&session.id, "other-id")).unwrap();
@@ -554,7 +589,10 @@ mod tests {
         assert!(matches!(err, SessionError::InvalidHeader { .. }));
 
         // Mismatched header pwd / cross-directory load (fresh file).
-        let session = manager.create(pwd, "o", "m", None).await.expect("create");
+        let session = manager
+            .create(pwd, "o", "m", ReasoningEffort::Auto)
+            .await
+            .expect("create");
         let path = session_file(&root, pwd, &session.id);
         let content = std::fs::read_to_string(&path).unwrap();
         std::fs::write(&path, content.replace(pwd, "/elsewhere")).unwrap();
@@ -570,7 +608,7 @@ mod tests {
     async fn append_to_missing_session_fails() {
         let root = temp_root("missing-append");
         let manager = SessionManager::new(&root);
-        let session = Session::new("/tmp/p", "o", "m", None);
+        let session = Session::new("/tmp/p", "o", "m", ReasoningEffort::Auto);
 
         let err = manager
             .append_message(&session.id, &session.pwd, &AgentMessage::user("hi"))
@@ -588,7 +626,7 @@ mod tests {
         let root = temp_root("perms");
         let manager = SessionManager::new(&root);
         let session = manager
-            .create("/tmp/p", "o", "m", None)
+            .create("/tmp/p", "o", "m", ReasoningEffort::Auto)
             .await
             .expect("create");
 

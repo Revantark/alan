@@ -6,6 +6,7 @@ use agent::{Agent, AgentEvent, AgentStream};
 use llm::Usage;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use tokio::sync::mpsc;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Entry {
@@ -35,6 +36,9 @@ const POLL_TIME_BUDGET: Duration = Duration::from_millis(2);
 
 pub struct ChatController {
     agent: Arc<Agent>,
+    swap_error_sender: mpsc::UnboundedSender<agent::AgentError>,
+    /// Failed model swaps, which are async and so cannot report inline.
+    swap_error_receiver: mpsc::UnboundedReceiver<agent::AgentError>,
     entries: Vec<Entry>,
     stream: Option<AgentStream>,
     busy: bool,
@@ -45,8 +49,12 @@ pub struct ChatController {
 
 impl ChatController {
     pub fn new(agent: Agent) -> Self {
+        let (swap_error_sender, swap_error_receiver) = mpsc::unbounded_channel();
+
         Self {
             agent: Arc::new(agent),
+            swap_error_sender,
+            swap_error_receiver,
             entries: Vec::new(),
             stream: None,
             busy: false,
@@ -54,6 +62,19 @@ impl ChatController {
             revision: 0,
             usage: Usage::default(),
         }
+    }
+
+    /// Swap the bound model. The write is async, so failure arrives through
+    /// [`poll`](Self::poll) rather than being returned here. Success is silent.
+    pub fn set_model(&mut self, model: providers::Model) {
+        let agent = self.agent.clone();
+        let report = self.swap_error_sender.clone();
+
+        tokio::spawn(async move {
+            if let Err(error) = agent.set_model(model).await {
+                let _ = report.send(error);
+            }
+        });
     }
 
     pub async fn session_id(&self) -> Option<String> {
@@ -147,6 +168,11 @@ impl ChatController {
         self.revision = self.revision.wrapping_add(1);
     }
 
+    pub fn push_error(&mut self, text: impl Into<String>) {
+        self.entries.push(Entry::Error(text.into()));
+        self.revision = self.revision.wrapping_add(1);
+    }
+
     pub fn submit(&mut self, text: impl Into<String>, images: Vec<ImageAttachment>) {
         let text = text.into();
         let text = text.trim();
@@ -196,6 +222,15 @@ impl ChatController {
     }
 
     pub fn poll(&mut self) -> Poll {
+        let mut outcome = Poll::Idle;
+        while let Ok(error) = self.swap_error_receiver.try_recv() {
+            self.push_error(format!("settings: {error}"));
+            outcome = Poll::Changed;
+        }
+        outcome.combine(self.poll_stream())
+    }
+
+    fn poll_stream(&mut self) -> Poll {
         let Some(mut stream) = self.stream.take() else {
             return Poll::Idle;
         };

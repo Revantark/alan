@@ -1,4 +1,6 @@
-use crate::{LlmError, LlmEvent, LlmRequest, Message, Role, StopReason, ToolSpec, Usage};
+use crate::{
+    LlmError, LlmEvent, LlmRequest, Message, ReasoningEffort, Role, StopReason, ToolSpec, Usage,
+};
 use serde::{Deserialize, Serialize};
 
 #[derive(Serialize)]
@@ -159,10 +161,14 @@ pub(crate) struct StreamToolCall {
 pub(crate) fn serialize_request(request: &LlmRequest<'_>) -> Result<String, LlmError> {
     let messages = request.messages.iter().map(wire_message).collect();
     let tools = request.tools.iter().map(wire_tool).collect();
-    let reasoning = request.reasoning_effort.map(|effort| WireReasoning {
-        effort: effort.as_str().to_string(),
-        exclude: None,
-    });
+    // How `Auto` reaches the provider is this protocol's business
+    let reasoning = match request.reasoning_effort {
+        ReasoningEffort::Auto => None,
+        effort => Some(WireReasoning {
+            effort: effort.as_str().to_string(),
+            exclude: None,
+        }),
+    };
     serde_json::to_string(&Request {
         model: request.model_id,
         stream: true,
@@ -364,7 +370,7 @@ fn role(role: Role) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{RequestOptions, ToolDefinition, ToolSpec};
+    use crate::{ReasoningEffort, RequestOptions, ToolDefinition, ToolSpec};
 
     fn request<'a>(
         model_id: &'a str,
@@ -378,7 +384,7 @@ mod tests {
             tools,
             options,
             credential: None,
-            reasoning_effort: None,
+            reasoning_effort: ReasoningEffort::Auto,
         }
     }
 
@@ -420,11 +426,35 @@ mod tests {
         )];
         let options = RequestOptions::default();
         let mut request = request("model-a", &messages, &[], &options);
-        request.reasoning_effort = Some(crate::ReasoningEffort::High);
+        request.reasoning_effort = ReasoningEffort::High;
         let json: serde_json::Value =
             serde_json::from_str(&serialize_request(&request).unwrap()).unwrap();
         assert_eq!(json["reasoning"]["effort"], "high");
         assert_eq!(json["messages"][0]["reasoning_details"][0]["text"], "think");
+    }
+
+    /// `Auto` and `None` are opposites and must not produce the same request.
+    /// Omitting the field lets a reasoning model apply its own default, which
+    /// is typically enabled — so collapsing `none` into "omit" turns reasoning
+    /// *on* for someone who asked for it off.
+    #[test]
+    fn auto_omits_reasoning_but_none_disables_it_explicitly() {
+        let messages = [Message::user("hello")];
+        let options = RequestOptions::default();
+
+        let mut request = request("model-a", &messages, &[], &options);
+        request.reasoning_effort = ReasoningEffort::Auto;
+        let json: serde_json::Value =
+            serde_json::from_str(&serialize_request(&request).unwrap()).unwrap();
+        assert!(
+            json.get("reasoning").is_none(),
+            "Auto must omit the field entirely, got {json}"
+        );
+
+        request.reasoning_effort = ReasoningEffort::None;
+        let json: serde_json::Value =
+            serde_json::from_str(&serialize_request(&request).unwrap()).unwrap();
+        assert_eq!(json["reasoning"]["effort"], "none");
     }
 
     #[test]

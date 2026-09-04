@@ -697,7 +697,7 @@ async fn resumed_agent_includes_restored_messages_in_first_request() {
     let manager = Arc::new(SessionManager::new(&root));
 
     let session = manager
-        .create(&root, "openrouter", "test", None)
+        .create(&root, "openrouter", "test", llm::ReasoningEffort::Auto)
         .await
         .expect("create session");
     manager
@@ -898,7 +898,7 @@ async fn session_images_roundtrip_through_reload() {
     let manager = Arc::new(SessionManager::new(&root));
 
     let session = manager
-        .create(&root, "openrouter", "test", None)
+        .create(&root, "openrouter", "test", llm::ReasoningEffort::Auto)
         .await
         .expect("create session");
     let images = vec![llm::ImageUrl {

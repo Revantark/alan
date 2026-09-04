@@ -142,7 +142,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Message, RequestOptions, ToolSpec};
+    use crate::{Message, ReasoningEffort, RequestOptions, ToolSpec};
     use futures_util::StreamExt;
     use std::sync::Arc;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -160,7 +160,7 @@ mod tests {
             tools,
             options,
             credential: None,
-            reasoning_effort: None,
+            reasoning_effort: ReasoningEffort::Auto,
         }
     }
 

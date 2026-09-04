@@ -1,10 +1,11 @@
 //! UI-independent application coordinator.
 
-use super::action::{Command, ImageAttachment};
+use super::action::{Command, ImageAttachment, InputMode};
 use super::chat::{ChatController, Entry};
 use super::command::SlashCommand;
 use super::completion::{Commands, CompletionController, Paths};
 use super::login::{LoginController, LoginState};
+use super::settings::{self, SettingsController, SettingsState};
 use agent::Agent;
 use llm::Usage;
 use providers::{CredentialStore, ProviderRegistry};
@@ -35,6 +36,7 @@ impl Poll {
 pub enum Overlay {
     None,
     Login,
+    Settings,
 }
 
 /// What the prompt is doing, and so what Enter does to it.
@@ -53,33 +55,27 @@ pub struct Controller {
     chat: ChatController,
     login: LoginController,
     completion: CompletionController,
+    settings: SettingsController,
+    providers: ProviderRegistry,
     overlay: Overlay,
 }
 
 impl Controller {
-    // TODO: drop the attribute once a non-test caller exists. Only `#[cfg(test)]`
-    // code reaches this today, so the binary build reports it as dead.
-    #[allow(dead_code)]
-    pub fn new(agent: Agent) -> Self {
-        Self::with_runtime(
-            agent,
-            ProviderRegistry::default(),
-            Arc::new(providers::InMemoryCredentialStore::new()),
-        )
-    }
-
-    pub fn with_runtime(
+    pub fn new(
         agent: Agent,
         providers: ProviderRegistry,
         credentials: Arc<dyn CredentialStore>,
+        settings: SettingsController,
     ) -> Self {
         Self {
             chat: ChatController::new(agent),
-            login: LoginController::new(providers, credentials),
+            login: LoginController::new(providers.clone(), credentials),
             completion: CompletionController::new(vec![
                 Box::new(Paths::default()),
                 Box::new(Commands::default()),
             ]),
+            settings,
+            providers,
             overlay: Overlay::None,
         }
     }
@@ -123,10 +119,6 @@ impl Controller {
         self.login.state()
     }
 
-    pub fn login_selection_active(&self) -> bool {
-        matches!(self.login.state(), LoginState::Selecting { .. })
-    }
-
     pub fn completion(&self) -> &CompletionController {
         &self.completion
     }
@@ -139,19 +131,67 @@ impl Controller {
         self.overlay
     }
 
+    pub fn input_mode(&self, overlay: Overlay) -> InputMode {
+        let showing_list = match overlay {
+            Overlay::Login => matches!(self.login.state(), LoginState::Selecting { .. }),
+            Overlay::Settings => !self.settings.editing(),
+            Overlay::None => false,
+        };
+
+        if showing_list {
+            InputMode::List
+        } else {
+            InputMode::Prompt
+        }
+    }
+
     pub fn poll(&mut self) -> Poll {
         self.chat
             .poll()
             .combine(self.login.poll())
             .combine(self.completion.poll())
+            .combine(self.poll_settings())
+    }
+
+    /// Skipped while streaming: swapping the model mid-response would leave a
+    /// transcript half-answered by each. The next idle poll picks it up.
+    fn poll_settings(&mut self) -> Poll {
+        if self.chat.is_busy() {
+            return Poll::Idle;
+        }
+
+        match self.settings.poll() {
+            Ok(Poll::Changed) => {
+                self.apply_settings();
+                Poll::Changed
+            }
+            Ok(poll) => poll,
+            Err(error) => {
+                self.chat.push_error(format!("settings: {error:#}"));
+                Poll::Error
+            }
+        }
+    }
+
+    fn apply_settings(&mut self) {
+        let next = self.settings.current().clone();
+        match next.bind(&self.providers) {
+            Ok(model) => self.chat.set_model(model),
+            Err(error) => self
+                .chat
+                .push_error(format!("settings: cannot use {}: {error}", next.model)),
+        }
     }
 
     pub fn handle(&mut self, command: Command) -> bool {
         match command {
             Command::Interrupt => self.abort_or_quit(),
             Command::Cancel => {
-                if self.overlay == Overlay::Login {
-                    self.close_login();
+                match self.overlay {
+                    Overlay::Login => self.close_login(),
+                    Overlay::Settings if self.settings.editing() => self.settings.cancel_edit(),
+                    Overlay::Settings => self.close_settings(),
+                    Overlay::None => {}
                 }
                 false
             }
@@ -159,21 +199,44 @@ impl Controller {
                 self.submit(text, images);
                 false
             }
-            Command::MoveLoginSelection(delta) => {
-                self.move_login_selection(delta);
+            Command::Cycle => {
+                match self.overlay {
+                    Overlay::Settings => self.settings.toggle_scope(),
+                    // Login hides the footer the mode is shown in.
+                    Overlay::Login => {}
+                    Overlay::None => self.chat.toggle_mode(),
+                }
                 false
             }
-            Command::TogglePlanMode => {
-                self.chat.toggle_mode();
+            Command::MoveSelection(delta) => {
+                match self.overlay {
+                    Overlay::Login => self.login.move_selection(delta),
+                    Overlay::Settings => self.settings.move_selection(delta),
+                    Overlay::None => {}
+                }
+                false
+            }
+            Command::ClearSelection => {
+                if self.overlay == Overlay::Settings {
+                    let outcome = self.settings.clear();
+                    self.settings_action(outcome);
+                }
                 false
             }
         }
     }
 
     fn abort_or_quit(&mut self) -> bool {
-        if self.overlay == Overlay::Login {
-            self.close_login();
-            return false;
+        match self.overlay {
+            Overlay::Login => {
+                self.close_login();
+                return false;
+            }
+            Overlay::Settings => {
+                self.close_settings();
+                return false;
+            }
+            Overlay::None => {}
         }
         if self.chat.is_busy() {
             self.chat.abort();
@@ -187,11 +250,21 @@ impl Controller {
             self.login.submit(text);
             return;
         }
+        if self.overlay == Overlay::Settings {
+            let outcome = if self.settings.editing() {
+                self.settings.submit_edit(&text)
+            } else {
+                self.settings.activate()
+            };
+            self.settings_action(outcome);
+            return;
+        }
 
         // Not trimmed: a leading space means this is a prompt.
         if let Some(command) = SlashCommand::parse(&text) {
             match command {
                 SlashCommand::Login => self.open_login(),
+                SlashCommand::Settings => self.open_settings(),
                 SlashCommand::Plan => self.chat.set_mode(agent::Mode::Plan),
                 SlashCommand::Review => self.chat.set_mode(agent::Mode::Review),
                 SlashCommand::Normal => self.chat.set_mode(agent::Mode::Normal),
@@ -208,13 +281,37 @@ impl Controller {
         self.chat.submit(text.to_owned(), images);
     }
 
-    pub fn open_login(&mut self) {
-        self.login.open();
-        self.overlay = Overlay::Login;
+    fn open_settings(&mut self) {
+        self.settings.open();
+        self.overlay = Overlay::Settings;
     }
 
-    pub fn move_login_selection(&mut self, delta: isize) {
-        self.login.move_selection(delta);
+    fn close_settings(&mut self) {
+        self.settings.close();
+        self.overlay = Overlay::None;
+    }
+
+    pub fn settings_state(&self) -> Option<SettingsState> {
+        self.settings.state()
+    }
+
+    /// Take the value a just-opened overlay prompt should start from.
+    pub fn take_input_seed(&mut self) -> Option<String> {
+        self.settings.take_seed()
+    }
+
+    /// Report a settings action's outcome and apply whatever it changed.
+    fn settings_action(&mut self, outcome: settings::Outcome) {
+        match outcome {
+            Ok(true) => self.apply_settings(),
+            Ok(false) => {}
+            Err(reason) => self.chat.push_error(format!("settings: {reason:#}")),
+        }
+    }
+
+    fn open_login(&mut self) {
+        self.login.open();
+        self.overlay = Overlay::Login;
     }
 
     fn close_login(&mut self) {
@@ -231,8 +328,38 @@ mod tests {
     use providers::{
         ApiId, ModelCapabilities, ModelInfo, OpenRouterProvider, Provider, ProviderId,
     };
+    use std::path::PathBuf;
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::Duration;
+
+    /// Owns the settings directory, so a test that writes a setting cannot
+    /// reach outside its scratch space.
+    struct TestController {
+        controller: Controller,
+        settings_dir: PathBuf,
+    }
+
+    /// So a test leaves the filesystem as it found it, panic or not.
+    impl Drop for TestController {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.settings_dir);
+        }
+    }
+
+    impl std::ops::Deref for TestController {
+        type Target = Controller;
+
+        fn deref(&self) -> &Controller {
+            &self.controller
+        }
+    }
+
+    impl std::ops::DerefMut for TestController {
+        fn deref_mut(&mut self) -> &mut Controller {
+            &mut self.controller
+        }
+    }
 
     struct FakeApi;
 
@@ -251,7 +378,8 @@ mod tests {
         }
     }
 
-    fn make_controller() -> Controller {
+    /// A controller with no provider, no credentials, and default settings.
+    fn controller_with(api: Arc<dyn LlmApi>) -> TestController {
         let info = ModelInfo {
             provider: ProviderId::new("openrouter"),
             id: "test".into(),
@@ -262,12 +390,34 @@ mod tests {
         };
         let model = OpenRouterProvider::builder("key")
             .with_models([info])
-            .with_api(Arc::new(FakeApi))
+            .with_api(api)
             .build()
             .unwrap()
             .bind("test")
             .unwrap();
-        Controller::new(Agent::builder(model).build().unwrap())
+        // Counted: several tests build a controller, and two sharing a name
+        // would delete each other's directory.
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let settings_dir = std::env::temp_dir().join(format!(
+            "alan-controller-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        let _ = std::fs::remove_dir_all(&settings_dir);
+        std::fs::create_dir_all(&settings_dir).expect("settings dir");
+        TestController {
+            controller: Controller::new(
+                Agent::builder(model).build().unwrap(),
+                ProviderRegistry::default(),
+                Arc::new(providers::InMemoryCredentialStore::new()),
+                SettingsController::new(&settings_dir, &settings_dir).expect("defaults"),
+            ),
+            settings_dir,
+        }
+    }
+
+    fn make_controller() -> TestController {
+        controller_with(Arc::new(FakeApi))
     }
 
     #[tokio::test]
@@ -306,22 +456,7 @@ mod tests {
 
     #[tokio::test]
     async fn submit_streams_reasoning_and_response() {
-        let info = ModelInfo {
-            provider: ProviderId::new("openrouter"),
-            id: "test".into(),
-            name: "Test".into(),
-            api: ApiId::ChatCompletions,
-            capabilities: ModelCapabilities::default(),
-            pricing: None,
-        };
-        let model = OpenRouterProvider::builder("key")
-            .with_models([info])
-            .with_api(Arc::new(ReasoningFakeApi))
-            .build()
-            .unwrap()
-            .bind("test")
-            .unwrap();
-        let mut controller = Controller::new(Agent::builder(model).build().unwrap());
+        let mut controller = controller_with(Arc::new(ReasoningFakeApi));
 
         controller.submit("hi".into(), vec![]);
         tokio::time::sleep(Duration::from_millis(50)).await;
@@ -401,14 +536,112 @@ mod tests {
         let mut controller = make_controller();
         assert_eq!(controller.mode(), agent::Mode::Normal);
 
-        controller.handle(Command::TogglePlanMode);
+        controller.handle(Command::Cycle);
         assert_eq!(controller.mode(), agent::Mode::Plan);
 
-        controller.handle(Command::TogglePlanMode);
+        controller.handle(Command::Cycle);
         assert_eq!(controller.mode(), agent::Mode::Review);
 
-        controller.handle(Command::TogglePlanMode);
+        controller.handle(Command::Cycle);
         assert_eq!(controller.mode(), agent::Mode::Normal);
+    }
+
+    /// The same key reaches the surface in front of you, so with the list open
+    /// it must not reach past it to the agent.
+    #[test]
+    fn shift_tab_cycles_the_settings_scope_while_that_list_is_open() {
+        let mut controller = make_controller();
+        controller.submit("/settings".into(), vec![]);
+        let before = controller.settings_state().expect("open").scope;
+
+        controller.handle(Command::Cycle);
+
+        let overlay = controller.settings_state().expect("open");
+        assert_ne!(overlay.scope, before, "the scope moved");
+        assert_eq!(controller.mode(), agent::Mode::Normal, "the agent did not");
+    }
+
+    /// The login overlay covers the footer, so the mode it would change is not
+    /// visible while it is open.
+    #[test]
+    fn cycling_does_nothing_while_logging_in() {
+        let mut controller = make_controller();
+        controller.submit("/login".into(), vec![]);
+        assert_eq!(controller.overlay(), Overlay::Login);
+
+        controller.handle(Command::Cycle);
+
+        assert_eq!(controller.mode(), agent::Mode::Normal, "the agent did not");
+    }
+
+    /// A row's value differs per scope, so a half-typed one belongs to the
+    /// scope being left.
+    #[test]
+    fn cycling_scope_abandons_a_row_being_edited() {
+        let mut controller = make_controller();
+        controller.submit("/settings".into(), vec![]);
+        // Enter on `model`, a text row, opens its prompt.
+        controller.submit(String::new(), vec![]);
+        assert!(controller.settings_state().is_some_and(|s| s.editing));
+
+        controller.handle(Command::Cycle);
+
+        assert!(
+            !controller.settings_state().is_some_and(|s| s.editing),
+            "the prompt closed"
+        );
+        assert_eq!(controller.overlay(), Overlay::Settings, "the list stayed");
+    }
+
+    /// Which overlay is open decides where a shared key lands.
+    #[test]
+    fn selection_keys_route_to_whichever_overlay_is_open() {
+        let mut controller = make_controller();
+        controller.submit("/settings".into(), vec![]);
+
+        controller.handle(Command::MoveSelection(1));
+        assert_eq!(
+            controller.settings_state().expect("open").selected,
+            1,
+            "the settings list moved"
+        );
+
+        // Backspace clears a settings row, and means nothing to the login list.
+        controller.handle(Command::ClearSelection);
+        controller.handle(Command::Cancel);
+
+        controller.submit("/login".into(), vec![]);
+        assert_eq!(controller.overlay(), Overlay::Login);
+        controller.handle(Command::ClearSelection);
+        assert_eq!(controller.overlay(), Overlay::Login, "login ignores it");
+    }
+
+    /// The footer offers "Enter save · Esc cancel" for a row's prompt, so Esc
+    /// has to mean the prompt rather than the whole overlay.
+    #[test]
+    fn esc_while_typing_closes_the_prompt_not_the_overlay() {
+        let mut controller = make_controller();
+        controller.submit("/settings".into(), vec![]);
+        assert_eq!(controller.overlay(), Overlay::Settings);
+
+        // Enter on `model`, a text row, opens its prompt.
+        controller.submit(String::new(), vec![]);
+        assert!(controller.settings_state().is_some_and(|s| s.editing));
+
+        controller.handle(Command::Cancel);
+        assert!(
+            !controller.settings_state().is_some_and(|s| s.editing),
+            "the prompt closed"
+        );
+        assert_eq!(
+            controller.overlay(),
+            Overlay::Settings,
+            "the list is still open"
+        );
+
+        // A second Esc, now with no prompt open, closes the overlay.
+        controller.handle(Command::Cancel);
+        assert_eq!(controller.overlay(), Overlay::None);
     }
 
     /// Submitting a prompt spawns an agent task, so this needs a runtime.

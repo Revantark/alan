@@ -30,7 +30,7 @@ pub struct ModelCapabilities {
     pub tools: bool,
     pub vision: bool,
     #[serde(default)]
-    pub reasoning: Option<ReasoningEffort>,
+    pub reasoning: ReasoningEffort,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

@@ -10,10 +10,10 @@ mod theme;
 
 use crate::core::{
     Accept, Action, Command, CompletionController, CompletionItem, Controller, ImageAttachment,
-    Overlay, Poll, SlashCommand,
+    InputMode, Overlay, Poll, SlashCommand,
 };
 use base64::Engine;
-use components::{Chat, Footer, Header, LoginOverlay};
+use components::{Chat, Footer, Header, LoginOverlay, SettingsOverlayView};
 use crossterm::event::{
     Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
@@ -74,13 +74,13 @@ impl UiState {
         }
     }
 
-    pub fn apply(&mut self, action: Action, login_selection_active: bool) -> Option<Command> {
+    pub fn apply(&mut self, action: Action, mode: InputMode) -> Option<Command> {
         let command = match action {
             Action::Interrupt => {
                 self.input.clear();
                 Some(Command::Interrupt)
             }
-            Action::TogglePlanMode => Some(Command::TogglePlanMode),
+            Action::Cycle => Some(Command::Cycle),
             Action::Resize => None,
             Action::Submit => {
                 self.follow_output = true;
@@ -103,11 +103,17 @@ impl UiState {
                 }
             }
             Action::Backspace => {
-                self.input.pop();
-                None
+                if mode == InputMode::Prompt {
+                    self.input.pop();
+                    None
+                } else {
+                    Some(Command::ClearSelection)
+                }
             }
             Action::Insert(character) => {
-                self.input.push(character);
+                if mode == InputMode::Prompt {
+                    self.input.push(character);
+                }
                 None
             }
             Action::Paste(text) => {
@@ -120,22 +126,24 @@ impl UiState {
                 } else {
                     // No image on the clipboard: fall back to pasting text.
                     match arboard::Clipboard::new().and_then(|mut c| c.get_text()) {
-                        Ok(text) if !text.is_empty() => self.apply(Action::Paste(text), false),
+                        Ok(text) if !text.is_empty() => {
+                            self.apply(Action::Paste(text), InputMode::Prompt)
+                        }
                         _ => None,
                     }
                 }
             }
             Action::ScrollUp => {
-                if login_selection_active {
-                    Some(Command::MoveLoginSelection(-1))
+                if mode == InputMode::List {
+                    Some(Command::MoveSelection(-1))
                 } else {
                     self.scroll_by(-(self.viewport_height.max(1) as isize));
                     None
                 }
             }
             Action::ScrollDown => {
-                if login_selection_active {
-                    Some(Command::MoveLoginSelection(1))
+                if mode == InputMode::List {
+                    Some(Command::MoveSelection(1))
                 } else {
                     self.scroll_by(self.viewport_height.max(1) as isize);
                     None
@@ -196,7 +204,7 @@ impl UiState {
                         && key.modifiers.contains(KeyModifiers::SHIFT)) =>
             {
                 completion.dismiss();
-                self.apply(Action::TogglePlanMode, false)
+                self.apply(Action::Cycle, InputMode::Prompt)
             }
             Event::Key(key) if is_multiline_enter(key) => {
                 self.editor.insert_newline();
@@ -208,9 +216,11 @@ impl UiState {
                 completion.dismiss();
                 self.submit_editor_or_accept()
             }
-            Event::Key(key) if key.code == KeyCode::PageUp => self.apply(Action::ScrollUp, false),
+            Event::Key(key) if key.code == KeyCode::PageUp => {
+                self.apply(Action::ScrollUp, InputMode::Prompt)
+            }
             Event::Key(key) if key.code == KeyCode::PageDown => {
-                self.apply(Action::ScrollDown, false)
+                self.apply(Action::ScrollDown, InputMode::Prompt)
             }
             Event::Key(key)
                 if key.code == KeyCode::Char('c')
@@ -390,8 +400,8 @@ impl UiState {
         rendered_lines: &[ratatui::text::Line<'static>],
     ) -> Option<Command> {
         match mouse.kind {
-            MouseEventKind::ScrollUp => self.apply(Action::MouseScrollUp, false),
-            MouseEventKind::ScrollDown => self.apply(Action::MouseScrollDown, false),
+            MouseEventKind::ScrollUp => self.apply(Action::MouseScrollUp, InputMode::Prompt),
+            MouseEventKind::ScrollDown => self.apply(Action::MouseScrollDown, InputMode::Prompt),
             MouseEventKind::Down(MouseButton::Left) => {
                 if self.is_mouse_in_chat(mouse.column, mouse.row) {
                     let now = Instant::now();
@@ -569,6 +579,13 @@ impl UiState {
         self.scroll_offset
     }
 
+    /// Pre-fill the overlay prompt so editing a value starts from it rather
+    /// than from an empty line.
+    pub fn seed_input(&mut self, text: String) {
+        self.input = text;
+        self.dirty = true;
+    }
+
     pub(super) fn input(&self) -> &str {
         &self.input
     }
@@ -735,6 +752,7 @@ pub struct AppView {
     chat: Chat,
     footer: Footer,
     login: LoginOverlay,
+    settings: SettingsOverlayView,
 }
 
 impl AppView {
@@ -745,10 +763,18 @@ impl AppView {
     pub fn render(&mut self, frame: &mut Frame, controller: &Controller, state: &mut UiState) {
         use component::Component;
 
-        if controller.overlay() == Overlay::Login {
-            frame.render_widget(ratatui::widgets::Clear, frame.area());
-            self.login.render(frame, frame.area(), controller, state);
-            return;
+        match controller.overlay() {
+            Overlay::Login => {
+                frame.render_widget(ratatui::widgets::Clear, frame.area());
+                self.login.render(frame, frame.area(), controller, state);
+                return;
+            }
+            Overlay::Settings => {
+                frame.render_widget(ratatui::widgets::Clear, frame.area());
+                self.settings.render(frame, frame.area(), controller, state);
+                return;
+            }
+            Overlay::None => {}
         }
 
         // Measure against the width the editor actually gets, not the frame's.

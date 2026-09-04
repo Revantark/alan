@@ -50,6 +50,7 @@ dependencies = [
  "llm",
  "providers",
  "ratatui",
+ "serde",
  "serde_json",
  "strum",
  "tokio",

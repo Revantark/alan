@@ -1,3 +1,4 @@
+use super::centered_rect;
 use crate::core::{Controller, LoginState};
 use crate::views::UiState;
 use crate::views::component::Component;
@@ -131,20 +132,4 @@ fn prompt_message(prompt: &AuthPrompt) -> String {
         | AuthPrompt::ManualCode { message } => message.clone(),
         AuthPrompt::Select { message, .. } => message.clone(),
     }
-}
-
-fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
-    let horizontal: [Rect; 3] = Layout::horizontal([
-        Constraint::Percentage((100 - percent_x) / 2),
-        Constraint::Percentage(percent_x),
-        Constraint::Percentage((100 - percent_x) / 2),
-    ])
-    .areas(area);
-    let vertical: [Rect; 3] = Layout::vertical([
-        Constraint::Percentage((100 - percent_y) / 2),
-        Constraint::Percentage(percent_y),
-        Constraint::Percentage((100 - percent_y) / 2),
-    ])
-    .areas(horizontal[1]);
-    vertical[1]
 }

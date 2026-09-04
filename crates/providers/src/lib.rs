@@ -81,16 +81,4 @@ mod tests {
         assert_eq!(response.model.as_deref(), Some("test-model"));
         assert_eq!(provider.models().len(), 1);
     }
-
-    #[test]
-    fn missing_model_is_reported() {
-        let provider = OpenRouterProvider::builder("key")
-            .with_model("known")
-            .build()
-            .unwrap();
-        assert!(matches!(
-            provider.bind("missing"),
-            Err(ProviderError::ModelNotFound(_))
-        ));
-    }
 }

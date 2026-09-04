@@ -96,6 +96,21 @@ impl Agent {
             .map(|session| session.id.clone())
     }
 
+    /// Swap the bound model for the rest of this session.
+    pub async fn set_model(&self, model: Model) -> Result<(), AgentError> {
+        persistence::persist_model(
+            self,
+            model.info().provider.0.clone(),
+            model.info().id.clone(),
+            model.reasoning_effort(),
+        )
+        .await?;
+
+        *self.model.lock().await = model;
+
+        Ok(())
+    }
+
     pub fn set_mode(&self, mode: Mode) {
         self.mode.store(mode.as_u8(), Ordering::Release);
         self.review_intro_pending

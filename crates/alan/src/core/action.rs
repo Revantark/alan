@@ -16,7 +16,7 @@ pub enum Action {
     ScrollDown,
     MouseScrollUp,
     MouseScrollDown,
-    TogglePlanMode,
+    Cycle,
 }
 
 /// An image attached to the next prompt via clipboard paste.
@@ -37,6 +37,16 @@ pub enum Command {
         text: String,
         images: Vec<ImageAttachment>,
     },
-    MoveLoginSelection(isize),
-    TogglePlanMode,
+    /// The settings scope while its list is open, the agent mode otherwise.
+    Cycle,
+    MoveSelection(isize),
+    ClearSelection,
+}
+
+/// What the visible surface wants from navigation and editing keys.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum InputMode {
+    #[default]
+    Prompt,
+    List,
 }
