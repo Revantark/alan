@@ -105,6 +105,7 @@ impl Component<AlanAction> for AlanRoot {
             let poll = inner.controller.poll();
             inner.ui.on_poll(poll);
             inner.ui.tick();
+            inner.ui.flush_wheel();
             if inner.ui.take_dirty() {
                 cx.notify();
             }
