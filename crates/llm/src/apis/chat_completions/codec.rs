@@ -328,10 +328,7 @@ fn wire_message(message: &Message) -> WireMessage {
                 .collect()
         }),
         tool_call_id: message.tool_call_id.clone(),
-        reasoning_details: message
-            .reasoning_details
-            .clone()
-            .filter(|details| !details.is_empty()),
+        reasoning_details: None,
     }
 }
 
@@ -407,7 +404,7 @@ mod tests {
     }
 
     #[test]
-    fn serializes_reasoning_effort_and_preserves_reasoning_details() {
+    fn serializes_reasoning_effort_and_strips_reasoning_details() {
         let messages = [Message::assistant_with_tool_calls_and_reasoning(
             None,
             vec![crate::ToolCall {
@@ -424,7 +421,10 @@ mod tests {
         let json: serde_json::Value =
             serde_json::from_str(&serialize_request(&request).unwrap()).unwrap();
         assert_eq!(json["reasoning"]["effort"], "high");
-        assert_eq!(json["messages"][0]["reasoning_details"][0]["text"], "think");
+        assert!(
+            json["messages"][0].get("reasoning_details").is_none(),
+            "reasoning history must not be re-sent"
+        );
     }
 
     #[test]

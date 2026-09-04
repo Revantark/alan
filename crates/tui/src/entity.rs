@@ -72,6 +72,7 @@ impl<T> Entity<T> {
 
 pub(crate) trait ComponentSlot<A>: 'static {
     fn init(&mut self, cx: &mut Ctx<'_, A>);
+    fn cleanup(&mut self, cx: &mut Ctx<'_, A>);
     fn handle_action(&mut self, action: &A, cx: &mut Ctx<'_, A>) -> ActionStatus;
     fn render(&self, frame: &mut Frame, area: Rect, cx: &RenderContext<'_, A>);
     fn as_any(&self) -> &dyn Any;
@@ -85,6 +86,10 @@ where
     fn init(&mut self, cx: &mut Ctx<'_, A>) {
         let mut typed = cx.typed::<S>();
         S::init(self, &mut typed);
+    }
+    fn cleanup(&mut self, cx: &mut Ctx<'_, A>) {
+        let mut typed = cx.typed::<S>();
+        S::cleanup(self, &mut typed);
     }
     fn handle_action(&mut self, action: &A, cx: &mut Ctx<'_, A>) -> ActionStatus {
         let mut typed = cx.typed::<S>();
@@ -120,14 +125,17 @@ impl<A: 'static> EntityStore<A> {
     pub(crate) fn new() -> Self {
         Self::default()
     }
+
     pub(crate) fn insert<T: Component<A>>(&mut self, state: T) -> Entity<T> {
         let id = EntityId::allocate();
         self.slots.insert(id, Mutex::new(Some(Box::new(state))));
         Entity::from_id(id)
     }
+
     pub(crate) fn insert_slot(&mut self, id: EntityId, slot: Box<dyn ComponentSlot<A>>) {
         self.slots.insert(id, Mutex::new(Some(slot)));
     }
+
     pub(crate) fn init_if_needed(&self, id: EntityId, cx: &mut Ctx<'_, A>) {
         if self.initialised.borrow().contains(&id) {
             return;
@@ -141,11 +149,20 @@ impl<A: 'static> EntityStore<A> {
         self.initialised.borrow_mut().insert(id);
         component.init(cx);
     }
-    #[cfg(test)]
-    #[allow(dead_code)]
-    pub(crate) fn is_initialised(&self, id: EntityId) -> bool {
-        self.initialised.borrow().contains(&id)
+
+    pub(crate) fn cleanup_if_needed(&self, id: EntityId, cx: &mut Ctx<'_, A>) {
+        if !self.initialised.borrow().contains(&id) {
+            return;
+        }
+        let Some(mut guard) = self.lock(id) else {
+            return;
+        };
+        let Some(component) = guard.as_mut() else {
+            return;
+        };
+        component.cleanup(cx);
     }
+
     pub(crate) fn remove_entity(&mut self, id: EntityId) -> bool {
         let removed = self.slots.remove(&id).is_some();
         if removed {
@@ -153,21 +170,20 @@ impl<A: 'static> EntityStore<A> {
         }
         removed
     }
+
     #[cfg(test)]
     pub(crate) fn remove(&mut self, id: EntityId) -> bool {
         self.remove_entity(id)
     }
-    #[cfg(test)]
-    #[allow(dead_code)]
-    pub(crate) fn contains(&self, id: EntityId) -> bool {
-        self.slots.contains_key(&id)
-    }
+
     pub(crate) fn is_active_entity(&self, id: EntityId) -> bool {
         self.slots.contains_key(&id)
     }
+
     pub(crate) fn lock(&self, id: EntityId) -> Option<MutexGuard<'_, SlotValue<A>>> {
         self.slots.get(&id).and_then(|slot| slot.lock().ok())
     }
+
     pub(crate) fn dispatch_action(
         &self,
         id: EntityId,
@@ -177,6 +193,7 @@ impl<A: 'static> EntityStore<A> {
         let mut guard = self.lock(id)?;
         Some(guard.as_mut()?.handle_action(action, cx))
     }
+
     pub(crate) fn render_entity(
         &self,
         id: EntityId,
@@ -190,6 +207,7 @@ impl<A: 'static> EntityStore<A> {
             component.render(frame, area, cx);
         }
     }
+
     pub(crate) fn typed_update<E: 'static, R>(
         &self,
         id: EntityId,
@@ -199,6 +217,7 @@ impl<A: 'static> EntityStore<A> {
         let state = guard.as_mut()?.as_any_mut().downcast_mut::<E>()?;
         Some(f(state))
     }
+
     pub(crate) fn typed_read<E: 'static, R>(
         &self,
         id: EntityId,
@@ -222,6 +241,7 @@ mod tests {
     impl Component<()> for Counter {
         fn render(&self, _: &mut Frame, _: Rect, _: &RenderContext<'_, ()>) {}
     }
+
     struct ActionProbe;
     impl Component<()> for ActionProbe {
         fn handle_action(&mut self, _: &(), _: &mut Context<'_, Self, ()>) -> ActionStatus {
@@ -229,10 +249,12 @@ mod tests {
         }
         fn render(&self, _: &mut Frame, _: Rect, _: &RenderContext<'_, ()>) {}
     }
+
     fn core_for<A: 'static>() -> RuntimeState<A> {
         let (sender, _) = tokio::sync::mpsc::unbounded_channel();
         RuntimeState::new(sender, Arc::new(TokioExecutor))
     }
+
     #[test]
     fn insert_update_read_remove() {
         let mut store = EntityStore::new();
@@ -247,6 +269,7 @@ mod tests {
         assert!(store.remove(entity.id()));
         assert!(!store.remove(entity.id()));
     }
+
     #[test]
     fn typed_access_rejects_wrong_type() {
         let mut store = EntityStore::new();
@@ -258,6 +281,7 @@ mod tests {
         );
         assert!(store.typed_read::<String, _>(entity.id(), |_| ()).is_none());
     }
+
     #[test]
     fn action_dispatch_returns_propagation() {
         let mut store = EntityStore::new();
