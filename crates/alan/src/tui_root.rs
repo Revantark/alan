@@ -27,7 +27,7 @@ use tui::{ActionStatus, Component, RenderContext, Subscription, SubscriptionEven
 use crate::core::{Action, CommandOutcome, CompletionController, Controller};
 use crate::login_overlay::{LoginDone, LoginOverlay};
 use crate::views::Header;
-use crate::views::{AppView, PopupList, PopupStatus, UiState};
+use crate::views::{AppView, PopupList, PopupStatus, Status, StatusSnapshot, UiState};
 
 /// How often streamed agent output is collected while the app is idle.
 const TICK_INTERVAL: Duration = Duration::from_millis(16);
@@ -82,6 +82,7 @@ pub struct AlanRoot {
     poll: Option<Subscription>,
     header: Option<Entity<Header>>,
     popup: Option<Entity<PopupList>>,
+    status: Option<Entity<Status>>,
 }
 
 struct Inner {
@@ -107,6 +108,7 @@ impl AlanRoot {
             poll: None,
             header: None,
             popup: None,
+            status: None,
         }
     }
 
@@ -157,6 +159,27 @@ impl AlanRoot {
             popup.set(open, status, items, selected);
         });
     }
+
+    /// Push the status-line snapshot into the `Status` entity. Plain-data
+    /// mapping lives here so `Status` never names core types. Skips the push
+    /// when the snapshot is unchanged so the 16ms poll tick stays quiet.
+    fn push_status(&self, cx: &mut Context<'_, Self, AlanAction>, inner: &mut Inner) {
+        let Some(status) = self.status else {
+            return;
+        };
+        let snap = StatusSnapshot {
+            activity: inner.controller.activity(),
+            mode: inner.controller.mode(),
+            usage: inner.controller.usage(),
+        };
+        let unchanged = cx
+            .read(status, |status| status.matches(&snap))
+            .unwrap_or(false);
+        if unchanged {
+            return;
+        }
+        cx.update(status, |status| status.set(snap));
+    }
 }
 
 impl Component<AlanAction> for AlanRoot {
@@ -166,6 +189,13 @@ impl Component<AlanAction> for AlanRoot {
     {
         self.header = Some(cx.insert(Header));
         self.popup = Some(cx.insert(PopupList::default()));
+        self.status = Some(cx.insert(Status::default()));
+        // Seed the status line so the first frame isn't blank before the
+        // first poll tick; later ticks skip it while unchanged.
+        {
+            let mut inner = self.inner.lock().expect("alan root poisoned");
+            self.push_status(cx, &mut inner);
+        }
         self.poll = Some(cx.subscribe_stream(poll_ticks(), |event, root, cx| {
             let SubscriptionEvent::Item(()) = event else {
                 return;
@@ -176,6 +206,7 @@ impl Component<AlanAction> for AlanRoot {
             inner.ui.tick();
             inner.ui.flush_wheel();
             root.push_snapshot(cx, &mut inner);
+            root.push_status(cx, &mut inner);
             if inner.ui.take_dirty() {
                 cx.notify();
             }
@@ -268,6 +299,7 @@ impl Component<AlanAction> for AlanRoot {
 
     fn render(&self, frame: &mut Frame, area: Rect, cx: &RenderContext<'_, AlanAction>) {
         let popup = self.popup;
+        let status = self.status;
         if let Some(header) = self.header {
             let [header_area, body_area] =
                 Layout::vertical([Constraint::Length(1), Constraint::Min(1)]).areas(area);
@@ -279,6 +311,7 @@ impl Component<AlanAction> for AlanRoot {
                 view,
             } = &mut *inner;
             let body = view.render(frame, body_area, controller, ui);
+            paint_status(status, body.footer, ui.attachment_height(), frame, cx);
             paint_popup(popup, body.footer, frame, cx);
         } else {
             let mut inner = self.inner.lock().expect("alan root poisoned");
@@ -288,6 +321,7 @@ impl Component<AlanAction> for AlanRoot {
                 view,
             } = &mut *inner;
             let body = view.render(frame, area, controller, ui);
+            paint_status(status, body.footer, ui.attachment_height(), frame, cx);
             paint_popup(popup, body.footer, frame, cx);
         }
     }
@@ -327,6 +361,26 @@ fn paint_popup(
     if let Some(area) = PopupList::area_above(footer, frame.area(), 5) {
         cx.render_entity(popup, frame, area);
     }
+}
+
+/// Paint the status line over the footer's reserved status row, which sits one
+/// row below the attachment area (`area.y + attachment_height + 1`).
+fn paint_status(
+    status: Option<Entity<Status>>,
+    footer: Rect,
+    attachment_height: u16,
+    frame: &mut Frame,
+    cx: &RenderContext<'_, AlanAction>,
+) {
+    let Some(status) = status else {
+        return;
+    };
+    let status_area = Rect {
+        y: footer.y + attachment_height + 1,
+        height: 1,
+        ..footer
+    };
+    cx.render_entity(status, frame, status_area);
 }
 
 fn poll_ticks() -> impl Stream<Item = PollTick> + Send + 'static {

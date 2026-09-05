@@ -15,7 +15,7 @@ use crate::core::{
 use base64::Engine;
 use component::Component;
 use components::{Chat, Footer};
-pub(crate) use components::{Header, PopupList, PopupStatus};
+pub(crate) use components::{Header, PopupList, PopupStatus, Status, StatusSnapshot};
 use crossterm::event::{
     Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
