@@ -1,7 +1,7 @@
 mod core;
 mod logging;
 mod login_overlay;
-mod tui_root;
+mod root;
 mod views;
 
 use core::Controller;
@@ -18,7 +18,7 @@ use std::sync::Arc;
 use tui::Runtime;
 
 use crate::logging::init;
-use crate::tui_root::{AlanKeyMapper, AlanRoot};
+use crate::root::{AlanKeyMapper, AlanRoot};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {

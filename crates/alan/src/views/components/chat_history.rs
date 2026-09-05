@@ -6,7 +6,7 @@
 //! parent and handled here.
 
 use crate::core::Entry;
-use crate::tui_root::AlanAction;
+use crate::root::AlanAction;
 use crate::views::selection;
 use crate::views::selection::{Selection, TextPosition};
 use crate::views::theme;
