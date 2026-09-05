@@ -19,16 +19,6 @@ pub enum AuthPrompt {
     Secret {
         message: String,
     },
-    Text {
-        message: String,
-    },
-    Select {
-        message: String,
-        options: Vec<AuthOption>,
-    },
-    ManualCode {
-        message: String,
-    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

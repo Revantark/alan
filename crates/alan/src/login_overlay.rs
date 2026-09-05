@@ -537,10 +537,7 @@ fn draw_shortcuts(frame: &mut Frame, area: Rect, text: &str) {
 
 fn prompt_message(prompt: &AuthPrompt) -> String {
     match prompt {
-        AuthPrompt::Secret { message }
-        | AuthPrompt::Text { message }
-        | AuthPrompt::ManualCode { message } => message.clone(),
-        AuthPrompt::Select { message, .. } => message.clone(),
+        AuthPrompt::Secret { message } => message.clone(),
     }
 }
 
@@ -615,7 +612,7 @@ mod tests {
         let (responder, _) = oneshot::channel();
         overlay.apply_interaction_message(LoginStreamMsg::Prompt {
             provider: ProviderId::new("a"),
-            prompt: AuthPrompt::Text {
+            prompt: AuthPrompt::Secret {
                 message: "key".into(),
             },
             responder,
