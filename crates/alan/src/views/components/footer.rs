@@ -1,8 +1,7 @@
-use crate::core::{Activity, Controller};
+use crate::core::Controller;
 use crate::views::UiState;
 use crate::views::component::Component;
 use crate::views::theme;
-use agent::Mode;
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::prelude::Widget;
@@ -13,80 +12,24 @@ use ratatui::widgets::Paragraph;
 #[derive(Debug, Default)]
 pub struct Footer;
 
-/// How an [`Activity`] presents itself in the status line.
-struct Status {
-    style: Style,
-    label: &'static str,
-    hints: &'static str,
-}
-
-impl From<Activity> for Status {
-    fn from(activity: Activity) -> Self {
-        match activity {
-            Activity::Thinking => Status {
-                label: "  ● thinking",
-                hints: "  Ctrl-C stop",
-                style: Style::default().italic().fg(ratatui::style::Color::Yellow),
-            },
-            Activity::Suggesting => Status {
-                label: "  ●",
-                hints: " Enter accept · ↑↓ move · Esc dismiss",
-                style: Style::default().fg(theme::PROMPT_FG),
-            },
-            Activity::Idle => Status {
-                label: "  ● idle",
-                hints: "  Enter send · Ctrl-C quit",
-                style: Style::default().fg(ratatui::style::Color::Green),
-            },
-        }
-    }
-}
-
-/// Flags that layer onto any activity.
-fn badges(controller: &Controller) -> Vec<Span<'static>> {
-    let mut badges = Vec::new();
-    let badge = match controller.mode() {
-        Mode::Plan => Some((" · Plan mode", ratatui::style::Color::White)),
-        Mode::Review => Some((" · Review mode", ratatui::style::Color::White)),
-        Mode::Normal => None,
-    };
-    if let Some((label, color)) = badge {
-        badges.push(Span::styled(label, Style::default().fg(color)));
-    }
-    if let Some(cost) = controller.usage().cost {
-        badges.push(Span::styled(
-            format!(" · ${:.4}", (cost * 10_000.0).trunc() / 10_000.0),
-            Style::default().fg(theme::MUTED_FG),
-        ));
-    }
-    badges
-}
-
-fn status_line(controller: &Controller) -> Line<'static> {
-    let status = Status::from(controller.activity());
-    let mut spans = vec![
-        Span::styled(status.label, status.style),
-        Span::styled(status.hints, Style::default().fg(theme::MUTED_FG)),
-    ];
-    spans.extend(badges(controller));
-    Line::from(spans)
-}
-
 impl Component for Footer {
     fn render(
         &mut self,
         frame: &mut Frame,
         area: Rect,
-        controller: &Controller,
+        _controller: &Controller,
         state: &mut UiState,
     ) {
         let background = Paragraph::new("").style(Style::default().bg(theme::EDITOR_BG));
         frame.render_widget(background, area);
 
+        // The `status` row is painted over by the `Status` entity (see
+        // `paint_status` in `tui_root`); we only need the background to
+        // cover it, which the outer `background` fill does.
         let [
             attachment_area,
             _top_padding,
-            status_area,
+            _status_area,
             _status_editor_gap,
             editor_area,
             _bottom_padding,
@@ -119,11 +62,6 @@ impl Component for Footer {
                 Paragraph::new(Text::from(lines)).style(Style::default().bg(theme::ATTACHMENT_BG));
             frame.render_widget(attachments, attachment_area);
         }
-
-        frame.render_widget(
-            Paragraph::new(status_line(controller)).style(Style::default().bg(theme::EDITOR_BG)),
-            status_area,
-        );
 
         let [prompt_area, input_area] =
             Layout::horizontal([Constraint::Length(theme::PROMPT_GUTTER), Constraint::Min(1)])
