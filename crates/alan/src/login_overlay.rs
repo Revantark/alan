@@ -17,7 +17,7 @@ use tokio::sync::{mpsc, oneshot};
 use tui::context::Context;
 use tui::{ActionStatus, Component, RenderContext, Subscription, SubscriptionEvent, TaskHandle};
 
-use crate::tui_root::AlanAction;
+use crate::root::AlanAction;
 use crate::views::theme;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
