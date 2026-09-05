@@ -1,67 +1,32 @@
 //! Ratatui adapter for Alan.
 //!
-//! Core state stays UI-agnostic. This module owns ratatui-facing editor and
-//! scroll state so another frontend can map its own events to [`Action`].
+//! Core state stays UI-agnostic. This module owns the prompt editor
+//! ([`UiState`]) and re-exports the `tui` view components. Transcript
+//! rendering and scroll/selection state live in [`ChatHistory`].
 
-mod component;
+pub(crate) mod component;
 mod components;
 pub mod selection;
 pub mod theme;
 
 use crate::core::{
-    Accept, Action, Command, CompletionController, CompletionItem, Controller, ImageAttachment,
-    Poll, SlashCommand,
+    Accept, Action, Command, CompletionController, CompletionItem, ImageAttachment, Poll,
+    SlashCommand,
 };
 use base64::Engine;
-use component::Component;
-use components::{Chat, Footer};
-pub(crate) use components::{Header, PopupList, PopupStatus, Status, StatusSnapshot};
-use crossterm::event::{
-    Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+pub(crate) use components::{
+    ChatHistory, ChatSnapshot, Footer, Header, PopupList, PopupStatus, Status, StatusSnapshot,
 };
-use ratatui::Frame;
-use ratatui::layout::{Constraint, Layout, Position, Rect};
+use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use ratatui::layout::Position;
 use ratatui::style::Style;
-use selection::{Selection, TextPosition};
 use tui_textarea::{CursorMove, CursorRenderMode, TextArea, WrapMode};
-
-use std::time::Instant;
 
 /// Only one custom highlight is ever active, so its priority is arbitrary.
 const COMMAND_HIGHLIGHT_PRIORITY: u8 = 1;
 
-/// Lines moved per mouse-wheel notch. Crossterm reports the wheel as
-/// discrete notches with no pressure data, so one line per notch keeps a
-/// single tick precise; bursts are rate-limited by the flush cap instead.
-const WHEEL_LINES_PER_NOTCH: isize = 1;
-
-/// Hard bound on accumulated wheel notches. A trackpad swipe can queue
-/// hundreds of events; without a bound the tail keeps scrolling long after
-/// the fingers stop.
-const MAX_PENDING_WHEEL: isize = 48;
-
 pub struct UiState {
     editor: TextArea<'static>,
-    /// Current rendered top line.
-    scroll_offset: usize,
-    /// Desired top line. Kept equal to `scroll_offset` for immediate input response.
-    scroll_target: usize,
-    /// Keep viewport pinned to newest content while true.
-    follow_output: bool,
-    /// Last rendered viewport/content bounds. Input events use these bounds
-    /// before next render clamps them again.
-    viewport_height: usize,
-    max_scroll: usize,
-    /// Last rendered content area of chat
-    chat_area: Rect,
-    /// Active text selection in transcript
-    selection: Option<Selection>,
-    /// Wheel notches accumulated since the last flush. Trackpad swipes emit
-    /// hundreds of events; they are coalesced and applied once per tick
-    /// instead of one redraw per event.
-    pending_wheel: isize,
-    /// Last click timestamp and position for double-click detection
-    last_click: Option<(Instant, u16, u16)>,
     /// True when something changed since last draw and a redraw is needed.
     dirty: bool,
     /// Images attached to the next prompt via clipboard paste.
@@ -74,37 +39,22 @@ impl UiState {
 
         Self {
             editor,
-            scroll_offset: 0,
-            scroll_target: 0,
-            follow_output: true,
-            viewport_height: 0,
-            max_scroll: 0,
-            chat_area: Rect::default(),
-            selection: None,
-            pending_wheel: 0,
-            last_click: None,
             dirty: true,
             attachments: Vec::new(),
         }
     }
 
     pub fn apply(&mut self, action: Action) -> Option<Command> {
-        // `apply` only serves the sparse mapped-action path (`Resize`, wheel,
-        // `PageUp/Down`) plus the pre-completion key shim. Main editor input
-        // flows through `handle_event` into the `TextArea`, so the editor
-        // arms below are unreachable in production; they stay for tests.
-        let eager_dirty = !matches!(
-            action,
-            Action::MouseScrollUp | Action::MouseScrollDown | Action::ScrollUp | Action::ScrollDown
-        );
+        // `apply` only serves the sparse mapped-action path plus the
+        // pre-completion key shim. Main editor input flows through
+        // `handle_event` into the `TextArea`, so the editor arms below are
+        // unreachable in production; they stay for tests. Scroll and wheel
+        // actions now belong to `ChatHistory`.
         let command = match action {
             Action::Interrupt => Some(Command::Interrupt),
             Action::TogglePlanMode => Some(Command::TogglePlanMode),
             Action::Resize => None,
             Action::Submit => {
-                self.follow_output = true;
-                self.scroll_target = self.max_scroll;
-                self.cancel_wheel();
                 let images = std::mem::take(&mut self.attachments);
                 Some(Command::Submit {
                     text: self.editor_text(),
@@ -123,12 +73,7 @@ impl UiState {
                     Some(Command::Cancel)
                 }
             }
-            Action::Backspace | Action::Insert(_) | Action::Paste(_) => {
-                // Editor-owned input flows through `handle_event`, never
-                // `apply`; just drop stale wheel momentum.
-                self.cancel_wheel();
-                None
-            }
+            Action::Backspace | Action::Insert(_) | Action::Paste(_) => None,
             Action::PasteOrAttachImage => {
                 if self.try_clipboard_image() {
                     None
@@ -140,71 +85,22 @@ impl UiState {
                     }
                 }
             }
-            Action::ScrollUp => {
-                self.scroll_by(-(self.viewport_height.max(1) as isize));
-                None
-            }
-            Action::ScrollDown => {
-                self.scroll_by(self.viewport_height.max(1) as isize);
-                None
-            }
-            Action::MouseScrollUp => {
-                self.push_wheel(-WHEEL_LINES_PER_NOTCH);
-                None
-            }
-            Action::MouseScrollDown => {
-                self.push_wheel(WHEEL_LINES_PER_NOTCH);
-                None
-            }
+            Action::ScrollUp
+            | Action::ScrollDown
+            | Action::MouseScrollUp
+            | Action::MouseScrollDown => None,
         };
-        if eager_dirty {
-            self.dirty = true;
-        }
+        self.dirty = true;
         command
-    }
-
-    fn push_wheel(&mut self, delta: isize) {
-        self.pending_wheel =
-            (self.pending_wheel + delta).clamp(-MAX_PENDING_WHEEL, MAX_PENDING_WHEEL);
-    }
-
-    /// Apply queued wheel notches, capped per flush so one swipe can't fling
-    /// across the whole transcript.
-    pub fn flush_wheel(&mut self) -> bool {
-        let pending = std::mem::take(&mut self.pending_wheel);
-        if pending == 0 {
-            return false;
-        }
-        let cap = self.viewport_height.clamp(1, 12) as isize;
-        let (now, rest) = if pending.abs() > cap {
-            (pending.signum() * cap, pending - pending.signum() * cap)
-        } else {
-            (pending, 0)
-        };
-        if self.scroll_by(now) {
-            self.pending_wheel = rest.clamp(-MAX_PENDING_WHEEL, MAX_PENDING_WHEEL);
-            true
-        } else {
-            false
-        }
-    }
-
-    /// Drop queued wheel momentum, e.g. when the user starts typing.
-    pub fn cancel_wheel(&mut self) {
-        self.pending_wheel = 0;
     }
 
     pub fn handle_event(
         &mut self,
         event: Event,
-        rendered_lines: &[ratatui::text::Line<'static>],
         completion: &mut CompletionController,
     ) -> Option<Command> {
         if matches!(&event, Event::Key(key) if key.kind != KeyEventKind::Press) {
             return None;
-        }
-        if matches!(&event, Event::Key(_) | Event::Paste(_)) {
-            self.cancel_wheel();
         }
         if let Event::Key(key) = &event
             && completion.is_open()
@@ -212,22 +108,15 @@ impl UiState {
         {
             return self.apply_completion_popup(action, completion);
         }
-        self.handle_editor_event(event, rendered_lines, completion)
+        self.handle_editor_event(event, completion)
     }
 
     fn handle_editor_event(
         &mut self,
         event: Event,
-        rendered_lines: &[ratatui::text::Line<'static>],
         completion: &mut CompletionController,
     ) -> Option<Command> {
         let command = match event {
-            // Clear selection on Escape
-            Event::Key(key) if key.code == KeyCode::Esc && self.has_active_selection() => {
-                self.selection = None;
-                self.dirty = true;
-                None
-            }
             Event::Key(key) if key.code == KeyCode::Esc && !self.attachments.is_empty() => {
                 self.attachments.pop();
                 self.dirty = true;
@@ -251,8 +140,6 @@ impl UiState {
                 completion.dismiss();
                 self.submit_editor_or_accept()
             }
-            Event::Key(key) if key.code == KeyCode::PageUp => self.apply(Action::ScrollUp),
-            Event::Key(key) if key.code == KeyCode::PageDown => self.apply(Action::ScrollDown),
             Event::Key(key)
                 if key.code == KeyCode::Char('c')
                     && key.modifiers.contains(KeyModifiers::CONTROL) =>
@@ -296,13 +183,14 @@ impl UiState {
                 self.sync_completion(completion);
                 None
             }
-            Event::Mouse(mouse) => self.handle_mouse_event(mouse, rendered_lines),
             Event::Paste(text) => {
                 self.editor.insert_str(text);
                 self.dirty = true;
                 self.sync_completion(completion);
                 None
             }
+            // Escape with no pending attachments falls through to the editor,
+            // which ignores it (selection-clearing now lives in `ChatHistory`).
             event => {
                 self.editor.input(event);
                 self.dirty = true;
@@ -425,119 +313,7 @@ impl UiState {
         completion.sync(line, cursor, row);
     }
 
-    fn handle_mouse_event(
-        &mut self,
-        mouse: MouseEvent,
-        rendered_lines: &[ratatui::text::Line<'static>],
-    ) -> Option<Command> {
-        match mouse.kind {
-            MouseEventKind::ScrollUp => self.apply(Action::MouseScrollUp),
-            MouseEventKind::ScrollDown => self.apply(Action::MouseScrollDown),
-            MouseEventKind::Down(MouseButton::Left) => {
-                if self.is_mouse_in_chat(mouse.column, mouse.row) {
-                    let now = Instant::now();
-                    let is_double_click = self.last_click.is_some_and(|(t, c, r)| {
-                        c == mouse.column
-                            && r == mouse.row
-                            && now.duration_since(t).as_millis() <= 500
-                    });
-
-                    if let Some(pos) = self.screen_to_text_pos(mouse.column, mouse.row) {
-                        if is_double_click && pos.line < rendered_lines.len() {
-                            let (start_col, end_col) =
-                                selection::find_word_bounds_at(&rendered_lines[pos.line], pos.col);
-                            let sel = Selection::new_word(pos, start_col, end_col);
-                            self.selection = Some(sel);
-                            self.last_click = None;
-                            self.copy_selection(rendered_lines);
-                        } else {
-                            self.selection = Some(Selection::new(pos));
-                            self.last_click = Some((now, mouse.column, mouse.row));
-                        }
-                        self.dirty = true;
-                    }
-                } else if self.selection.is_some() {
-                    self.selection = None;
-                    self.dirty = true;
-                }
-                None
-            }
-            MouseEventKind::Drag(MouseButton::Left) => {
-                let is_dragging = self.selection.as_ref().is_some_and(|s| s.is_dragging);
-                if is_dragging {
-                    if mouse.row < self.chat_area.top() {
-                        self.scroll_by(-1);
-                    } else if mouse.row >= self.chat_area.bottom() {
-                        self.scroll_by(1);
-                    }
-
-                    let pos = self.screen_to_text_pos(mouse.column, mouse.row);
-                    if let (Some(sel), Some(pos)) = (&mut self.selection, pos) {
-                        sel.update_cursor(pos, rendered_lines);
-                        self.dirty = true;
-                    }
-                }
-                None
-            }
-            MouseEventKind::Up(MouseButton::Left) => {
-                if let Some(sel) = &mut self.selection {
-                    sel.is_dragging = false;
-                    if sel.is_empty() {
-                        self.selection = None;
-                    } else {
-                        // Auto-copy on selection mouse release
-                        self.copy_selection(rendered_lines);
-                    }
-                    self.dirty = true;
-                }
-                None
-            }
-            _ => None,
-        }
-    }
-
-    fn is_mouse_in_chat(&self, column: u16, row: u16) -> bool {
-        column >= self.chat_area.left()
-            && column < self.chat_area.right()
-            && row >= self.chat_area.top()
-            && row < self.chat_area.bottom()
-    }
-
-    fn screen_to_text_pos(&self, column: u16, row: u16) -> Option<TextPosition> {
-        let rel_row = row.saturating_sub(self.chat_area.top()) as usize;
-        let line = self.scroll_offset.saturating_add(rel_row);
-        let col = column.saturating_sub(self.chat_area.left()) as usize;
-        Some(TextPosition::new(line, col))
-    }
-
-    pub fn has_active_selection(&self) -> bool {
-        self.selection.as_ref().is_some_and(|s| !s.is_empty())
-    }
-
-    pub fn copy_selection(&mut self, lines: &[ratatui::text::Line<'static>]) {
-        let Some(sel) = &self.selection else {
-            return;
-        };
-        let text = selection::extract_selected_text(lines, sel);
-        if !text.is_empty()
-            && let Ok(mut clipboard) = arboard::Clipboard::new()
-        {
-            let _ = clipboard.set_text(text);
-        }
-    }
-
-    pub fn selection(&self) -> Option<&Selection> {
-        self.selection.as_ref()
-    }
-
-    pub fn set_chat_area(&mut self, area: Rect) {
-        self.chat_area = area;
-    }
-
     fn submit_editor_or_accept(&mut self) -> Option<Command> {
-        self.follow_output = true;
-        self.scroll_target = self.max_scroll;
-        self.cancel_wheel();
         let text = self.editor_text();
         let images = std::mem::take(&mut self.attachments);
         self.editor = Self::new_editor();
@@ -571,51 +347,6 @@ impl UiState {
         }
     }
 
-    fn scroll_by(&mut self, delta: isize) -> bool {
-        let current = if self.follow_output {
-            self.max_scroll
-        } else {
-            self.scroll_target
-        };
-        let target = if delta.is_negative() {
-            current.saturating_sub(delta.unsigned_abs())
-        } else {
-            current.saturating_add(delta as usize).min(self.max_scroll)
-        };
-        if target == self.scroll_offset && target == self.scroll_target {
-            return false;
-        }
-        self.scroll_target = target;
-        self.scroll_offset = self.scroll_target;
-        self.follow_output = self.scroll_offset == self.max_scroll;
-        self.dirty = true;
-        true
-    }
-
-    /// Keep bottom-follow state synchronized on render ticks.
-    pub fn tick(&mut self) {
-        if self.follow_output {
-            self.scroll_offset = self.max_scroll;
-            self.scroll_target = self.max_scroll;
-        }
-    }
-
-    pub(super) fn sync_scroll(&mut self, content_height: usize, viewport_height: usize) -> usize {
-        self.viewport_height = viewport_height;
-        self.max_scroll = content_height.saturating_sub(viewport_height);
-        if self.follow_output {
-            self.scroll_offset = self.max_scroll;
-            self.scroll_target = self.max_scroll;
-        } else {
-            self.scroll_target = self.scroll_target.min(self.max_scroll);
-            self.scroll_offset = self.scroll_offset.min(self.max_scroll);
-            if self.scroll_offset == self.scroll_target && self.scroll_target == self.max_scroll {
-                self.follow_output = true;
-            }
-        }
-        self.scroll_offset
-    }
-
     pub(super) fn editor(&self) -> &TextArea<'static> {
         &self.editor
     }
@@ -630,10 +361,6 @@ impl UiState {
 
     pub(super) fn cursor_screen_position(&self) -> Option<Position> {
         self.editor.rendered_cursor_position()
-    }
-
-    pub(super) fn max_scroll(&self) -> usize {
-        self.max_scroll
     }
 
     /// Returns true when a redraw is needed, then clears the flag.
@@ -725,7 +452,7 @@ impl UiState {
     /// Test shim for the pre-completion call signature.
     fn handle_editor_event_for_test(&mut self, event: Event) -> Option<Command> {
         let mut completion = completion_with(&[]);
-        self.handle_event(event, &[], &mut completion)
+        self.handle_event(event, &mut completion)
     }
 }
 
@@ -772,158 +499,9 @@ fn is_multiline_enter(key: KeyEvent) -> bool {
                 || key.modifiers.contains(KeyModifiers::ALT)))
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct BodyAreas {
-    pub footer: Rect,
-}
-
-#[derive(Debug, Default)]
-pub struct AppView {
-    chat: Chat,
-    footer: Footer,
-}
-
-impl AppView {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn render(
-        &mut self,
-        frame: &mut Frame,
-        area: Rect,
-        controller: &Controller,
-        state: &mut UiState,
-    ) -> BodyAreas {
-        // Measure against the width the editor actually gets, not the frame's.
-        let editor_width = area.width.saturating_sub(theme::PROMPT_GUTTER);
-        let [chat_area, footer_area] = Layout::vertical([
-            Constraint::Min(1),
-            Constraint::Length(4 + state.editor_rows(editor_width) + state.attachment_height()),
-        ])
-        .areas(area);
-
-        self.chat.render(frame, chat_area, controller, state);
-        self.footer.render(frame, footer_area, controller, state);
-        BodyAreas {
-            footer: footer_area,
-        }
-    }
-
-    pub fn lines(&self) -> &[ratatui::text::Line<'static>] {
-        self.chat.lines()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn follows_bottom_until_user_scrolls_up() {
-        let mut state = UiState::new();
-        assert_eq!(state.sync_scroll(100, 20), 80);
-
-        state.scroll_by(-5);
-        assert_eq!(state.scroll_target, 75);
-        assert_eq!(state.scroll_offset, 75);
-        assert!(!state.follow_output);
-        state.tick();
-        assert_eq!(state.scroll_offset, 75);
-
-        assert_eq!(state.sync_scroll(120, 20), 75);
-        assert!(!state.follow_output);
-    }
-
-    #[test]
-    fn scrolling_to_bottom_restores_follow_mode() {
-        let mut state = UiState::new();
-        state.sync_scroll(100, 20);
-        state.scroll_by(-10);
-        state.scroll_by(10);
-
-        assert_eq!(state.scroll_target, 80);
-        assert!(state.follow_output);
-        state.tick();
-        assert!(state.follow_output);
-        assert_eq!(state.sync_scroll(120, 20), 100);
-    }
-
-    #[test]
-    fn content_shrink_clamps_manual_scroll() {
-        let mut state = UiState::new();
-        state.sync_scroll(100, 20);
-        state.scroll_by(-10);
-
-        assert_eq!(state.sync_scroll(30, 20), 10);
-        assert_eq!(state.scroll_target, 10);
-        assert!(state.follow_output);
-    }
-
-    #[test]
-    fn scrolling_updates_rendered_offset_immediately() {
-        let mut state = UiState::new();
-        state.sync_scroll(100, 20);
-        state.scroll_by(-10);
-
-        assert_eq!(state.scroll_offset, 70);
-        assert_eq!(state.scroll_target, 70);
-        assert!(!state.follow_output);
-    }
-
-    #[test]
-    fn clamped_scroll_is_a_no_op_without_dirty() {
-        let mut state = UiState::new();
-        state.sync_scroll(100, 20);
-        assert!(state.take_dirty() || !state.take_dirty());
-
-        // At the bottom already: scrolling down moves nothing.
-        assert!(!state.scroll_by(10));
-        assert!(!state.take_dirty());
-
-        // Queued wheel at the edge is dropped as stale momentum, so no
-        // redraw is queued after hitting the bottom.
-        state.apply(Action::MouseScrollDown);
-        assert!(!state.take_dirty());
-        assert!(!state.flush_wheel());
-        assert!(!state.take_dirty());
-    }
-
-    #[test]
-    fn wheel_notches_coalesce_and_cap_per_flush() {
-        let mut state = UiState::new();
-        state.sync_scroll(200, 20);
-        state.scroll_by(-100);
-        assert_eq!(state.scroll_offset, 80);
-        let _ = state.take_dirty();
-
-        // A 100-notch swipe queues without dirtying: no redraw per event.
-        for _ in 0..100 {
-            state.apply(Action::MouseScrollDown);
-        }
-        assert_eq!(state.pending_wheel, MAX_PENDING_WHEEL);
-        assert!(!state.take_dirty());
-
-        // One flush moves at most a viewport-capped step and dirties once.
-        assert!(state.flush_wheel());
-        assert!(state.scroll_offset > 80);
-        assert!(state.scroll_offset <= 80 + 12);
-        assert!(state.take_dirty());
-    }
-
-    #[test]
-    fn typing_cancels_queued_wheel_momentum() {
-        let mut state = UiState::new();
-        state.sync_scroll(200, 20);
-        state.scroll_by(-100);
-        let _ = state.take_dirty();
-        state.apply(Action::MouseScrollDown);
-        assert_eq!(state.pending_wheel, WHEEL_LINES_PER_NOTCH);
-
-        state.handle_editor_event_for_test(key(crossterm::event::KeyCode::Char('a')));
-        assert_eq!(state.pending_wheel, 0);
-        assert!(!state.flush_wheel());
-    }
 
     fn key(code: crossterm::event::KeyCode) -> crossterm::event::Event {
         crossterm::event::Event::Key(crossterm::event::KeyEvent::new(
@@ -950,7 +528,7 @@ mod tests {
     fn rendered_row(state: &UiState, width: u16) -> Vec<Option<ratatui::style::Color>> {
         use ratatui::widgets::Widget;
 
-        let area = Rect::new(0, 0, width, theme::EDITOR_VISIBLE_LINES);
+        let area = ratatui::layout::Rect::new(0, 0, width, theme::EDITOR_VISIBLE_LINES);
         let mut buffer = ratatui::buffer::Buffer::empty(area);
         (&state.editor).render(area, &mut buffer);
         (0..width).map(|x| buffer[(x, 0)].fg.into()).collect()
@@ -1081,7 +659,7 @@ mod tests {
         let mut state = UiState::new();
         let mut completion = completion_with(&["alpha.txt"]);
 
-        state.handle_event(Event::Paste("@alp".into()), &[], &mut completion);
+        state.handle_event(Event::Paste("@alp".into()), &mut completion);
 
         assert_eq!(state.editor_text(), "@alp");
         assert!(completion.is_open());
@@ -1291,27 +869,6 @@ mod tests {
         assert_eq!(state.editor_text(), "hi");
     }
 
-    /// Esc still dismisses a text selection even while attachments are
-    /// pending; attachments only start popping on a second Esc.
-    #[test]
-    fn escape_prefers_clearing_a_selection_over_attachments() {
-        let mut state = UiState::new();
-        state.attachments.push(ImageAttachment {
-            name: "image-1".into(),
-            mime_type: "image/png".into(),
-            base64_data: "aGVsbG8=".into(),
-        });
-        state.selection = Some(Selection::new(selection::TextPosition::new(0, 0)));
-        state.selection.as_mut().unwrap().cursor = selection::TextPosition::new(0, 3);
-
-        assert_eq!(
-            state.handle_editor_event_for_test(key(crossterm::event::KeyCode::Esc)),
-            None
-        );
-        assert!(state.selection.is_none());
-        assert_eq!(state.attachments.len(), 1);
-    }
-
     /// Drive the editor with a real completion: typing `@` opens the popup
     /// and accepting replaces the token without submitting.
     #[test]
@@ -1322,13 +879,12 @@ mod tests {
         for character in "@som".chars() {
             state.handle_event(
                 key(crossterm::event::KeyCode::Char(character)),
-                &[],
                 &mut completion,
             );
         }
         assert!(completion.is_open());
 
-        let command = state.handle_event(key(KeyCode::Enter), &[], &mut completion);
+        let command = state.handle_event(key(KeyCode::Enter), &mut completion);
 
         assert_eq!(command, None);
         assert_eq!(state.editor_text(), "@something.txt ");
@@ -1343,12 +899,12 @@ mod tests {
         let mut completion = completion_with(&["alpha.txt"]);
 
         for character in "@zzz".chars() {
-            state.handle_event(key(KeyCode::Char(character)), &[], &mut completion);
+            state.handle_event(key(KeyCode::Char(character)), &mut completion);
         }
         assert!(completion.is_open());
         assert_eq!(completion.item_count(), 0);
 
-        let command = state.handle_event(key(KeyCode::Enter), &[], &mut completion);
+        let command = state.handle_event(key(KeyCode::Enter), &mut completion);
 
         assert!(matches!(
             command,
@@ -1417,19 +973,18 @@ mod tests {
         let mut completion = completion_with_commands();
 
         for character in "hello".chars() {
-            state.handle_event(key(KeyCode::Char(character)), &[], &mut completion);
+            state.handle_event(key(KeyCode::Char(character)), &mut completion);
         }
         state.handle_event(
             Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT)),
-            &[],
             &mut completion,
         );
         for character in "/he".chars() {
-            state.handle_event(key(KeyCode::Char(character)), &[], &mut completion);
+            state.handle_event(key(KeyCode::Char(character)), &mut completion);
         }
         assert!(!completion.is_open());
 
-        let command = state.handle_event(key(KeyCode::Enter), &[], &mut completion);
+        let command = state.handle_event(key(KeyCode::Enter), &mut completion);
 
         assert!(matches!(
             command,
@@ -1444,11 +999,11 @@ mod tests {
         let mut completion = completion_with_commands();
 
         for character in "/he".chars() {
-            state.handle_event(key(KeyCode::Char(character)), &[], &mut completion);
+            state.handle_event(key(KeyCode::Char(character)), &mut completion);
         }
         assert!(completion.is_open());
 
-        let command = state.handle_event(key(KeyCode::Enter), &[], &mut completion);
+        let command = state.handle_event(key(KeyCode::Enter), &mut completion);
 
         let Some(Command::Submit { text, .. }) = command else {
             panic!("expected a submit, got {command:?}");
@@ -1467,9 +1022,9 @@ mod tests {
         let mut completion = completion_with_commands();
 
         for character in "/he".chars() {
-            state.handle_event(key(KeyCode::Char(character)), &[], &mut completion);
+            state.handle_event(key(KeyCode::Char(character)), &mut completion);
         }
-        let command = state.handle_event(key(KeyCode::Tab), &[], &mut completion);
+        let command = state.handle_event(key(KeyCode::Tab), &mut completion);
 
         assert_eq!(command, None);
         assert_eq!(state.editor_text(), "/help ");
@@ -1483,11 +1038,11 @@ mod tests {
         let mut completion = completion_with(&["src/main.rs"]);
 
         for character in "/plan @src".chars() {
-            state.handle_event(key(KeyCode::Char(character)), &[], &mut completion);
+            state.handle_event(key(KeyCode::Char(character)), &mut completion);
         }
         assert!(completion.is_open());
 
-        let command = state.handle_event(key(KeyCode::Enter), &[], &mut completion);
+        let command = state.handle_event(key(KeyCode::Enter), &mut completion);
 
         assert_eq!(command, None, "accepting a mention must not run /plan");
         // The line parses as `/plan`, so the flag rather than the text is what
@@ -1508,7 +1063,6 @@ mod tests {
         for character in "abc @éx".chars() {
             state.handle_event(
                 key(crossterm::event::KeyCode::Char(character)),
-                &[],
                 &mut completion,
             );
         }
@@ -1516,7 +1070,7 @@ mod tests {
 
         // Accepting should replace the whole `@éx` token without panicking
         // and without eating the `abc ` that precedes it.
-        let command = state.handle_event(key(KeyCode::Enter), &[], &mut completion);
+        let command = state.handle_event(key(KeyCode::Enter), &mut completion);
 
         assert_eq!(command, None);
         assert_eq!(state.editor_text(), "abc @éx.txt ");
@@ -1528,17 +1082,17 @@ mod tests {
         let mut state = UiState::new();
         let mut completion = completion_with(&["a.txt", "b.txt"]);
 
-        state.handle_event(key(KeyCode::Char('@')), &[], &mut completion);
+        state.handle_event(key(KeyCode::Char('@')), &mut completion);
         assert_eq!(completion.selected(), 0);
 
-        state.handle_event(key(KeyCode::Down), &[], &mut completion);
+        state.handle_event(key(KeyCode::Down), &mut completion);
         assert_eq!(completion.selected(), 1);
 
-        state.handle_event(key(KeyCode::Esc), &[], &mut completion);
+        state.handle_event(key(KeyCode::Esc), &mut completion);
         assert!(!completion.is_open());
 
         // Popup closed: Enter submits again.
-        let command = state.handle_event(key(KeyCode::Enter), &[], &mut completion);
+        let command = state.handle_event(key(KeyCode::Enter), &mut completion);
         assert_eq!(
             command,
             Some(Command::Submit {
@@ -1553,10 +1107,10 @@ mod tests {
         let mut state = UiState::new();
         let mut completion = completion_with(&["a.txt"]);
 
-        state.handle_event(key(KeyCode::Char('@')), &[], &mut completion);
+        state.handle_event(key(KeyCode::Char('@')), &mut completion);
         assert!(completion.is_open());
 
-        state.handle_event(key(KeyCode::Backspace), &[], &mut completion);
+        state.handle_event(key(KeyCode::Backspace), &mut completion);
         assert!(!completion.is_open());
     }
 
@@ -1567,8 +1121,8 @@ mod tests {
         let mut state = UiState::new();
         let mut completion = completion_with(&["src/"]);
 
-        state.handle_event(key(KeyCode::Char('@')), &[], &mut completion);
-        state.handle_event(key(KeyCode::Enter), &[], &mut completion);
+        state.handle_event(key(KeyCode::Char('@')), &mut completion);
+        state.handle_event(key(KeyCode::Enter), &mut completion);
 
         assert_eq!(state.editor_text(), "@src/ ");
         assert!(!completion.is_open());
@@ -1580,9 +1134,9 @@ mod tests {
         let mut state = UiState::new();
         let mut completion = completion_with(&["src/"]);
 
-        state.handle_event(key(KeyCode::Char('@')), &[], &mut completion);
-        state.handle_event(key(KeyCode::Enter), &[], &mut completion);
-        state.handle_event(key(KeyCode::Char('h')), &[], &mut completion);
+        state.handle_event(key(KeyCode::Char('@')), &mut completion);
+        state.handle_event(key(KeyCode::Enter), &mut completion);
+        state.handle_event(key(KeyCode::Char('h')), &mut completion);
 
         assert_eq!(state.editor_text(), "@src/ h");
         assert!(!completion.is_open());
@@ -1595,13 +1149,13 @@ mod tests {
         let mut completion = completion_with(&["src/main.rs"]);
 
         for character in "@mai and more".chars() {
-            state.handle_event(key(KeyCode::Char(character)), &[], &mut completion);
+            state.handle_event(key(KeyCode::Char(character)), &mut completion);
         }
         // Back inside the `@mai` token: `@mai| and more`.
         for _ in 0.." and more".len() {
-            state.handle_event(key(KeyCode::Left), &[], &mut completion);
+            state.handle_event(key(KeyCode::Left), &mut completion);
         }
-        state.handle_event(key(KeyCode::Enter), &[], &mut completion);
+        state.handle_event(key(KeyCode::Enter), &mut completion);
 
         assert_eq!(state.editor_text(), "@src/main.rs and more");
     }
@@ -1618,18 +1172,17 @@ mod tests {
         for character in "@foo".chars() {
             state.handle_event(
                 key(crossterm::event::KeyCode::Char(character)),
-                &[],
                 &mut completion,
             );
         }
         assert!(completion.is_open());
 
         // Move the cursor left twice: `@fo|o`.
-        state.handle_event(key(KeyCode::Left), &[], &mut completion);
-        state.handle_event(key(KeyCode::Left), &[], &mut completion);
+        state.handle_event(key(KeyCode::Left), &mut completion);
+        state.handle_event(key(KeyCode::Left), &mut completion);
         assert_eq!(state.editor_text(), "@foo");
 
-        let command = state.handle_event(key(KeyCode::Enter), &[], &mut completion);
+        let command = state.handle_event(key(KeyCode::Enter), &mut completion);
 
         assert_eq!(command, None);
         assert_eq!(state.editor_text(), "@foobar ");
@@ -1646,18 +1199,17 @@ mod tests {
         for character in "@éfoo".chars() {
             state.handle_event(
                 key(crossterm::event::KeyCode::Char(character)),
-                &[],
                 &mut completion,
             );
         }
         assert!(completion.is_open());
 
         // Move the cursor left twice: `@éfo|o`.
-        state.handle_event(key(KeyCode::Left), &[], &mut completion);
-        state.handle_event(key(KeyCode::Left), &[], &mut completion);
+        state.handle_event(key(KeyCode::Left), &mut completion);
+        state.handle_event(key(KeyCode::Left), &mut completion);
         assert_eq!(state.editor_text(), "@éfoo");
 
-        let command = state.handle_event(key(KeyCode::Enter), &[], &mut completion);
+        let command = state.handle_event(key(KeyCode::Enter), &mut completion);
 
         assert_eq!(command, None);
         assert_eq!(state.editor_text(), "@éfoobar ");
@@ -1673,12 +1225,11 @@ mod tests {
         for character in "@foo".chars() {
             state.handle_event(
                 key(crossterm::event::KeyCode::Char(character)),
-                &[],
                 &mut completion,
             );
         }
 
-        let command = state.handle_event(key(KeyCode::Enter), &[], &mut completion);
+        let command = state.handle_event(key(KeyCode::Enter), &mut completion);
 
         assert_eq!(command, None);
         assert_eq!(state.editor_text(), "@foobar ");

@@ -1,9 +1,10 @@
 //! Single-root `tui` adapter for Alan.
 //!
-//! This wraps the existing UI state verbatim: [`Controller`] owns application
-//! state, [`UiState`] owns frontend interaction state, and [`AppView`] renders
-//! both. No behavior lives here beyond routing `tui` callbacks back into that
-//! code, matching `main.rs::event_loop` before it.
+//! [`Controller`] owns application state, [`UiState`] owns the prompt editor,
+//! and [`ChatHistory`] owns the transcript (scroll, wheel, selection). The root
+//! orchestrates: each 16ms tick it pushes plain-data snapshots down to the
+//! child entities and routes input (mouse/wheel to the transcript, keys to the
+//! editor). `render` composes the children into the body layout.
 //!
 //! `Controller` is not `Sync` (it holds `JoinHandle`s and plain state), so the
 //! root keeps it behind a `Mutex`. `render` is `&self` by framework contract.
@@ -15,7 +16,7 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
 
-use crossterm::event::{Event, MouseEventKind};
+use crossterm::event::{Event, KeyCode, KeyEventKind, MouseEventKind};
 use futures_util::Stream;
 use ratatui::Frame;
 use ratatui::layout::Rect;
@@ -27,7 +28,11 @@ use tui::{ActionStatus, Component, RenderContext, Subscription, SubscriptionEven
 use crate::core::{Action, CommandOutcome, CompletionController, Controller};
 use crate::login_overlay::{LoginDone, LoginOverlay};
 use crate::views::Header;
-use crate::views::{AppView, PopupList, PopupStatus, Status, StatusSnapshot, UiState};
+use crate::views::component::Component as _;
+use crate::views::theme;
+use crate::views::{
+    ChatHistory, ChatSnapshot, Footer, PopupList, PopupStatus, Status, StatusSnapshot, UiState,
+};
 
 /// How often streamed agent output is collected while the app is idle.
 const TICK_INTERVAL: Duration = Duration::from_millis(16);
@@ -83,12 +88,12 @@ pub struct AlanRoot {
     header: Option<Entity<Header>>,
     popup: Option<Entity<PopupList>>,
     status: Option<Entity<Status>>,
+    chat: Option<Entity<ChatHistory>>,
 }
 
 struct Inner {
     controller: Controller,
     ui: UiState,
-    view: AppView,
 }
 
 impl AlanRoot {
@@ -101,7 +106,6 @@ impl AlanRoot {
             inner: Mutex::new(Inner {
                 controller,
                 ui: UiState::new(),
-                view: AppView::new(),
             }),
             providers,
             credentials,
@@ -109,6 +113,7 @@ impl AlanRoot {
             header: None,
             popup: None,
             status: None,
+            chat: None,
         }
     }
 
@@ -180,6 +185,29 @@ impl AlanRoot {
         }
         cx.update(status, |status| status.set(snap));
     }
+
+    /// Push the transcript snapshot into the `ChatHistory` entity. Plain-data
+    /// mapping lives here so `ChatHistory` never names a core type. Skips the
+    /// push when the snapshot is unchanged so the 16ms poll tick stays quiet.
+    fn push_chat(&self, cx: &mut Context<'_, Self, AlanAction>, inner: &mut Inner) {
+        let Some(chat) = self.chat else {
+            return;
+        };
+
+        let revision = inner.controller.chat_revision();
+        let unchanged = cx
+            .read(chat, |chat| chat.matches_revision(revision))
+            .unwrap_or(false);
+        if unchanged {
+            return;
+        }
+
+        let snap = ChatSnapshot {
+            entries: inner.controller.chat().to_vec(),
+            revision,
+        };
+        cx.update(chat, |chat| chat.set(snap));
+    }
 }
 
 impl Component<AlanAction> for AlanRoot {
@@ -190,11 +218,15 @@ impl Component<AlanAction> for AlanRoot {
         self.header = Some(cx.insert(Header));
         self.popup = Some(cx.insert(PopupList::default()));
         self.status = Some(cx.insert(Status::default()));
-        // Seed the status line so the first frame isn't blank before the
-        // first poll tick; later ticks skip it while unchanged.
+        self.chat = Some(cx.insert(ChatHistory::default()));
+        // The root stays the input target; it routes mouse / wheel / page
+        // actions to the transcript and keyboard / paste to the editor.
+        // Seed the status line and transcript so the first frame isn't blank
+        // before the first poll tick; later ticks skip them while unchanged.
         {
             let mut inner = self.inner.lock().expect("alan root poisoned");
             self.push_status(cx, &mut inner);
+            self.push_chat(cx, &mut inner);
         }
         self.poll = Some(cx.subscribe_stream(poll_ticks(), |event, root, cx| {
             let SubscriptionEvent::Item(()) = event else {
@@ -203,10 +235,20 @@ impl Component<AlanAction> for AlanRoot {
             let mut inner = root.inner.lock().expect("alan root poisoned");
             let poll = inner.controller.poll();
             inner.ui.on_poll(poll);
-            inner.ui.tick();
-            inner.ui.flush_wheel();
+            let chat = root.chat;
             root.push_snapshot(cx, &mut inner);
             root.push_status(cx, &mut inner);
+            root.push_chat(cx, &mut inner);
+            // Apply queued wheel notches on the tick.
+            if let Some(chat) = chat
+                && cx
+                    .read(chat, |chat| chat.has_pending_wheel())
+                    .unwrap_or(false)
+            {
+                cx.update(chat, |chat| {
+                    chat.tick();
+                });
+            }
             if inner.ui.take_dirty() {
                 cx.notify();
             }
@@ -222,61 +264,102 @@ impl Component<AlanAction> for AlanRoot {
         Self: Sized,
     {
         match action {
-            AlanAction::Resize | AlanAction::MouseScrollUp | AlanAction::MouseScrollDown => {
-                let action = match action {
-                    AlanAction::Resize => Action::Resize,
-                    AlanAction::MouseScrollUp => Action::MouseScrollUp,
-                    AlanAction::MouseScrollDown => Action::MouseScrollDown,
-                    AlanAction::Paste(_) | AlanAction::Raw(_) => unreachable!("matched above"),
-                };
+            AlanAction::Resize => {
                 let mut inner = self.inner.lock().expect("alan root poisoned");
-                inner.ui.apply(action);
+                inner.ui.apply(Action::Resize);
                 if inner.ui.take_dirty() {
                     cx.notify();
                 }
                 ActionStatus::Handled
             }
+            // Wheel and mouse traffic is owned by `ChatHistory`; the root just
+            // routes it. `ChatHistory` hit-tests its own rect and ignores
+            // misses, so no parent-side geometry check is needed.
+            AlanAction::MouseScrollUp | AlanAction::MouseScrollDown => {
+                let chat = self.chat;
+                if let Some(chat) = chat {
+                    cx.dispatch(chat, action);
+                }
+                ActionStatus::Handled
+            }
+            AlanAction::Raw(event) => match event {
+                // Mouse traffic is owned by `ChatHistory`; the root just routes
+                // it there. `ChatHistory` hit-tests its own rect and ignores
+                // misses.
+                Event::Mouse(_) => {
+                    let chat = self.chat;
+                    if let Some(chat) = chat {
+                        cx.dispatch(chat, action);
+                    }
+                    ActionStatus::Handled
+                }
+                // PageUp/PageDown scroll the transcript, not the editor.
+                Event::Key(key)
+                    if matches!(
+                        key.code,
+                        crossterm::event::KeyCode::PageUp | crossterm::event::KeyCode::PageDown
+                    ) && key.kind == KeyEventKind::Press =>
+                {
+                    let chat = self.chat;
+                    if let Some(chat) = chat {
+                        cx.dispatch(chat, action);
+                    }
+                    ActionStatus::Handled
+                }
+                // Esc clears an active transcript selection before it reaches
+                // the editor (which pops attachments). Selection state is owned
+                // by `ChatHistory`, so the parent only arbitrates priority.
+                Event::Key(key)
+                    if key.code == KeyCode::Esc
+                        && key.kind == KeyEventKind::Press
+                        && cx
+                            .read(self.chat.expect("chat entity"), |c| {
+                                c.has_active_selection()
+                            })
+                            .unwrap_or(false) =>
+                {
+                    cx.update(self.chat.expect("chat entity"), |c| {
+                        c.clear_selection();
+                    });
+                    ActionStatus::Handled
+                }
+                // Everything else is editor input.
+                _ => {
+                    // Typing cancels queued wheel momentum, as before.
+                    if let Some(chat) = self.chat {
+                        cx.update(chat, |c| c.cancel_wheel());
+                    }
+                    let mut inner = self.inner.lock().expect("alan root poisoned");
+                    let Inner { controller, ui, .. } = &mut *inner;
+                    let command = ui.handle_event(event.clone(), controller.completion_mut());
+                    let is_submit = matches!(command, Some(crate::core::Command::Submit { .. }));
+                    let outcome: Option<CommandOutcome> =
+                        command.map(|command| inner.controller.handle(command));
+                    self.push_snapshot(cx, &mut inner);
+                    if inner.ui.take_dirty() {
+                        cx.notify();
+                    }
+                    // A submitted prompt resumes bottom-following.
+                    if is_submit && let Some(chat) = self.chat {
+                        cx.update(chat, |c| c.resume_follow());
+                    }
+                    if let Some(outcome) = outcome {
+                        if outcome.quit {
+                            cx.quit();
+                        }
+                        drop(inner);
+                        if outcome.open_login {
+                            self.open_login(cx);
+                        }
+                    }
+                    ActionStatus::Handled
+                }
+            },
             AlanAction::Paste(text) => {
                 let mut inner = self.inner.lock().expect("alan root poisoned");
-                // Disjoint field borrows: `view`/`controller` reads feed `ui` mutation.
-                let Inner {
-                    controller,
-                    ui,
-                    view,
-                    ..
-                } = &mut *inner;
-                let command = ui.handle_event(
-                    Event::Paste(text.clone()),
-                    view.lines(),
-                    controller.completion_mut(),
-                );
-                let outcome: Option<CommandOutcome> =
-                    command.map(|command| inner.controller.handle(command));
-                self.push_snapshot(cx, &mut inner);
-                if inner.ui.take_dirty() {
-                    cx.notify();
-                }
-                if let Some(outcome) = outcome {
-                    if outcome.quit {
-                        cx.quit();
-                    }
-                    drop(inner);
-                    if outcome.open_login {
-                        self.open_login(cx);
-                    }
-                }
-                ActionStatus::Handled
-            }
-            AlanAction::Raw(event) => {
-                let mut inner = self.inner.lock().expect("alan root poisoned");
-                let Inner {
-                    controller,
-                    ui,
-                    view,
-                    ..
-                } = &mut *inner;
+                let Inner { controller, ui, .. } = &mut *inner;
                 let command =
-                    ui.handle_event(event.clone(), view.lines(), controller.completion_mut());
+                    ui.handle_event(Event::Paste(text.clone()), controller.completion_mut());
                 let outcome: Option<CommandOutcome> =
                     command.map(|command| inner.controller.handle(command));
                 self.push_snapshot(cx, &mut inner);
@@ -298,32 +381,40 @@ impl Component<AlanAction> for AlanRoot {
     }
 
     fn render(&self, frame: &mut Frame, area: Rect, cx: &RenderContext<'_, AlanAction>) {
+        let chat = self.chat;
         let popup = self.popup;
         let status = self.status;
-        if let Some(header) = self.header {
-            let [header_area, body_area] =
+
+        // Body area is everything below the header row (if present).
+        let body_area = if let Some(header) = self.header {
+            let [header_area, body] =
                 Layout::vertical([Constraint::Length(1), Constraint::Min(1)]).areas(area);
             cx.render_entity(header, frame, header_area);
-            let mut inner = self.inner.lock().expect("alan root poisoned");
-            let Inner {
-                controller,
-                ui,
-                view,
-            } = &mut *inner;
-            let body = view.render(frame, body_area, controller, ui);
-            paint_status(status, body.footer, ui.attachment_height(), frame, cx);
-            paint_popup(popup, body.footer, frame, cx);
+            body
         } else {
-            let mut inner = self.inner.lock().expect("alan root poisoned");
-            let Inner {
-                controller,
-                ui,
-                view,
-            } = &mut *inner;
-            let body = view.render(frame, area, controller, ui);
-            paint_status(status, body.footer, ui.attachment_height(), frame, cx);
-            paint_popup(popup, body.footer, frame, cx);
+            area
+        };
+
+        let mut inner = self.inner.lock().expect("alan root poisoned");
+        let Inner { controller, ui } = &mut *inner;
+
+        // Same split the old `AppView` used: transcript takes the remainder,
+        // footer is sized from the wrapped editor rows plus attachments.
+        let editor_width = body_area.width.saturating_sub(theme::PROMPT_GUTTER);
+        let [chat_area, footer_area] = Layout::vertical([
+            Constraint::Min(1),
+            Constraint::Length(4 + ui.editor_rows(editor_width) + ui.attachment_height()),
+        ])
+        .areas(body_area);
+
+        if let Some(chat) = chat {
+            cx.render_entity(chat, frame, chat_area);
         }
+        let mut footer = Footer;
+        footer.render(frame, footer_area, controller, ui);
+
+        paint_status(status, footer_area, ui.attachment_height(), frame, cx);
+        paint_popup(popup, footer_area, frame, cx);
     }
 }
 
