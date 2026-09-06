@@ -213,6 +213,35 @@ impl<'a, T: Component<A>, A: 'static> Context<'a, T, A> {
         self.entity
     }
 
+    /// Return the immediate parent entity, if this component has one.
+    pub fn parent_id(&self) -> Option<EntityId> {
+        self.runtime_state
+            .parent_map
+            .get(&self.entity.id())
+            .copied()
+    }
+
+    /// Dispatch a synchronous action to an entity identified by its runtime ID.
+    /// Missing or self-targeted entities are safe no-ops.
+    pub fn dispatch_id(&mut self, target: EntityId, action: &A) -> ActionStatus {
+        if target == self.entity.id() {
+            return ActionStatus::Continue;
+        }
+        let mut cx = Ctx::new(self.runtime_state, self.store, target);
+        self.store
+            .dispatch_action(target, action, &mut cx)
+            .unwrap_or(ActionStatus::Continue)
+    }
+
+    /// Dispatch a synchronous action to this component's immediate parent.
+    pub fn dispatch_parent(&mut self, action: &A) -> ActionStatus {
+        let Some(parent) = self.parent_id() else {
+            return ActionStatus::Continue;
+        };
+
+        self.dispatch_id(parent, action)
+    }
+
     /// Queue a typed event from the current entity for later delivery.
     pub fn emit<Ev: Send + 'static>(&mut self, event: Ev) {
         self.runtime_state
@@ -455,13 +484,7 @@ impl<'a, T: Component<A>, A: 'static> Context<'a, T, A> {
     /// Dispatch a synchronous action to a known entity. Self-dispatch is a
     /// safe `Continue` no-op because the current slot is already locked.
     pub fn dispatch<E: Component<A>>(&mut self, target: Entity<E>, action: &A) -> ActionStatus {
-        if target.id() == self.entity.id() {
-            return ActionStatus::Continue;
-        }
-        let mut cx = Ctx::new(self.runtime_state, self.store, target.id());
-        self.store
-            .dispatch_action(target.id(), action, &mut cx)
-            .unwrap_or(ActionStatus::Continue)
+        self.dispatch_id(target.id(), action)
     }
 }
 
