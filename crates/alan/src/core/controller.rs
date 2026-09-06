@@ -3,7 +3,6 @@
 use super::action::{Command, ImageAttachment};
 use super::chat::{ChatController, Entry};
 use super::command::SlashCommand;
-use super::completion::{Commands, CompletionController, Paths};
 use agent::Agent;
 use llm::Usage;
 use std::sync::Arc;
@@ -34,8 +33,7 @@ impl Poll {
 pub enum Activity {
     /// Streaming a response.
     Thinking,
-    /// Offering completions, which take Enter before the editor sees it.
-    Suggesting,
+
     /// Waiting on a prompt.
     Idle,
 }
@@ -69,17 +67,12 @@ impl CommandOutcome {
 /// Coordinates feature controllers. It does not render or handle terminal types.
 pub struct Controller {
     chat: ChatController,
-    completion: CompletionController,
 }
 
 impl Controller {
     pub fn new(agent: Agent) -> Self {
         Self {
             chat: ChatController::new(agent),
-            completion: CompletionController::new(vec![
-                Box::new(Paths::default()),
-                Box::new(Commands::default()),
-            ]),
         }
     }
 
@@ -95,8 +88,6 @@ impl Controller {
     pub fn activity(&self) -> Activity {
         if self.chat.is_busy() {
             Activity::Thinking
-        } else if self.completion.item_count() > 0 {
-            Activity::Suggesting
         } else {
             Activity::Idle
         }
@@ -122,16 +113,8 @@ impl Controller {
         self.chat.agent()
     }
 
-    pub fn completion(&self) -> &CompletionController {
-        &self.completion
-    }
-
-    pub fn completion_mut(&mut self) -> &mut CompletionController {
-        &mut self.completion
-    }
-
     pub fn poll(&mut self) -> Poll {
-        self.chat.poll().combine(self.completion.poll())
+        self.chat.poll()
     }
 
     pub fn handle(&mut self, command: Command) -> CommandOutcome {

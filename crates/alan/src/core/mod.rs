@@ -9,5 +9,8 @@ pub mod controller;
 pub use action::{Command, ImageAttachment};
 pub use chat::Entry;
 pub use command::SlashCommand;
-pub use completion::{Accept, CompletionController, CompletionItem, CompletionStatus};
+pub use completion::{
+    CommandCompleterBackend, CommandsContext, Completer, CompletionRequest, CompletionStatus,
+    PathCompleterBackend, PathsContext,
+};
 pub use controller::{Activity, CommandOutcome, Controller, Poll};

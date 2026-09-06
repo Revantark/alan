@@ -12,9 +12,12 @@
 use providers::{CredentialStore, ProviderRegistry};
 use ratatui::layout::Constraint;
 use ratatui::layout::Layout;
+use std::io;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
+
+use strum::IntoEnumIterator;
 
 use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers, MouseEventKind};
 use futures_util::Stream;
@@ -25,13 +28,16 @@ use tui::entity::Entity;
 use tui::keymap::{InputContext, KeyMapper};
 use tui::{ActionStatus, Component, RenderContext, Subscription, SubscriptionEvent};
 
-use crate::core::{CommandOutcome, CompletionController, Controller};
+use crate::core::{
+    CommandCompleterBackend, CommandOutcome, CommandsContext, Completer, CompletionRequest,
+    Controller, PathCompleterBackend, PathsContext,
+};
 use crate::login_overlay::LoginOverlay;
 use crate::views::Header;
 use crate::views::component::Component as _;
 use crate::views::theme;
 use crate::views::{
-    ChatHistory, ChatSnapshot, PopupList, PopupStatus, PromptEditor, Status, StatusSnapshot,
+    ChatHistory, ChatSnapshot, PopupListv2, PopupSelected, PromptEditor, Status, StatusSnapshot,
     UiState,
 };
 
@@ -91,12 +97,16 @@ impl KeyMapper<AlanAction> for AlanKeyMapper {
 /// dependencies needed to open feature overlays (today: login).
 pub struct AlanRoot {
     inner: Mutex<Inner>,
+    completer: Completer,
     providers: Arc<ProviderRegistry>,
     credentials: Arc<dyn CredentialStore>,
     /// Retained so the poll stream keeps running. Dropping it cancels the stream.
     poll: Option<Subscription>,
+    /// Retained so the popup's accept/dismiss events keep being delivered.
+    /// Dropping it cancels the subscription.
+    popup_subscription: Option<Subscription>,
     header: Option<Entity<Header>>,
-    popup: Option<Entity<PopupList>>,
+    popup_v2: Option<Entity<PopupListv2>>,
     status: Option<Entity<Status>>,
     chat: Option<Entity<ChatHistory>>,
 }
@@ -104,6 +114,12 @@ pub struct AlanRoot {
 struct Inner {
     controller: Controller,
     ui: UiState,
+    /// Trigger of the last request sent to the completer. A change means a
+    /// backend switched active, so its data must be refreshed.
+    last_trigger: Option<char>,
+    /// The request the user dismissed with Esc. Suppressed until the editor
+    /// state changes, so the 16ms tick cannot reopen a popup the user closed.
+    dismissed: Option<CompletionRequest>,
 }
 
 impl AlanRoot {
@@ -116,12 +132,29 @@ impl AlanRoot {
             inner: Mutex::new(Inner {
                 controller,
                 ui: UiState::new(),
+                last_trigger: None,
+                dismissed: None,
             }),
+            completer: Completer::new()
+                .with_backend(
+                    Box::new(CommandCompleterBackend),
+                    Box::new(CommandsContext {
+                        commands: crate::core::SlashCommand::iter().collect(),
+                    }),
+                )
+                .with_backend(
+                    Box::new(PathCompleterBackend),
+                    Box::new(PathsContext {
+                        paths: Vec::new(),
+                        status: crate::core::CompletionStatus::Loading,
+                    }),
+                ),
             providers,
             credentials,
             poll: None,
             header: None,
-            popup: None,
+            popup_v2: None,
+            popup_subscription: None,
             status: None,
             chat: None,
         }
@@ -132,27 +165,6 @@ impl AlanRoot {
             Arc::clone(&self.providers),
             Arc::clone(&self.credentials),
         ));
-    }
-
-    /// Push the completion snapshot into the popup entity. Plain-data mapping
-    /// lives here so `PopupList` never names core types. Skips the push when
-    /// the snapshot is unchanged so the 16ms poll tick stays quiet.
-    fn push_snapshot(&self, cx: &mut Context<'_, Self, AlanAction>, inner: &mut Inner) {
-        let Some(popup) = self.popup else {
-            return;
-        };
-        let (open, status, items, selected) = popup_snapshot(inner.controller.completion());
-        let unchanged = cx
-            .read(popup, |popup| {
-                popup.matches_snapshot(open, &status, &items, selected)
-            })
-            .unwrap_or(false);
-        if unchanged {
-            return;
-        }
-        cx.update(popup, |popup| {
-            popup.set(open, status, items, selected);
-        });
     }
 
     /// Push the status-line snapshot into the `Status` entity. Plain-data
@@ -200,15 +212,152 @@ impl AlanRoot {
     }
 }
 
+/// Refresh the v2 completion popup from the current editor state. Called
+/// after every editor event and on every tick while a request is open.
+///
+/// A trigger change (or first request) starts a scan and marks the
+/// completer loading; otherwise the cached index is ranked against the
+/// pattern. The popup is fed plain data — open/message/items/selected — and
+/// never names a core type.
+///
+/// A free function rather than a method so the caller can pass `&mut Inner`
+/// and `&mut completer` as disjoint borrows without holding the root lock.
+fn refresh_completion(
+    completer: &mut Completer,
+    popup: Option<Entity<PopupListv2>>,
+    cx: &mut Context<'_, AlanRoot, AlanAction>,
+    inner: &mut Inner,
+) {
+    let Some(popup) = popup else {
+        return;
+    };
+    let Some(request) = inner.ui.completion_request() else {
+        // No token under the cursor: close the popup and forget any
+        // dismissal, so re-typing the trigger later can reopen it.
+        inner.dismissed = None;
+        cx.update(popup, |popup| popup.set(false, None, Vec::new()));
+        return;
+    };
+
+    // The user dismissed this exact request with Esc; keep the popup closed
+    // until the editor state changes, so the 16ms tick cannot reopen it.
+    if inner.dismissed.as_ref() == Some(&request) {
+        cx.update(popup, |popup| popup.set(false, None, Vec::new()));
+        return;
+    }
+    inner.dismissed = None;
+
+    // A trigger change means a backend switched active. The path backend's data
+    // is a filesystem scan, so it gets a loading context and a spawned task.
+    // The command backend's data is immutable config — nothing to refresh.
+    if inner.last_trigger != Some(request.trigger) {
+        inner.last_trigger = Some(request.trigger);
+        if request.trigger == '@' {
+            let ctx = PathsContext {
+                paths: Vec::new(),
+                status: crate::core::CompletionStatus::Loading,
+            };
+            completer.set_context('@', Box::new(ctx));
+            let root_path =
+                std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+            let trigger = request.trigger;
+            // The handler runs after this function returns, in a deferred
+            // non-reentrant batch, and receives `&mut AlanRoot` as a parameter.
+            cx.spawn(scan_task(root_path), move |result, root, cx| {
+                let paths = match result {
+                    Ok(paths) => paths,
+                    Err(_) => Vec::new(),
+                };
+                let ctx = PathsContext {
+                    paths,
+                    status: crate::core::CompletionStatus::Ready,
+                };
+                root.completer.set_context(trigger, Box::new(ctx));
+                cx.notify();
+            });
+        }
+    }
+
+    let Some(result) = completer.complete(request) else {
+        cx.update(popup, |popup| popup.set(false, None, Vec::new()));
+        return;
+    };
+
+    let message = match &result.status {
+        crate::core::CompletionStatus::Loading => Some("Loading…".to_owned()),
+        crate::core::CompletionStatus::Ready if result.items.is_empty() => {
+            Some("No matches".to_owned())
+        }
+        crate::core::CompletionStatus::Ready => None,
+    };
+    let items: Vec<String> = result
+        .items
+        .iter()
+        .map(|item| item.display.clone())
+        .collect();
+    // Skip the push when the snapshot is unchanged, so the 16ms tick stays
+    // quiet and a navigation key isn't clobbered by a reset.
+    let unchanged = cx
+        .read(popup, |popup| {
+            popup.matches(true, message.as_deref(), &items)
+        })
+        .unwrap_or(false);
+    if unchanged {
+        return;
+    }
+    cx.update(popup, |popup| popup.set(true, message, items));
+    // Focus the popup so Up/Down/Enter/Tab reach it directly; it returns
+    // focus to root on accept/dismiss via the subscription callback.
+    cx.focus_entity(popup);
+}
+
 impl Component<AlanAction> for AlanRoot {
     fn init(&mut self, cx: &mut Context<'_, Self, AlanAction>)
     where
         Self: Sized,
     {
         self.header = Some(cx.insert(Header));
-        self.popup = Some(cx.insert(PopupList::default()));
+        self.popup_v2 = Some(cx.insert(PopupListv2::default()));
         self.status = Some(cx.insert(Status::default()));
         self.chat = Some(cx.insert(ChatHistory::default()));
+        // The v2 popup owns its own selection and emits on accept/dismiss.
+        // Root subscribes (persistent, re-arming) and applies the accepted
+        // item by re-deriving the request from the editor — the popup only
+        // carries display strings, never a replacement or byte range.
+        if let Some(popup) = self.popup_v2 {
+            self.popup_subscription = Some(cx.subscribe::<PopupSelected, PopupListv2, _>(
+                popup,
+                |event, root, popup, cx| {
+                    let mut inner = root.inner.lock().expect("alan root poisoned");
+                    match event {
+                        PopupSelected::Dismiss => {
+                            // Remember the dismissed request so the 16ms tick
+                            // cannot reopen the popup the user closed.
+                            inner.dismissed = inner.ui.completion_request();
+                        }
+                        PopupSelected::Accept { index } => {
+                            let Some(request) = inner.ui.completion_request() else {
+                                return;
+                            };
+                            let Some(result) = root.completer.complete(request) else {
+                                return;
+                            };
+                            let Some(item) = result.items.get(*index) else {
+                                return;
+                            };
+                            inner.ui.insert_completion(&item.replacement, result.range);
+                            // The token changed, so a dismissal is no longer
+                            // relevant.
+                            inner.dismissed = None;
+                        }
+                    }
+                    drop(inner);
+                    cx.update(popup, |popup| popup.set(false, None, Vec::new()));
+                    cx.focus_entity(cx.entity());
+                    cx.notify();
+                },
+            ));
+        }
         // The root stays the input target; it routes mouse / wheel / page
         // actions to the transcript and keyboard / paste to the editor.
         // Seed the status line and transcript so the first frame isn't blank
@@ -226,7 +375,8 @@ impl Component<AlanAction> for AlanRoot {
             let poll = inner.controller.poll();
             inner.ui.on_poll(poll);
             let chat = root.chat;
-            root.push_snapshot(cx, &mut inner);
+            refresh_completion(&mut root.completer, root.popup_v2, cx, &mut inner);
+
             root.push_status(cx, &mut inner);
             root.push_chat(cx, &mut inner);
             // Apply queued wheel notches on the tick.
@@ -319,12 +469,13 @@ impl Component<AlanAction> for AlanRoot {
                         cx.update(chat, |c| c.cancel_wheel());
                     }
                     let mut inner = self.inner.lock().expect("alan root poisoned");
-                    let Inner { controller, ui, .. } = &mut *inner;
-                    let command = ui.handle_event(event.clone(), controller.completion_mut());
+                    let Inner { ui, .. } = &mut *inner;
+                    let command = ui.handle_event(event.clone());
                     let is_submit = matches!(command, Some(crate::core::Command::Submit { .. }));
                     let outcome: Option<CommandOutcome> =
                         command.map(|command| inner.controller.handle(command));
-                    self.push_snapshot(cx, &mut inner);
+                    refresh_completion(&mut self.completer, self.popup_v2, cx, &mut inner);
+
                     if inner.ui.take_dirty() {
                         cx.notify();
                     }
@@ -346,12 +497,11 @@ impl Component<AlanAction> for AlanRoot {
             },
             AlanAction::Paste(text) => {
                 let mut inner = self.inner.lock().expect("alan root poisoned");
-                let Inner { controller, ui, .. } = &mut *inner;
-                let command =
-                    ui.handle_event(Event::Paste(text.clone()), controller.completion_mut());
+                let Inner { ui, .. } = &mut *inner;
+                let command = ui.handle_event(Event::Paste(text.clone()));
                 let outcome: Option<CommandOutcome> =
                     command.map(|command| inner.controller.handle(command));
-                self.push_snapshot(cx, &mut inner);
+                refresh_completion(&mut self.completer, self.popup_v2, cx, &mut inner);
                 if inner.ui.take_dirty() {
                     cx.notify();
                 }
@@ -371,7 +521,6 @@ impl Component<AlanAction> for AlanRoot {
 
     fn render(&self, frame: &mut Frame, area: Rect, cx: &RenderContext<'_, AlanAction>) {
         let chat = self.chat;
-        let popup = self.popup;
         let status = self.status;
 
         // Body area is everything below the header row (if present).
@@ -385,7 +534,7 @@ impl Component<AlanAction> for AlanRoot {
         };
 
         let mut inner = self.inner.lock().expect("alan root poisoned");
-        let Inner { controller, ui } = &mut *inner;
+        let Inner { controller, ui, .. } = &mut *inner;
 
         // Same split the old `AppView` used: transcript takes the remainder,
         // footer is sized from the wrapped editor rows plus attachments.
@@ -403,33 +552,15 @@ impl Component<AlanAction> for AlanRoot {
         prompt_editor.render(frame, footer_area, controller, ui);
 
         paint_status(status, footer_area, ui.attachment_height(), frame, cx);
-        paint_popup(popup, footer_area, frame, cx);
+        // paint_popup(popup, footer_area, frame, cx);
+        paint_popup_v2(self.popup_v2, footer_area, frame, cx);
     }
 }
 
-/// Snapshot the completion controller into plain popup data. The only place
-/// that maps core completion types onto popup types.
-fn popup_snapshot(completion: &CompletionController) -> (bool, PopupStatus, Vec<String>, usize) {
-    use crate::core::CompletionStatus as CoreStatus;
-
-    let open = completion.is_open();
-    let status = match completion.status() {
-        CoreStatus::Loading => PopupStatus::Loading,
-        CoreStatus::Ready => PopupStatus::Ready,
-        CoreStatus::Error(error) => PopupStatus::Error(error),
-    };
-    let items = completion
-        .items(0, completion.item_count())
-        .iter()
-        .map(|item| item.display.clone())
-        .collect();
-    (open, status, items, completion.selected())
-}
-
-/// Paint the popup above the footer after the body, so it sits visually on
-/// top without capturing input. Zero rows means hidden: nothing to anchor.
-fn paint_popup(
-    popup: Option<Entity<PopupList>>,
+/// Paint the v2 popup above the footer. It owns its own selection and input,
+/// so root only renders it — it never mutates it here.
+fn paint_popup_v2(
+    popup: Option<Entity<PopupListv2>>,
     footer: Rect,
     frame: &mut Frame,
     cx: &RenderContext<'_, AlanAction>,
@@ -438,7 +569,7 @@ fn paint_popup(
         return;
     };
 
-    if let Some(area) = PopupList::area_above(footer, frame.area(), 5) {
+    if let Some(area) = PopupListv2::area_above(footer, frame.area(), 5) {
         cx.render_entity(popup, frame, area);
     }
 }
@@ -468,6 +599,20 @@ fn poll_ticks() -> impl Stream<Item = PollTick> + Send + 'static {
         tokio::time::sleep(TICK_INTERVAL).await;
         Some(((), state))
     })
+}
+
+/// A spawned scan: walks the workspace and returns its relative paths.
+/// Runs on the blocking thread pool, so it never blocks the UI loop.
+fn scan_task(
+    root: std::path::PathBuf,
+) -> impl Future<Output = Result<Vec<String>, tui::TaskError>> + Send + 'static {
+    async move {
+        let result =
+            tokio::task::spawn_blocking(move || crate::core::completion::scan::scan_dir(&root))
+                .await
+                .unwrap_or_else(|_| Err(io::Error::new(io::ErrorKind::Other, "scan panicked")));
+        result.map_err(|error| tui::TaskError(Box::new(error)))
+    }
 }
 
 #[cfg(test)]

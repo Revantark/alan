@@ -53,11 +53,6 @@ impl From<Activity> for StatusStyle {
                 hints: "  Ctrl-C stop",
                 style: Style::default().italic().fg(ratatui::style::Color::Yellow),
             },
-            Activity::Suggesting => StatusStyle {
-                label: "  ●",
-                hints: " Enter accept · ↑↓ move · Esc dismiss",
-                style: Style::default().fg(theme::PROMPT_FG),
-            },
             Activity::Idle => StatusStyle {
                 label: "  ● idle",
                 hints: "  Enter send · Ctrl-C quit",
