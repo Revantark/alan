@@ -1,9 +1,8 @@
 use crate::model::ModelOptions;
 use crate::provider::bind_model;
 use crate::{
-    ApiId, ApiKeyAuth, AuthError, AuthEvent, AuthInteraction, AuthPrompt, AuthResolver, Credential,
-    CredentialAuth, Model, ModelCapabilities, ModelInfo, ModelPricing, Provider, ProviderAuth,
-    ProviderError, ProviderId, ServerToolInfo,
+    ApiId, ApiKeyAuth, AuthError, AuthResolver, CredentialAuth, Model, ModelCapabilities,
+    ModelInfo, ModelPricing, Provider, ProviderError, ProviderId, ServerToolInfo,
 };
 use async_trait::async_trait;
 use llm::{ChatCompletionsApi, HttpClient, LlmApi};
@@ -18,7 +17,6 @@ pub struct OpenRouterProvider {
     server_tools: Vec<ServerToolInfo>,
     apis: HashMap<ApiId, Arc<dyn LlmApi>>,
     auth: Arc<dyn AuthResolver>,
-    login: OpenRouterAuth,
 }
 
 impl OpenRouterProvider {
@@ -37,27 +35,6 @@ impl OpenRouterProvider {
             store,
             Some("OPENROUTER_API_KEY"),
         )))
-    }
-}
-
-pub struct OpenRouterAuth;
-
-#[async_trait]
-impl ProviderAuth for OpenRouterAuth {
-    async fn login(&self, interaction: &mut dyn AuthInteraction) -> Result<Credential, AuthError> {
-        let value = interaction
-            .prompt(AuthPrompt::Secret {
-                message: "OpenRouter API key".into(),
-            })
-            .await?;
-        let key = value.trim();
-        if key.is_empty() {
-            return Err(AuthError::Validation("API key cannot be empty".into()));
-        }
-
-        interaction.notify(AuthEvent::Progress("Validating OpenRouter API key".into()));
-        validate_api_key(key).await?;
-        Ok(Credential::ApiKey { key: key.into() })
     }
 }
 
@@ -81,6 +58,7 @@ async fn validate_api_key(key: &str) -> Result<(), AuthError> {
     Ok(())
 }
 
+#[async_trait]
 impl Provider for OpenRouterProvider {
     fn id(&self) -> &ProviderId {
         &self.id
@@ -92,6 +70,19 @@ impl Provider for OpenRouterProvider {
 
     fn server_tools(&self) -> &[ServerToolInfo] {
         &self.server_tools
+    }
+
+    fn auth_methods(&self) -> Vec<crate::auth::AuthMethod> {
+        vec![crate::auth::AuthMethod::ApiKey]
+    }
+
+    async fn validate_auth(
+        &self,
+        auth_result: &crate::auth::AuthResult,
+    ) -> Result<(), crate::auth::AuthError> {
+        match auth_result {
+            crate::auth::AuthResult::ApiKey(key) => validate_api_key(key).await,
+        }
     }
 
     fn bind(&self, model_id: &str) -> Result<Model, ProviderError> {
@@ -116,10 +107,6 @@ impl Provider for OpenRouterProvider {
             model_id,
             options,
         )
-    }
-
-    fn auth(&self) -> &dyn ProviderAuth {
-        &self.login
     }
 }
 
@@ -189,7 +176,6 @@ impl OpenRouterBuilder {
             ],
             apis: HashMap::from([(ApiId::ChatCompletions, api)]),
             auth,
-            login: OpenRouterAuth,
         })
     }
 }

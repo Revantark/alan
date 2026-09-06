@@ -1,7 +1,8 @@
 use crate::Model;
-use crate::auth::{AuthResolver, ProviderAuth};
+use crate::auth::AuthResolver;
 use crate::catalog::{ApiId, ModelInfo, ProviderId, ServerToolInfo};
 use crate::model::ModelOptions;
+use async_trait::async_trait;
 use llm::LlmApi;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -17,12 +18,20 @@ pub enum ProviderError {
     MissingAuth,
 }
 
+#[async_trait]
 pub trait Provider: Send + Sync {
     fn id(&self) -> &ProviderId;
 
     fn models(&self) -> &[ModelInfo];
 
     fn server_tools(&self) -> &[ServerToolInfo];
+
+    fn auth_methods(&self) -> Vec<crate::auth::AuthMethod>;
+
+    async fn validate_auth(
+        &self,
+        auth_result: &crate::auth::AuthResult,
+    ) -> Result<(), crate::auth::AuthError>;
 
     fn bind(&self, model_id: &str) -> Result<Model, ProviderError>;
 
@@ -34,8 +43,6 @@ pub trait Provider: Send + Sync {
         let _ = options;
         self.bind(model_id)
     }
-
-    fn auth(&self) -> &dyn ProviderAuth;
 }
 
 #[derive(Default)]
