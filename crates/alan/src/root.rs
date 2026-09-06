@@ -31,7 +31,7 @@ use crate::views::Header;
 use crate::views::component::Component as _;
 use crate::views::theme;
 use crate::views::{
-    ChatHistory, ChatSnapshot, Footer, PopupList, PopupStatus, Status, StatusSnapshot, UiState,
+    ChatHistory, ChatSnapshot, PopupList, PopupStatus, PromptEditor, Status, StatusSnapshot, UiState,
 };
 
 /// How often streamed agent output is collected while the app is idle.
@@ -390,8 +390,8 @@ impl Component<AlanAction> for AlanRoot {
         if let Some(chat) = chat {
             cx.render_entity(chat, frame, chat_area);
         }
-        let mut footer = Footer;
-        footer.render(frame, footer_area, controller, ui);
+        let mut prompt_editor = PromptEditor;
+        prompt_editor.render(frame, footer_area, controller, ui);
 
         paint_status(status, footer_area, ui.attachment_height(), frame, cx);
         paint_popup(popup, footer_area, frame, cx);
