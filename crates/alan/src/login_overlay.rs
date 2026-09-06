@@ -211,7 +211,7 @@ impl Component<AlanAction> for LoginOverlay {
                 ActionStatus::Handled
             }
             AlanAction::ToggleMode => ActionStatus::Continue,
-                AlanAction::Raw(event) => {
+            AlanAction::Raw(event) => {
                 let Event::Key(key) = event else {
                     return ActionStatus::Handled;
                 };

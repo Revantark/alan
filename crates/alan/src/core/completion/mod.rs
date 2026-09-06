@@ -4,14 +4,15 @@
 //! the line itself. Ranking is not their concern either: [`matcher`] orders
 //! every backend the same way.
 
-mod commands;
+mod command_backend;
 mod matcher;
-mod paths;
-mod token;
+mod path_backend;
+pub(crate) mod scan;
+pub(crate) mod token;
 
-use super::Poll;
-pub use commands::Commands;
-pub use paths::Paths;
+use crate::core::SlashCommand;
+pub use command_backend::CommandCompleterBackend;
+pub use path_backend::PathCompleterBackend;
 use std::collections::HashMap;
 use std::ops::Range;
 
@@ -21,6 +22,8 @@ const MAX_SUGGESTIONS: usize = 100;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompletionRequest {
+    /// First character of the token: what selects the backend.
+    pub trigger: char,
     /// What was typed after the trigger character.
     pub pattern: String,
     /// Bytes of the line the pattern occupies, which accepting overwrites.
@@ -47,7 +50,6 @@ pub enum Accept {
 pub enum CompletionStatus {
     Loading,
     Ready,
-    Error(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -59,193 +61,123 @@ pub struct CompletionResult {
     pub items: Vec<CompletionItem>,
 }
 
-pub trait CompletionBackend {
+/// A typed, erasable context bag. Each backend defines its own context type
+/// and downcasts to it, so a backend only ever sees its own data — there is
+/// no shared field to ignore. A mismatch returns `None` rather than panicking.
+pub trait CompletionContext: std::any::Any + Send + Sync {
+    /// Erased `&self` for downcasting to the backend's own context type.
+    fn as_any(&self) -> &dyn std::any::Any;
+}
+
+impl<T: std::any::Any + Send + Sync> CompletionContext for T {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
+/// Data the path backend needs. Written by the spawned scan task via
+/// `cx.update` on the completer entity.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PathsContext {
+    pub paths: Vec<String>,
+    pub status: CompletionStatus,
+}
+
+/// Data the command backend needs. Immutable config; nothing writes it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CommandsContext {
+    pub commands: Vec<SlashCommand>,
+}
+
+/// A context-bearing backend for the v2 [`Completer`]. Each backend owns its
+/// own data via a typed context that a spawned task writes through
+/// `cx.update`; the backend downcasts to its own type and never ignores a
+/// shared field.
+///
+/// This is a separate trait from [`CompletionBackend`] so the legacy
+/// `Paths`/`Commands` backends and their callers are untouched.
+pub trait CompletionBackendV2 {
     /// The character a token must start with for this backend to answer.
     fn trigger(&self) -> char;
 
     /// The completion offered at the cursor. `None` when the trigger matched
     /// but this backend still does not apply, which closes the popup rather
-    /// than showing an empty one.
-    fn complete(&self, request: &CompletionRequest) -> Option<CompletionResult>;
+    /// than showing an empty one. The backend downcasts `context` to its own
+    /// typed context; a mismatch returns `None` rather than panicking.
+    fn complete(
+        &self,
+        request: &CompletionRequest,
+        context: &dyn CompletionContext,
+    ) -> Option<CompletionResult>;
+}
 
-    /// Called when this backend becomes the active one.
-    fn refresh(&mut self) {}
+/// A stateless completer: it dispatches a request to the backend filed under
+/// its trigger and returns the result. It never scans, never starts work, and
+/// never owns selection — each backend owns its own data via a typed context
+/// that a spawned task writes through `cx.update`.
+///
+/// `complete` is `&self` and pure — it takes no lock and can be called from a
+/// `cx.read` closure.
+pub struct Completer {
+    backends: HashMap<char, BackendEntry>,
+}
 
-    fn poll(&mut self) -> Poll {
-        Poll::Idle
+struct BackendEntry {
+    backend: Box<dyn CompletionBackendV2>,
+    context: Box<dyn CompletionContext>,
+}
+
+impl Completer {
+    /// An empty completer with no backends. Add them with [`Self::with_backend`].
+    pub fn new() -> Self {
+        Self {
+            backends: HashMap::new(),
+        }
     }
-}
 
-struct Active {
-    /// Trigger of the backend that claimed the request, and so the key it is
-    /// filed under.
-    trigger: char,
-    request: CompletionRequest,
-    result: CompletionResult,
-    selected: usize,
-}
-
-pub struct CompletionController {
-    backends: HashMap<char, Box<dyn CompletionBackend>>,
-    active: Option<Active>,
-}
-
-impl CompletionController {
-    /// Keyed by each backend's own [`CompletionBackend::trigger`], so the key
-    /// can never disagree with the backend filed under it.
+    /// Register a backend with its typed context. Keyed by the backend's own
+    /// trigger, so the key can never disagree with the backend filed under it.
     ///
     /// # Panics
     ///
     /// If two backends share a trigger. The list is written in source, so a
     /// clash is a programming error with no sensible recovery: dropping one
     /// silently would make completion mysteriously dead for that character.
-    pub fn new(backends: Vec<Box<dyn CompletionBackend>>) -> Self {
-        let mut keyed = HashMap::with_capacity(backends.len());
-        for backend in backends {
-            let trigger = backend.trigger();
-            let clash = keyed.insert(trigger, backend).is_some();
-            assert!(
-                !clash,
-                "two completion backends claim the trigger {trigger:?}"
-            );
-        }
-        Self {
-            backends: keyed,
-            active: None,
-        }
+    pub fn with_backend(
+        mut self,
+        backend: Box<dyn CompletionBackendV2>,
+        context: Box<dyn CompletionContext>,
+    ) -> Self {
+        let trigger = backend.trigger();
+        assert!(
+            !self.backends.contains_key(&trigger),
+            "two completion backends claim the trigger {trigger:?}"
+        );
+        self.backends
+            .insert(trigger, BackendEntry { backend, context });
+        self
     }
 
-    /// Re-evaluate after every editor change. `line` is the one the cursor is
-    /// on and `row` is where it sits in the buffer.
-    pub fn sync(&mut self, line: &str, cursor: usize, row: usize) {
-        self.active = self.claim(line, cursor, row);
+    /// Dispatch `request` to the backend filed under its trigger. `None` means
+    /// no backend answers for this trigger, which closes the popup.
+    pub fn complete(&self, request: CompletionRequest) -> Option<CompletionResult> {
+        let entry = self.backends.get(&request.trigger)?;
+        entry.backend.complete(&request, entry.context.as_ref())
     }
 
-    /// Any step failing means no completion applies here: no token under the
-    /// cursor, no backend for its trigger, or the backend declining.
-    fn claim(&mut self, line: &str, cursor: usize, row: usize) -> Option<Active> {
-        let token = token::at(line, cursor)?;
-        // Read before the backend is borrowed mutably.
-        let switching = self.active.as_ref().map(|active| active.trigger) != Some(token.trigger);
-        let backend = self.backends.get_mut(&token.trigger)?;
-        // Becoming active is the one moment a backend's data is worth reading.
-        if switching {
-            backend.refresh();
-        }
-
-        // Slicing the line happens here, once, rather than in every backend.
-        let request = CompletionRequest {
-            pattern: line[token.range.clone()].to_owned(),
-            range: token.range,
-            row,
-        };
-
-        let result = backend.complete(&request)?;
-        Some(Active {
-            trigger: token.trigger,
-            request,
-            result,
-            selected: 0,
-        })
-    }
-
-    pub fn is_open(&self) -> bool {
-        self.active.is_some()
-    }
-
-    pub fn item_count(&self) -> usize {
-        self.active
-            .as_ref()
-            .map_or(0, |active| active.result.items.len())
-    }
-
-    pub fn selected(&self) -> usize {
-        self.active.as_ref().map_or(0, |active| active.selected)
-    }
-
-    pub fn status(&self) -> CompletionStatus {
-        self.active
-            .as_ref()
-            .map_or(CompletionStatus::Ready, |active| {
-                active.result.status.clone()
-            })
-    }
-
-    /// In rank order.
-    pub fn items(&self, start: usize, count: usize) -> &[CompletionItem] {
-        let Some(active) = self.active.as_ref() else {
-            return &[];
-        };
-        let start = start.min(active.result.items.len());
-        let end = start.saturating_add(count).min(active.result.items.len());
-        &active.result.items[start..end]
-    }
-
-    pub fn dismiss(&mut self) {
-        self.active = None;
-    }
-
-    pub fn move_selection(&mut self, delta: isize) {
-        let Some(active) = self.active.as_mut() else {
+    /// Replace the context filed under `trigger`. Called by a spawned task via
+    /// `cx.update`, never from `complete`.
+    pub(crate) fn set_context(&mut self, trigger: char, context: Box<dyn CompletionContext>) {
+        let Some(entry) = self.backends.get_mut(&trigger) else {
             return;
         };
-        if active.result.items.is_empty() {
-            return;
-        }
-        let max = active.result.items.len() as isize - 1;
-        active.selected = (active.selected as isize + delta).clamp(0, max) as usize;
+        entry.context = context;
     }
+}
 
-    /// The item at [`Self::selected`], which is `None` when the popup has
-    /// nothing to offer.
-    pub fn selected_item(&self) -> Option<&CompletionItem> {
-        let active = self.active.as_ref()?;
-        active.result.items.get(active.selected)
-    }
-
-    /// The selected item and the byte range of the line it overwrites.
-    pub fn accept(&mut self) -> Option<(CompletionItem, Range<usize>)> {
-        let item = self.selected_item()?.clone();
-        let range = self.active.as_ref()?.result.range.clone();
-        self.active = None;
-        Some((item, range))
-    }
-
-    pub fn poll(&mut self) -> Poll {
-        let poll = self
-            .backends
-            .values_mut()
-            .fold(Poll::Idle, |poll, backend| poll.combine(backend.poll()));
-
-        if poll == Poll::Changed {
-            self.recompute();
-        }
-        poll
-    }
-
-    /// A backend whose data changed under an open popup answers again. The
-    /// request is unchanged, so the backend that claimed it still owns it.
-    fn recompute(&mut self) {
-        let Some((trigger, request)) = self
-            .active
-            .as_ref()
-            .map(|active| (active.trigger, active.request.clone()))
-        else {
-            return;
-        };
-
-        let Some(result) = self
-            .backends
-            .get(&trigger)
-            .and_then(|backend| backend.complete(&request))
-        else {
-            self.active = None;
-            return;
-        };
-        if let Some(active) = self.active.as_mut() {
-            active.selected = active.selected.min(result.items.len().saturating_sub(1));
-            active.result = result;
-        }
+impl Default for Completer {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -260,130 +192,4 @@ where
         .take(MAX_SUGGESTIONS)
         .map(|index| item(&candidates[index]))
         .collect()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn engine(index: &[&str]) -> CompletionController {
-        CompletionController::new(vec![Box::new(Paths::with_index(
-            index.iter().map(|path| (*path).to_owned()).collect(),
-        ))])
-    }
-
-    fn displayed(engine: &CompletionController) -> Vec<String> {
-        engine
-            .items(0, engine.item_count())
-            .iter()
-            .map(|item| item.display.clone())
-            .collect()
-    }
-
-    /// A trigger no backend is filed under closes the popup, exactly as if
-    /// there were no token at all.
-    #[test]
-    fn an_unclaimed_trigger_opens_nothing() {
-        let mut engine = engine(&["src/main.rs"]);
-        engine.sync("#tag", 4, 0);
-
-        assert!(!engine.is_open());
-    }
-
-    #[test]
-    #[should_panic(expected = "two completion backends claim the trigger")]
-    fn two_backends_cannot_share_a_trigger() {
-        CompletionController::new(vec![
-            Box::new(Paths::with_index(Vec::new())),
-            Box::new(Paths::with_index(Vec::new())),
-        ]);
-    }
-
-    #[test]
-    fn an_at_token_opens_completion_anywhere_in_the_line() {
-        let mut engine = engine(&["src/main.rs", "docs/"]);
-        engine.sync("explain @mai", 12, 0);
-
-        assert!(engine.is_open());
-        assert_eq!(displayed(&engine), ["src/main.rs"]);
-    }
-
-    #[test]
-    fn plain_text_closes_the_popup() {
-        let mut engine = engine(&["src/main.rs"]);
-        engine.sync("@src", 4, 0);
-        engine.sync("hello", 5, 0);
-
-        assert!(!engine.is_open());
-    }
-
-    #[test]
-    fn selection_stays_inside_the_items() {
-        let mut engine = engine(&["a.txt", "b.txt"]);
-        engine.sync("@", 1, 0);
-        assert_eq!(engine.item_count(), 2);
-
-        engine.move_selection(50);
-        assert_eq!(engine.selected(), 1);
-
-        engine.move_selection(-50);
-        assert_eq!(engine.selected(), 0);
-    }
-
-    #[test]
-    fn accepting_reports_the_range_it_overwrites() {
-        let mut engine = engine(&["src/main.rs"]);
-        engine.sync("explain @mai", 12, 0);
-
-        let (item, range) = engine.accept().unwrap();
-        assert_eq!(item.replacement, "src/main.rs");
-        // The `@` at byte 8 is outside the range, so it survives.
-        assert_eq!(range, 9..12);
-        assert!(!engine.is_open());
-    }
-
-    /// A directory is a reference in its own right, so accepting one finishes.
-    #[test]
-    fn accepting_a_directory_closes_the_popup() {
-        let mut engine = engine(&["crates/", "crates/alan/"]);
-        engine.sync("@crat", 5, 0);
-
-        let (item, range) = engine.accept().unwrap();
-        assert_eq!(item.replacement, "crates/");
-        assert_eq!(range, 1..5);
-        assert!(!engine.is_open());
-    }
-
-    /// Typing past the directory reopens the popup against the deeper paths.
-    #[test]
-    fn typing_past_a_directory_reopens_the_popup() {
-        let mut engine = engine(&["crates/", "crates/alan/main.rs"]);
-        engine.sync("@crates/", 8, 0);
-        engine.accept();
-        assert!(!engine.is_open());
-
-        engine.sync("@crates/m", 9, 0);
-
-        assert!(engine.is_open());
-        assert_eq!(displayed(&engine), ["crates/alan/main.rs"]);
-    }
-
-    #[test]
-    fn accepting_nothing_when_no_candidate_matched() {
-        let mut engine = engine(&["src/main.rs"]);
-        engine.sync("@zzz", 4, 0);
-
-        assert_eq!(engine.item_count(), 0);
-        assert!(engine.accept().is_none());
-    }
-
-    #[test]
-    fn items_are_bounded_by_the_window_asked_for() {
-        let mut engine = engine(&["a.txt", "b.txt", "c.txt"]);
-        engine.sync("@", 1, 0);
-
-        assert_eq!(engine.items(0, 2).len(), 2);
-        assert_eq!(engine.items(2, 5).len(), 1);
-        assert_eq!(engine.items(9, 5).len(), 0);
-    }
 }
