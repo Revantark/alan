@@ -15,7 +15,7 @@ use crate::core::{
 };
 use base64::Engine;
 pub(crate) use components::{
-    ChatHistory, ChatSnapshot, Footer, Header, PopupList, PopupStatus, Status, StatusSnapshot,
+    ChatHistory, ChatSnapshot, Header, PopupList, PopupStatus, PromptEditor, Status, StatusSnapshot,
 };
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::layout::Position;

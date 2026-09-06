@@ -10,9 +10,9 @@ use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::Paragraph;
 
 #[derive(Debug, Default)]
-pub struct Footer;
+pub struct PromptEditor;
 
-impl Component for Footer {
+impl Component for PromptEditor {
     fn render(
         &mut self,
         frame: &mut Frame,
