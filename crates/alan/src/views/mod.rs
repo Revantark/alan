@@ -10,8 +10,7 @@ pub mod selection;
 pub mod theme;
 
 use crate::core::{
-    Accept, Action, Command, CompletionController, CompletionItem, ImageAttachment, Poll,
-    SlashCommand,
+    Accept, Command, CompletionController, CompletionItem, ImageAttachment, Poll, SlashCommand,
 };
 use base64::Engine;
 pub(crate) use components::{
@@ -44,56 +43,6 @@ impl UiState {
         }
     }
 
-    pub fn apply(&mut self, action: Action) -> Option<Command> {
-        // `apply` only serves the sparse mapped-action path plus the
-        // pre-completion key shim. Main editor input flows through
-        // `handle_event` into the `TextArea`, so the editor arms below are
-        // unreachable in production; they stay for tests. Scroll and wheel
-        // actions now belong to `ChatHistory`.
-        let command = match action {
-            Action::Interrupt => Some(Command::Interrupt),
-            Action::TogglePlanMode => Some(Command::TogglePlanMode),
-            Action::Resize => None,
-            Action::Submit => {
-                let images = std::mem::take(&mut self.attachments);
-                Some(Command::Submit {
-                    text: self.editor_text(),
-                    images,
-                })
-            }
-            Action::ClearInput => {
-                // Esc first removes the newest attachment; with none pending
-                // it clears the editor as before.
-                if self.attachments.pop().is_some() {
-                    self.dirty = true;
-                    None
-                } else {
-                    self.editor = Self::new_editor();
-                    self.dirty = true;
-                    Some(Command::Cancel)
-                }
-            }
-            Action::Backspace | Action::Insert(_) | Action::Paste(_) => None,
-            Action::PasteOrAttachImage => {
-                if self.try_clipboard_image() {
-                    None
-                } else {
-                    // No image on the clipboard: fall back to pasting text.
-                    match arboard::Clipboard::new().and_then(|mut c| c.get_text()) {
-                        Ok(text) if !text.is_empty() => self.apply(Action::Paste(text)),
-                        _ => None,
-                    }
-                }
-            }
-            Action::ScrollUp
-            | Action::ScrollDown
-            | Action::MouseScrollUp
-            | Action::MouseScrollDown => None,
-        };
-        self.dirty = true;
-        command
-    }
-
     pub fn handle_event(
         &mut self,
         event: Event,
@@ -121,14 +70,6 @@ impl UiState {
                 self.attachments.pop();
                 self.dirty = true;
                 None
-            }
-            Event::Key(key)
-                if key.code == KeyCode::BackTab
-                    || (key.code == KeyCode::Tab
-                        && key.modifiers.contains(KeyModifiers::SHIFT)) =>
-            {
-                completion.dismiss();
-                self.apply(Action::TogglePlanMode)
             }
             Event::Key(key) if is_multiline_enter(key) => {
                 self.editor.insert_newline();
@@ -421,12 +362,6 @@ impl UiState {
         } else {
             3 + self.attachments.len() as u16
         }
-    }
-}
-
-impl Default for UiState {
-    fn default() -> Self {
-        Self::new()
     }
 }
 

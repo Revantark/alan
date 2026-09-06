@@ -106,6 +106,10 @@ impl Controller {
         self.chat.mode()
     }
 
+    pub fn toggle_mode(&mut self) {
+        self.chat.toggle_mode();
+    }
+
     pub fn usage(&self) -> Usage {
         self.chat.usage()
     }
@@ -138,9 +142,6 @@ impl Controller {
             } else {
                 true
             }),
-            // Esc with no login overlay left to close; overlays cancel
-            // themselves via `cleanup`, so this is inert.
-            Command::Cancel => CommandOutcome::NONE,
             Command::Submit { text, images } => {
                 if self
                     .submit(text, images)
@@ -151,10 +152,10 @@ impl Controller {
                     CommandOutcome::NONE
                 }
             }
-            Command::TogglePlanMode => {
-                self.chat.toggle_mode();
-                CommandOutcome::NONE
-            }
+            // Command::TogglePlanMode => {
+            //     self.chat.toggle_mode();
+            //     CommandOutcome::NONE
+            // }
             // Produced by `Controller::submit`, interpreted by `AlanRoot`.
             // Reaching `handle` directly is a stale no-op.
             Command::OpenLogin => CommandOutcome::NONE,
@@ -355,21 +356,6 @@ mod tests {
 
         controller.submit("/review".into(), vec![]);
         assert_eq!(controller.mode(), agent::Mode::Review);
-    }
-
-    #[test]
-    fn shift_tab_cycles_normal_plan_review_normal() {
-        let mut controller = make_controller();
-        assert_eq!(controller.mode(), agent::Mode::Normal);
-
-        controller.handle(Command::TogglePlanMode);
-        assert_eq!(controller.mode(), agent::Mode::Plan);
-
-        controller.handle(Command::TogglePlanMode);
-        assert_eq!(controller.mode(), agent::Mode::Review);
-
-        controller.handle(Command::TogglePlanMode);
-        assert_eq!(controller.mode(), agent::Mode::Normal);
     }
 
     /// Submitting a prompt spawns an agent task, so this needs a runtime.
