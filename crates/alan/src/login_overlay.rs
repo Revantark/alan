@@ -210,7 +210,8 @@ impl Component<AlanAction> for LoginOverlay {
                 }
                 ActionStatus::Handled
             }
-            AlanAction::Raw(event) => {
+            AlanAction::ToggleMode => ActionStatus::Continue,
+                AlanAction::Raw(event) => {
                 let Event::Key(key) = event else {
                     return ActionStatus::Handled;
                 };
@@ -249,7 +250,6 @@ impl Component<AlanAction> for LoginOverlay {
                 }
                 ActionStatus::Handled
             }
-            AlanAction::Resize => ActionStatus::Continue,
         }
     }
 

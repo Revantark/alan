@@ -16,7 +16,7 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
 
-use crossterm::event::{Event, KeyCode, KeyEventKind, MouseEventKind};
+use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers, MouseEventKind};
 use futures_util::Stream;
 use ratatui::Frame;
 use ratatui::layout::Rect;
@@ -25,13 +25,14 @@ use tui::entity::Entity;
 use tui::keymap::{InputContext, KeyMapper};
 use tui::{ActionStatus, Component, RenderContext, Subscription, SubscriptionEvent};
 
-use crate::core::{Action, CommandOutcome, CompletionController, Controller};
+use crate::core::{CommandOutcome, CompletionController, Controller};
 use crate::login_overlay::LoginOverlay;
 use crate::views::Header;
 use crate::views::component::Component as _;
 use crate::views::theme;
 use crate::views::{
-    ChatHistory, ChatSnapshot, PopupList, PopupStatus, PromptEditor, Status, StatusSnapshot, UiState,
+    ChatHistory, ChatSnapshot, PopupList, PopupStatus, PromptEditor, Status, StatusSnapshot,
+    UiState,
 };
 
 /// How often streamed agent output is collected while the app is idle.
@@ -47,9 +48,9 @@ type PollTick = ();
 /// [`AlanAction::Raw`] wrapper until a later slice moves it over.
 #[derive(Debug, Clone)]
 pub enum AlanAction {
-    Resize,
     MouseScrollUp,
     MouseScrollDown,
+    ToggleMode,
     Paste(String),
     Raw(Event),
 }
@@ -65,13 +66,22 @@ pub struct AlanKeyMapper;
 impl KeyMapper<AlanAction> for AlanKeyMapper {
     fn map(&self, event: &Event, _context: &InputContext) -> Option<AlanAction> {
         match event {
-            Event::Resize(_, _) => Some(AlanAction::Resize),
             Event::Mouse(mouse) => match mouse.kind {
                 MouseEventKind::ScrollUp => Some(AlanAction::MouseScrollUp),
                 MouseEventKind::ScrollDown => Some(AlanAction::MouseScrollDown),
                 _ => Some(AlanAction::Raw(event.clone())),
             },
             Event::Paste(data) => Some(AlanAction::Paste(data.clone())),
+            // Shift+Tab toggles the agent mode (plan/review/normal) before the
+            // editor sees it, so the popup never consumes it as tab-completion.
+            Event::Key(key)
+                if key.code == KeyCode::BackTab
+                    || (key.code == KeyCode::Tab
+                        && key.modifiers.contains(KeyModifiers::SHIFT)) =>
+            {
+                Some(AlanAction::ToggleMode)
+            }
+
             event => Some(AlanAction::Raw(event.clone())),
         }
     }
@@ -244,14 +254,6 @@ impl Component<AlanAction> for AlanRoot {
         Self: Sized,
     {
         match action {
-            AlanAction::Resize => {
-                let mut inner = self.inner.lock().expect("alan root poisoned");
-                inner.ui.apply(Action::Resize);
-                if inner.ui.take_dirty() {
-                    cx.notify();
-                }
-                ActionStatus::Handled
-            }
             // Wheel and mouse traffic is owned by `ChatHistory`; the root just
             // routes it. `ChatHistory` hit-tests its own rect and ignores
             // misses, so no parent-side geometry check is needed.
@@ -260,6 +262,13 @@ impl Component<AlanAction> for AlanRoot {
                 if let Some(chat) = chat {
                     cx.dispatch(chat, action);
                 }
+                ActionStatus::Handled
+            }
+            AlanAction::ToggleMode => {
+                let mut inner = self.inner.lock().expect("alan root poisoned");
+                inner.controller.toggle_mode();
+                drop(inner);
+                cx.notify();
                 ActionStatus::Handled
             }
             AlanAction::Raw(event) => match event {
@@ -467,52 +476,6 @@ mod tests {
 
     use super::*;
 
-    /// Map the login path (`UiState::apply`) onto pre-completion keys. Kept while
-    /// `AlanAction::Raw` still carries `Event::Key`; each arm is a 1:1 legacy
-    /// bridge, not new behavior. Used by the unit tests below; production routes
-    /// keys through `UiState::handle_event` instead.
-    #[cfg(test)]
-    fn action_from_event(event: &Event) -> Option<Action> {
-        match event {
-            Event::Key(key) => {
-                use crossterm::event::{KeyCode, KeyEventKind, KeyModifiers};
-
-                if key.kind != KeyEventKind::Press {
-                    return None;
-                }
-                Some(match key.code {
-                    KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        Action::Interrupt
-                    }
-                    KeyCode::Char('v') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        Action::PasteOrAttachImage
-                    }
-                    KeyCode::Tab | KeyCode::BackTab
-                        if key.modifiers.contains(KeyModifiers::SHIFT)
-                            || key.code == KeyCode::BackTab =>
-                    {
-                        Action::TogglePlanMode
-                    }
-                    KeyCode::Enter => Action::Submit,
-                    KeyCode::Esc => Action::ClearInput,
-                    KeyCode::Backspace => Action::Backspace,
-                    KeyCode::Char(c) => Action::Insert(c),
-                    KeyCode::PageUp | KeyCode::Up => Action::ScrollUp,
-                    KeyCode::PageDown | KeyCode::Down => Action::ScrollDown,
-                    _ => return None,
-                })
-            }
-            Event::Mouse(mouse) => Some(match mouse.kind {
-                MouseEventKind::ScrollUp => Action::MouseScrollUp,
-                MouseEventKind::ScrollDown => Action::MouseScrollDown,
-                _ => return None,
-            }),
-            Event::Resize(_, _) => Some(Action::Resize),
-            Event::Paste(data) => Some(Action::Paste(data.clone())),
-            _ => None,
-        }
-    }
-
     #[test]
     fn mapper_passes_other_events_through_unchanged() {
         let mapper = AlanKeyMapper;
@@ -522,23 +485,6 @@ mod tests {
         ));
         let mapped = mapper.map(&event, &InputContext::default());
         assert!(matches!(mapped, Some(AlanAction::Raw(actual)) if actual == event));
-    }
-
-    #[test]
-    fn mapper_maps_resize_regardless_of_context() {
-        let mapper = AlanKeyMapper;
-        for context in [
-            InputContext::default(),
-            InputContext {
-                overlay_active: true,
-                focus_active: true,
-            },
-        ] {
-            assert!(matches!(
-                mapper.map(&Event::Resize(120, 40), &context),
-                Some(AlanAction::Resize)
-            ));
-        }
     }
 
     #[test]
@@ -603,41 +549,5 @@ mod tests {
                 Some(AlanAction::Paste(actual)) if actual == "hello\nworld"
             ));
         }
-    }
-
-    #[test]
-    fn q_is_editor_input_not_quit() {
-        let event = Event::Key(crossterm::event::KeyEvent::new(
-            KeyCode::Char('q'),
-            KeyModifiers::NONE,
-        ));
-        assert_eq!(action_from_event(&event), Some(Action::Insert('q')));
-    }
-
-    #[test]
-    fn ctrl_c_interrupts_and_resize_invalidates() {
-        let interrupt = Event::Key(crossterm::event::KeyEvent::new(
-            KeyCode::Char('c'),
-            KeyModifiers::CONTROL,
-        ));
-        assert_eq!(action_from_event(&interrupt), Some(Action::Interrupt));
-        assert_eq!(
-            action_from_event(&Event::Resize(120, 40)),
-            Some(Action::Resize)
-        );
-    }
-
-    #[test]
-    fn arrow_keys_scroll_or_navigate() {
-        let up = Event::Key(crossterm::event::KeyEvent::new(
-            KeyCode::Up,
-            KeyModifiers::NONE,
-        ));
-        let down = Event::Key(crossterm::event::KeyEvent::new(
-            KeyCode::Down,
-            KeyModifiers::NONE,
-        ));
-        assert_eq!(action_from_event(&up), Some(Action::ScrollUp));
-        assert_eq!(action_from_event(&down), Some(Action::ScrollDown));
     }
 }
