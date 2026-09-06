@@ -1,24 +1,16 @@
 //! Login overlay owning the provider authentication flow.
-use std::sync::Arc;
-
+use crate::root::AlanAction;
+use crate::views::theme;
 use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers};
-use futures_util::Stream;
-use futures_util::stream::unfold;
-use providers::{
-    AuthEvent, AuthInteraction, AuthPrompt, CredentialStore, InteractionError, ProviderId,
-    ProviderRegistry,
-};
+use providers::{AuthMethod, AuthResult, CredentialStore, ProviderId, ProviderRegistry};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Margin, Rect};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::Paragraph;
-use tokio::sync::{mpsc, oneshot};
+use std::sync::Arc;
 use tui::context::Context;
-use tui::{ActionStatus, Component, RenderContext, Subscription, SubscriptionEvent, TaskHandle};
-
-use crate::root::AlanAction;
-use crate::views::theme;
+use tui::{ActionStatus, Component, RenderContext};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct LoginProvider {
@@ -33,73 +25,21 @@ enum LoginState {
         selected: usize,
     },
     Prompting {
-        provider: ProviderId,
-        prompt: AuthPrompt,
+        provider_id: ProviderId,
+        auth_method: providers::AuthMethod,
+        input: String,
     },
     Validating {
-        provider: ProviderId,
         message: String,
     },
-    Success {
-        provider: ProviderId,
-    },
+    Success,
     Error(String),
 }
-
-/// Terminal occurrence the parent subscribes to at open time.
-#[derive(Debug, Clone)]
-pub enum LoginDone {
-    Succeeded { provider: ProviderId },
-    Dismissed,
-}
-
-/// Answer channel for one prompt request: the overlay sends the user's input
-/// (or cancellation) back to the blocked `prompt()` call in the auth task.
-type PromptResponder = oneshot::Sender<Result<String, InteractionError>>;
-
-/// Intermediate auth messages sent from the background auth task to the UI
-/// thread over an `mpsc` channel (see [`ChannelAuthInteraction`]).
-///
-/// - `Prompt`: background asks the user for input and blocks on `responder`.
-///   The overlay stores `responder` as `pending_prompt` and shows the prompt;
-///   submitting the draft sends the answer back through the `oneshot`.
-/// - `Event`: one-way status update rendered as `Validating`.
-enum LoginStreamMsg {
-    Prompt {
-        provider: ProviderId,
-        prompt: AuthPrompt,
-        responder: PromptResponder,
-    },
-    Event {
-        provider: ProviderId,
-        event: AuthEvent,
-    },
-}
-
-/// Successful auth task outcome delivered via `cx.spawn`.
-struct LoginSuccess {
-    provider: ProviderId,
-}
-
-#[derive(Debug)]
-struct LoginFailed(String);
-
-impl std::fmt::Display for LoginFailed {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
-    }
-}
-
-impl std::error::Error for LoginFailed {}
 
 pub struct LoginOverlay {
     providers: Arc<ProviderRegistry>,
     credentials: Arc<dyn CredentialStore>,
     state: LoginState,
-    draft: String,
-    login_task: Option<TaskHandle>,
-    interaction_subscription: Option<Subscription>,
-    pending_prompt: Option<PromptResponder>,
 }
 
 impl LoginOverlay {
@@ -119,10 +59,6 @@ impl LoginOverlay {
                 providers: list,
                 selected: 0,
             },
-            draft: String::new(),
-            login_task: None,
-            interaction_subscription: None,
-            pending_prompt: None,
         }
     }
 
@@ -141,59 +77,51 @@ impl LoginOverlay {
         *selected = (*selected as isize + delta).clamp(0, max) as usize;
     }
 
-    /// Applies one intermediate message from the background auth task.
-    /// `Prompt` shows the input UI and stores the answer channel;
-    /// `Event` renders a status line.
-    fn apply_interaction_message(&mut self, message: LoginStreamMsg) {
-        match message {
-            LoginStreamMsg::Prompt {
-                provider,
-                prompt,
-                responder,
-            } => {
-                self.pending_prompt = Some(responder);
-                self.draft.clear();
-                self.state = LoginState::Prompting { provider, prompt };
-            }
-            LoginStreamMsg::Event { provider, event } => {
-                self.state = LoginState::Validating {
-                    provider,
-                    message: auth_event_message(event),
-                };
-            }
-        }
-    }
+    fn submit_input(&mut self, cx: &mut Context<'_, Self, AlanAction>) {
+        let LoginState::Prompting {
+            provider_id,
+            auth_method,
+            input,
+        } = &mut self.state
+        else {
+            return;
+        };
 
-    /// Starts the background login for `provider_id`:
-    /// 1. subscribe the mpsc receiver so intermediate `Prompt`/`Event`
-    ///    messages from the auth task update the overlay, then
-    /// 2. spawn the one-shot task that runs `Provider::login()` and stores
-    ///    the credential (`LoginSuccess`/`LoginFailed` on completion).
-    fn start(&mut self, provider_id: ProviderId, cx: &mut Context<'_, Self, AlanAction>) {
+        let auth_result = match auth_method {
+            AuthMethod::ApiKey => providers::AuthResult::ApiKey(std::mem::take(input)),
+        };
+
         let Some(provider) = self.providers.get(&provider_id) else {
-            self.state = LoginState::Error(format!("Unknown provider: {}", provider_id.0));
+            self.state = LoginState::Error("Provider not found".into());
             cx.notify();
             return;
         };
-        let (interaction_tx, interaction_rx) = mpsc::unbounded_channel();
-        self.interaction_subscription = Some(subscribe_interaction_messages(cx, interaction_rx));
-        self.login_task = Some(cx.spawn(
-            login_task_future(
-                Arc::clone(&provider),
-                Arc::clone(&self.credentials),
-                provider_id.clone(),
-                interaction_tx,
-            ),
+
+        let provider = Arc::clone(&provider);
+        let credentials = Arc::clone(&self.credentials);
+
+        cx.spawn(
+            async move {
+                provider
+                    .validate_auth(&auth_result)
+                    .await
+                    .map_err(|e| tui::TaskError(e.into()))?;
+
+                match auth_result {
+                    AuthResult::ApiKey(key) => {
+                        let credential = providers::Credential::ApiKey { key };
+                        if let Err(e) = credentials.put(&provider.id(), credential).await {
+                            return Err(tui::TaskError(e.into()));
+                        }
+                    }
+                }
+
+                Ok(())
+            },
             |result, overlay, cx| {
-                overlay.login_task = None;
                 match result {
-                    Ok(success) => {
-                        overlay.state = LoginState::Success {
-                            provider: success.provider.clone(),
-                        };
-                        cx.emit(LoginDone::Succeeded {
-                            provider: success.provider,
-                        });
+                    Ok(_) => {
+                        overlay.state = LoginState::Success;
                     }
                     Err(error) => {
                         overlay.state = LoginState::Error(error.to_string());
@@ -201,39 +129,15 @@ impl LoginOverlay {
                 }
                 cx.notify();
             },
-        ));
+        );
+
         self.state = LoginState::Validating {
-            provider: provider_id,
-            message: "Starting login".into(),
+            message: "Validating API key".into(),
         };
         cx.notify();
     }
 
-    fn submit_draft(&mut self) {
-        if !matches!(self.state, LoginState::Prompting { .. }) {
-            return;
-        }
-        if let Some(response) = self.pending_prompt.take() {
-            let _ = response.send(Ok(std::mem::take(&mut self.draft)));
-        }
-    }
-
-    /// Abort background work. Idempotent; called from explicit cancel paths
-    /// and from `cleanup` when the entity is removed.
-    fn cancel(&mut self) {
-        if let Some(responder) = self.pending_prompt.take() {
-            let _ = responder.send(Err(InteractionError::Cancelled));
-        }
-        if let Some(task) = self.login_task.take() {
-            task.cancel();
-        }
-        // Dropping the subscription stops the message pump.
-        self.interaction_subscription.take();
-    }
-
-    fn dismiss(&mut self, cx: &mut Context<'_, Self, AlanAction>, done: LoginDone) {
-        self.cancel();
-        cx.emit(done);
+    fn dismiss(&mut self, cx: &mut Context<'_, Self, AlanAction>) {
         cx.close_overlay();
     }
 
@@ -243,17 +147,37 @@ impl LoginOverlay {
                 providers,
                 selected,
             } => {
-                let Some(provider) = providers.get(*selected).map(|p| p.id.clone()) else {
+                let Some(provider_id) = providers.get(*selected).map(|p| p.id.clone()) else {
                     self.state = LoginState::Error("No providers available".into());
                     cx.notify();
                     return;
                 };
-                self.start(provider, cx);
+
+                let Some(provider) = self.providers.get(&provider_id) else {
+                    self.state = LoginState::Error("Provider not found".into());
+                    cx.notify();
+                    return;
+                };
+
+                let auth_method = provider.auth_methods().into_iter().next();
+
+                if auth_method.is_none() {
+                    self.state = LoginState::Error("No authentication methods available".into());
+                    cx.notify();
+                    return;
+                }
+
+                self.state = LoginState::Prompting {
+                    provider_id,
+                    auth_method: auth_method.unwrap(),
+                    input: String::new(),
+                };
+                cx.notify();
             }
-            LoginState::Prompting { .. } => self.submit_draft(),
+            LoginState::Prompting { .. } => self.submit_input(cx),
             LoginState::Validating { .. } => {}
             LoginState::Success { .. } | LoginState::Error(_) => {
-                self.dismiss(cx, LoginDone::Dismissed);
+                self.dismiss(cx);
             }
         }
     }
@@ -280,8 +204,8 @@ impl Component<AlanAction> for LoginOverlay {
                 ActionStatus::Handled
             }
             AlanAction::Paste(text) => {
-                if matches!(self.state, LoginState::Prompting { .. }) {
-                    self.draft.push_str(text);
+                if let LoginState::Prompting { input, .. } = &mut self.state {
+                    input.push_str(text);
                     cx.notify();
                 }
                 ActionStatus::Handled
@@ -303,23 +227,23 @@ impl Component<AlanAction> for LoginOverlay {
                         cx.notify();
                     }
                     KeyCode::Enter => self.on_enter(cx),
-                    KeyCode::Esc => self.dismiss(cx, LoginDone::Dismissed),
+                    KeyCode::Esc => self.dismiss(cx),
                     KeyCode::Backspace => {
-                        if matches!(self.state, LoginState::Prompting { .. }) {
-                            self.draft.pop();
+                        if let LoginState::Prompting { input, .. } = &mut self.state {
+                            input.pop();
                             cx.notify();
                         }
                     }
                     KeyCode::Char(character)
                         if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT =>
                     {
-                        if matches!(self.state, LoginState::Prompting { .. }) {
-                            self.draft.push(character);
+                        if let LoginState::Prompting { input, .. } = &mut self.state {
+                            input.push(character);
                             cx.notify();
                         }
                     }
                     KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        self.dismiss(cx, LoginDone::Dismissed);
+                        self.dismiss(cx);
                     }
                     _ => {}
                 }
@@ -327,13 +251,6 @@ impl Component<AlanAction> for LoginOverlay {
             }
             AlanAction::Resize => ActionStatus::Continue,
         }
-    }
-
-    fn cleanup(&mut self, _cx: &mut Context<'_, Self, AlanAction>)
-    where
-        Self: Sized,
-    {
-        self.cancel();
     }
 
     fn render(&self, frame: &mut Frame, area: Rect, _cx: &RenderContext<'_, AlanAction>) {
@@ -378,14 +295,9 @@ impl Component<AlanAction> for LoginOverlay {
                     "↑↓ select · Enter confirm · Esc cancel",
                 );
             }
-            LoginState::Prompting { prompt, .. } => {
-                let secret = matches!(prompt, AuthPrompt::Secret { .. });
-                let value = if secret {
-                    "•".repeat(self.draft.chars().count())
-                } else {
-                    self.draft.clone()
-                };
-                let prompt_line = Line::from(prompt_message(prompt));
+            LoginState::Prompting { input, .. } => {
+                let value = "•".repeat(input.chars().count());
+                let prompt_line = Line::from("Enter API key");
                 let input_line = Line::from(vec![
                     Span::styled("› ", Style::default().fg(theme::PROMPT_FG)),
                     Span::styled(value.clone(), Style::default().fg(theme::EDITOR_FG)),
@@ -406,11 +318,8 @@ impl Component<AlanAction> for LoginOverlay {
                 frame.render_widget(Paragraph::new(message.as_str()), content_area);
                 draw_shortcuts(frame, shortcuts_area, "Esc cancel");
             }
-            LoginState::Success { provider } => {
-                frame.render_widget(
-                    Paragraph::new(format!("Logged in to {}", provider.0)),
-                    content_area,
-                );
+            LoginState::Success => {
+                frame.render_widget(Paragraph::new(String::from("Logged in")), content_area);
                 draw_shortcuts(frame, shortcuts_area, "Esc close");
             }
             LoginState::Error(message) => {
@@ -425,106 +334,6 @@ impl Component<AlanAction> for LoginOverlay {
     }
 }
 
-// ── Background-auth bridge ────────────────────────────────────────────────
-// The provider's `login()` runs on a background task and cannot touch UI
-// state. `ChannelAuthInteraction` adapts `AuthInteraction` to message
-// passing: `prompt()`/`notify()` send `LoginStreamMsg` over `mpsc`, and the
-// overlay pumps them back on the UI thread via `subscribe_stream`. Prompt
-// answers travel the other way through a per-prompt `oneshot`.
-
-/// Runs `Provider::login()` then stores the credential; the single terminal
-/// result is delivered by `cx.spawn`.
-async fn login_task_future(
-    provider: Arc<dyn providers::Provider>,
-    credentials: Arc<dyn CredentialStore>,
-    provider_id: ProviderId,
-    interaction_tx: mpsc::UnboundedSender<LoginStreamMsg>,
-) -> Result<LoginSuccess, tui::TaskError> {
-    let mut interaction = ChannelAuthInteraction::new(provider_id.clone(), interaction_tx);
-    let credential = provider
-        .auth()
-        .login(&mut interaction)
-        .await
-        .map_err(|error| tui::TaskError(Box::new(LoginFailed(error.to_string()))))?;
-    credentials
-        .put(&provider_id, credential.clone())
-        .await
-        .map_err(|error| tui::TaskError(Box::new(LoginFailed(error.to_string()))))?;
-    Ok(LoginSuccess {
-        provider: provider_id,
-    })
-}
-
-/// Pumps intermediate `Prompt`/`Event` messages from the auth task into
-/// `apply_interaction_message` on the UI thread.
-fn subscribe_interaction_messages(
-    cx: &mut Context<'_, LoginOverlay, AlanAction>,
-    rx: mpsc::UnboundedReceiver<LoginStreamMsg>,
-) -> Subscription {
-    cx.subscribe_stream(
-        interaction_messages_from_channel(rx),
-        |event, overlay, cx| {
-            match event {
-                SubscriptionEvent::Item(message) => overlay.apply_interaction_message(message),
-                SubscriptionEvent::Closed => {
-                    overlay.interaction_subscription = None;
-                }
-            }
-            cx.notify();
-        },
-    )
-}
-
-fn interaction_messages_from_channel(
-    rx: mpsc::UnboundedReceiver<LoginStreamMsg>,
-) -> impl Stream<Item = LoginStreamMsg> + Send + 'static {
-    unfold(rx, |mut rx| async move {
-        rx.recv().await.map(|message| (message, rx))
-    })
-}
-
-fn auth_event_message(event: AuthEvent) -> String {
-    match event {
-        AuthEvent::Info(message) | AuthEvent::Progress(message) => message,
-        AuthEvent::AuthUrl { url, instructions } => instructions
-            .map(|text| format!("{text}: {url}"))
-            .unwrap_or(url),
-    }
-}
-
-struct ChannelAuthInteraction {
-    provider: ProviderId,
-    sender: mpsc::UnboundedSender<LoginStreamMsg>,
-}
-
-impl ChannelAuthInteraction {
-    fn new(provider: ProviderId, sender: mpsc::UnboundedSender<LoginStreamMsg>) -> Self {
-        Self { provider, sender }
-    }
-}
-
-#[async_trait::async_trait]
-impl AuthInteraction for ChannelAuthInteraction {
-    async fn prompt(&mut self, prompt: AuthPrompt) -> Result<String, InteractionError> {
-        let (sender, receiver) = oneshot::channel();
-        self.sender
-            .send(LoginStreamMsg::Prompt {
-                provider: self.provider.clone(),
-                prompt,
-                responder: sender,
-            })
-            .map_err(|_| InteractionError::Cancelled)?;
-        receiver.await.map_err(|_| InteractionError::Cancelled)?
-    }
-
-    fn notify(&mut self, event: AuthEvent) {
-        let _ = self.sender.send(LoginStreamMsg::Event {
-            provider: self.provider.clone(),
-            event,
-        });
-    }
-}
-
 fn draw_shortcuts(frame: &mut Frame, area: Rect, text: &str) {
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(
@@ -533,12 +342,6 @@ fn draw_shortcuts(frame: &mut Frame, area: Rect, text: &str) {
         ))),
         area,
     );
-}
-
-fn prompt_message(prompt: &AuthPrompt) -> String {
-    match prompt {
-        AuthPrompt::Secret { message } => message.clone(),
-    }
 }
 
 fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
@@ -555,88 +358,4 @@ fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
     ])
     .areas(horizontal[1]);
     vertical[1]
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use providers::ProviderId;
-
-    fn overlay_with(ids: &[&str]) -> LoginOverlay {
-        let mut overlay = LoginOverlay::new(
-            Arc::new(ProviderRegistry::default()),
-            Arc::new(providers::InMemoryCredentialStore::new()),
-        );
-        overlay.state = LoginState::Selecting {
-            providers: ids
-                .iter()
-                .map(|id| LoginProvider {
-                    id: ProviderId::new(*id),
-                    name: (*id).to_owned(),
-                })
-                .collect(),
-            selected: 0,
-        };
-        overlay
-    }
-
-    #[test]
-    fn selection_clamps_at_the_ends() {
-        let mut overlay = overlay_with(&["a", "b"]);
-        overlay.move_selection(-5);
-        assert!(matches!(
-            overlay.state,
-            LoginState::Selecting { selected: 0, .. }
-        ));
-        overlay.move_selection(99);
-        assert!(matches!(
-            overlay.state,
-            LoginState::Selecting { selected: 1, .. }
-        ));
-    }
-
-    #[test]
-    fn selection_ignores_empty_provider_lists() {
-        let mut overlay = overlay_with(&[]);
-        overlay.move_selection(1);
-        assert!(matches!(
-            overlay.state,
-            LoginState::Selecting { selected: 0, .. }
-        ));
-    }
-
-    #[test]
-    fn prompt_arrival_clears_a_stale_draft() {
-        let mut overlay = overlay_with(&["a"]);
-        overlay.draft.push_str("stale");
-        let (responder, _) = oneshot::channel();
-        overlay.apply_interaction_message(LoginStreamMsg::Prompt {
-            provider: ProviderId::new("a"),
-            prompt: AuthPrompt::Secret {
-                message: "key".into(),
-            },
-            responder,
-        });
-        assert!(overlay.draft.is_empty());
-        assert!(matches!(overlay.state, LoginState::Prompting { .. }));
-    }
-
-    #[test]
-    fn event_arrival_shows_validating_status() {
-        let mut overlay = overlay_with(&["a"]);
-        overlay.apply_interaction_message(LoginStreamMsg::Event {
-            provider: ProviderId::new("a"),
-            event: AuthEvent::Progress("Validating".into()),
-        });
-        assert!(matches!(overlay.state, LoginState::Validating { .. }));
-    }
-
-    #[test]
-    fn auth_url_without_instructions_falls_back_to_the_url() {
-        let message = auth_event_message(AuthEvent::AuthUrl {
-            url: "https://example.test".into(),
-            instructions: None,
-        });
-        assert_eq!(message, "https://example.test");
-    }
 }

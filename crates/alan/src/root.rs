@@ -26,7 +26,7 @@ use tui::keymap::{InputContext, KeyMapper};
 use tui::{ActionStatus, Component, RenderContext, Subscription, SubscriptionEvent};
 
 use crate::core::{Action, CommandOutcome, CompletionController, Controller};
-use crate::login_overlay::{LoginDone, LoginOverlay};
+use crate::login_overlay::LoginOverlay;
 use crate::views::Header;
 use crate::views::component::Component as _;
 use crate::views::theme;
@@ -118,30 +118,10 @@ impl AlanRoot {
     }
 
     fn open_login(&mut self, cx: &mut Context<'_, Self, AlanAction>) {
-        let overlay = cx.open_overlay(LoginOverlay::new(
+        cx.open_overlay(LoginOverlay::new(
             Arc::clone(&self.providers),
             Arc::clone(&self.credentials),
         ));
-        cx.subscribe_once::<LoginDone, _, _>(overlay, |done, root, _, cx| match done {
-            LoginDone::Succeeded { provider } => {
-                root.login_done(provider.clone(), cx);
-            }
-            LoginDone::Dismissed => {}
-        });
-    }
-
-    fn login_done(
-        &mut self,
-        provider: providers::ProviderId,
-        cx: &mut Context<'_, Self, AlanAction>,
-    ) {
-        let mut inner = self.inner.lock().expect("alan root poisoned");
-        inner
-            .controller
-            .push_info(format!("Logged in to {}", provider.0));
-        // The transcript revision bumped but `UiState` doesn't know; the
-        // 16ms tick stream would catch it within a frame, but notify now.
-        cx.notify();
     }
 
     /// Push the completion snapshot into the popup entity. Plain-data mapping

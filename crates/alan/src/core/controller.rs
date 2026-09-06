@@ -182,10 +182,6 @@ impl Controller {
         self.chat.submit(text.to_owned(), images);
         None
     }
-
-    pub fn push_info(&mut self, text: impl Into<String>) {
-        self.chat.push_info(text);
-    }
 }
 
 #[cfg(test)]
