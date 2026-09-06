@@ -55,9 +55,20 @@ impl FocusManager {
         }
     }
 
-    /// Set the current focus.
+    /// Set the current focus, retaining the previous focus for `drop_focus`.
     pub(crate) fn focus(&mut self, id: EntityId) {
+        if self.current == Some(id) {
+            return;
+        }
+        if let Some(current) = self.current {
+            self.saved.push(Some(current));
+        }
         self.current = Some(id);
+    }
+
+    /// Restore the most recently saved focus.
+    pub(crate) fn drop_focus(&mut self) {
+        self.current = self.saved.pop().flatten();
     }
 
     /// The currently focused entity, if any.
@@ -214,6 +225,46 @@ mod tests {
         manager.remove_entity(a);
         manager.focus_prev();
         assert_eq!(manager.current(), Some(b));
+    }
+
+    #[test]
+    fn focus_entity_stacks_previous_focus() {
+        let a = EntityId::allocate();
+        let b = EntityId::allocate();
+        let c = EntityId::allocate();
+        let mut manager = FocusManager::default();
+
+        manager.focus(a);
+        manager.focus(b);
+        manager.focus(c);
+        manager.drop_focus();
+        assert_eq!(manager.current(), Some(b));
+        manager.drop_focus();
+        assert_eq!(manager.current(), Some(a));
+    }
+
+    #[test]
+    fn focusing_current_entity_does_not_add_stack_entry() {
+        let a = EntityId::allocate();
+        let b = EntityId::allocate();
+        let mut manager = FocusManager::default();
+
+        manager.focus(a);
+        manager.focus(a);
+        manager.focus(b);
+        manager.drop_focus();
+        assert_eq!(manager.current(), Some(a));
+        manager.drop_focus();
+        assert_eq!(manager.current(), None);
+    }
+
+    #[test]
+    fn dropping_focus_with_empty_stack_clears_focus() {
+        let a = EntityId::allocate();
+        let mut manager = FocusManager::default();
+        manager.focus(a);
+        manager.drop_focus();
+        assert_eq!(manager.current(), None);
     }
 
     #[test]

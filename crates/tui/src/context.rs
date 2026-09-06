@@ -411,6 +411,11 @@ impl<'a, T: Component<A>, A: 'static> Context<'a, T, A> {
         self.runtime_state.dirty = true;
     }
 
+    pub fn drop_focus(&mut self) {
+        self.runtime_state.focus.drop_focus();
+        self.runtime_state.dirty = true;
+    }
+
     pub fn focus_order<I: IntoIterator<Item = EntityId>>(&mut self, order: I) {
         self.runtime_state
             .focus
