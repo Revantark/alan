@@ -21,6 +21,8 @@ use ratatui::widgets::{Block, Padding, Paragraph};
 use tui::context::Context;
 use tui::{ActionStatus, Component, RenderContext};
 
+use crate::root::AlanAction;
+
 const VISIBLE_ROWS: usize = 5;
 const CONTENT_PADDING: Padding = Padding::new(2, 2, 1, 1);
 
@@ -124,20 +126,15 @@ impl PopupListv2 {
     }
 }
 
-impl Component<crate::root::AlanAction> for PopupListv2 {
-    fn render(
-        &self,
-        frame: &mut Frame,
-        area: Rect,
-        _: &RenderContext<'_, crate::root::AlanAction>,
-    ) {
+impl Component<AlanAction> for PopupListv2 {
+    fn render(&self, frame: &mut Frame, area: Rect, _: &RenderContext<'_, AlanAction>) {
         self.render_into(frame, area);
     }
 
     fn handle_action(
         &mut self,
-        action: &crate::root::AlanAction,
-        cx: &mut Context<'_, Self, crate::root::AlanAction>,
+        action: &AlanAction,
+        cx: &mut Context<'_, Self, AlanAction>,
     ) -> ActionStatus {
         if !self.open {
             return ActionStatus::Continue;
@@ -145,7 +142,7 @@ impl Component<crate::root::AlanAction> for PopupListv2 {
 
         // Only key presses are navigation; release events and everything else
         // fall through to the editor.
-        let crate::root::AlanAction::Raw(crossterm::event::Event::Key(key)) = action else {
+        let AlanAction::Raw(crossterm::event::Event::Key(key)) = action else {
             return ActionStatus::Continue;
         };
         if key.kind != KeyEventKind::Press {

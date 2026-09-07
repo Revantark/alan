@@ -51,6 +51,19 @@ impl<'a, A> RenderContext<'a, A> {
         };
         self.store.render_entity(entity.id(), frame, area, &cx);
     }
+
+    /// Read another entity's state during render. The target's slot is locked
+    /// briefly and released; this performs no I/O or mutation, so it stays
+    /// within the render contract. Reading the entity currently being rendered
+    /// returns `None`: its slot is already held by the render pass, so
+    /// re-locking it would deadlock.
+    pub fn read<E: 'static, R>(&self, target: Entity<E>, f: impl FnOnce(&E) -> R) -> Option<R> {
+        if Some(target.id()) == self.entity {
+            None
+        } else {
+            self.store.typed_read(target.id(), f)
+        }
+    }
 }
 
 /// Whether an action was handled or should continue propagating.
