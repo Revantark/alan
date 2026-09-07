@@ -14,17 +14,3 @@ pub struct ImageAttachment {
     /// Raw base64-encoded image data (no `data:` prefix).
     pub base64_data: String,
 }
-
-/// Semantic commands emitted by frontend state and handled by application core.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Command {
-    Interrupt,
-    Submit {
-        text: String,
-        images: Vec<ImageAttachment>,
-    },
-    /// Request the root to open the login overlay entity. Only `AlanRoot`
-    /// interprets it: reaching `Controller::handle` as `OpenLogin` is a stale
-    /// no-op, and `/login` is produced by `Controller::submit`.
-    OpenLogin,
-}

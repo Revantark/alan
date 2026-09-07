@@ -192,15 +192,17 @@ impl ChatController {
         }
     }
 
-    pub fn abort(&mut self) {
+    pub fn abort(&mut self) -> bool {
         if !self.busy {
-            return;
+            return false;
         }
 
         self.aborting = true;
         if let Some(stream) = &self.stream {
             stream.abort();
+            return true;
         }
+        false
     }
 
     pub fn poll(&mut self) -> Poll {

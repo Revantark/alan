@@ -124,19 +124,6 @@ impl ChatHistory {
         self.view.borrow_mut().flush_wheel();
     }
 
-    /// Drop queued wheel momentum, e.g. when the user starts typing.
-    pub fn cancel_wheel(&mut self) {
-        self.view.borrow_mut().pending_wheel = 0;
-    }
-
-    /// Re-enable bottom-following, snapping the viewport to the newest content
-    /// on the next render. Called by the parent when a prompt is submitted.
-    pub fn resume_follow(&mut self) {
-        let mut view = self.view.borrow_mut();
-        view.follow_output = true;
-        view.scroll_target = view.max_scroll;
-    }
-
     /// Whether there is a non-empty selection active.
     pub fn has_active_selection(&self) -> bool {
         self.view
@@ -941,32 +928,6 @@ mod tests {
         assert!(state.flush_wheel());
         assert!(view(&state).scroll_offset > 80);
         assert!(view(&state).scroll_offset <= 80 + 12);
-    }
-
-    #[test]
-    fn cancel_wheel_drops_queued_momentum() {
-        let mut state = ChatHistory::default();
-        view_mut(&mut state).sync_scroll(200, 20);
-        view_mut(&mut state).scroll_by(-100);
-        state.push_wheel(WHEEL_LINES_PER_NOTCH);
-        assert_eq!(view(&state).pending_wheel, WHEEL_LINES_PER_NOTCH);
-
-        state.cancel_wheel();
-        assert_eq!(view(&state).pending_wheel, 0);
-        assert!(!state.flush_wheel());
-    }
-
-    #[test]
-    fn resume_follow_snaps_to_bottom() {
-        let mut state = ChatHistory::default();
-        view_mut(&mut state).sync_scroll(100, 20);
-        view_mut(&mut state).scroll_by(-10);
-        assert!(!view(&state).follow_output);
-
-        state.resume_follow();
-        assert!(view(&state).follow_output);
-        // The next render's `sync_scroll` snaps the offset to the bottom.
-        assert_eq!(view_mut(&mut state).sync_scroll(100, 20), 80);
     }
 
     #[test]

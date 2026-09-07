@@ -1,6 +1,6 @@
 //! UI-independent application coordinator.
 
-use super::action::{Command, ImageAttachment};
+use super::action::ImageAttachment;
 use super::chat::{ChatController, Entry};
 use super::command::SlashCommand;
 use agent::Agent;
@@ -36,32 +36,6 @@ pub enum Activity {
 
     /// Waiting on a prompt.
     Idle,
-}
-
-/// Outcome of [`Controller::handle`]: whether the app should quit and
-/// whether the root should open the login overlay entity.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct CommandOutcome {
-    pub quit: bool,
-    pub open_login: bool,
-}
-
-impl CommandOutcome {
-    pub const NONE: Self = Self {
-        quit: false,
-        open_login: false,
-    };
-    pub const OPEN_LOGIN: Self = Self {
-        quit: false,
-        open_login: true,
-    };
-
-    fn quit(quit: bool) -> Self {
-        Self {
-            quit,
-            open_login: false,
-        }
-    }
 }
 
 /// Coordinates feature controllers. It does not render or handle terminal types.
@@ -117,43 +91,47 @@ impl Controller {
         self.chat.agent()
     }
 
+    pub fn abort(&mut self) -> bool {
+        self.chat.abort()
+    }
+
     pub fn poll(&mut self) -> Poll {
         self.chat.poll()
     }
 
-    pub fn handle(&mut self, command: Command) -> CommandOutcome {
-        match command {
-            Command::Interrupt => CommandOutcome::quit(if self.chat.is_busy() {
-                self.chat.abort();
-                false
-            } else {
-                true
-            }),
-            Command::Submit { text, images } => {
-                if self
-                    .submit(text, images)
-                    .is_some_and(|command| matches!(command, Command::OpenLogin))
-                {
-                    CommandOutcome::OPEN_LOGIN
-                } else {
-                    CommandOutcome::NONE
-                }
-            }
-            // Command::TogglePlanMode => {
-            //     self.chat.toggle_mode();
-            //     CommandOutcome::NONE
-            // }
-            // Produced by `Controller::submit`, interpreted by `AlanRoot`.
-            // Reaching `handle` directly is a stale no-op.
-            Command::OpenLogin => CommandOutcome::NONE,
-        }
-    }
+    // pub fn handle(&mut self, command: Command) -> CommandOutcome {
+    //     match command {
+    //         Command::Interrupt => CommandOutcome::quit(if self.chat.is_busy() {
+    //             self.chat.abort();
+    //             false
+    //         } else {
+    //             true
+    //         }),
+    //         Command::Submit { text, images } => {
+    //             if self
+    //                 .submit(text, images)
+    //                 .is_some_and(|command| matches!(command, Command::OpenLogin))
+    //             {
+    //                 CommandOutcome::OPEN_LOGIN
+    //             } else {
+    //                 CommandOutcome::NONE
+    //             }
+    //         }
+    //         // Command::TogglePlanMode => {
+    //         //     self.chat.toggle_mode();
+    //         //     CommandOutcome::NONE
+    //         // }
+    //         // Produced by `Controller::submit`, interpreted by `AlanRoot`.
+    //         // Reaching `handle` directly is a stale no-op.
+    //         Command::OpenLogin => CommandOutcome::NONE,
+    //     }
+    // }
 
-    pub fn submit(&mut self, text: String, images: Vec<ImageAttachment>) -> Option<Command> {
+    pub fn submit(&mut self, text: String, images: Vec<ImageAttachment>) -> Option<SlashCommand> {
         // Not trimmed: a leading space means this is a prompt.
         if let Some(command) = SlashCommand::parse(&text) {
             match command {
-                SlashCommand::Login => return Some(Command::OpenLogin),
+                SlashCommand::Login => return Some(SlashCommand::Login),
                 SlashCommand::Plan => self.chat.set_mode(agent::Mode::Plan),
                 SlashCommand::Review => self.chat.set_mode(agent::Mode::Review),
                 SlashCommand::Normal => self.chat.set_mode(agent::Mode::Normal),
