@@ -148,6 +148,7 @@ impl AgentBuilder {
         let mut context = AgentContext::new(self.system_prompt, self.skills, self.tools);
         context.hydrate(messages, usage);
 
+        let info = self.model.info().clone();
         Ok(Agent {
             model: Mutex::new(self.model),
             context: Mutex::new(context),
@@ -158,6 +159,7 @@ impl AgentBuilder {
             session_manager: self.session_manager,
             active_session: Mutex::new(active_session),
             working_directory: self.working_directory,
+            model_info: info,
         })
     }
 }

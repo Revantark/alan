@@ -97,6 +97,10 @@ impl Controller {
         self.chat.mode()
     }
 
+    pub fn model_name(&self) -> String {
+        self.chat.model_name()
+    }
+
     pub fn toggle_mode(&mut self) {
         self.chat.toggle_mode();
     }

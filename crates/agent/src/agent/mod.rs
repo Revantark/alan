@@ -12,7 +12,7 @@ mod tests;
 use crate::session::{Session, SessionManager};
 use crate::{AgentError, AgentMessage};
 use llm::Usage;
-use providers::Model;
+use providers::{Model, ModelInfo};
 use std::path::PathBuf;
 use std::sync::{
     Arc,
@@ -41,6 +41,7 @@ pub struct Agent {
     pub(super) active_session: Mutex<Option<Session>>,
     /// Working directory reported in the conversation's first message.
     pub(super) working_directory: Option<PathBuf>,
+    pub(super) model_info: ModelInfo,
 }
 
 impl Agent {
@@ -119,5 +120,9 @@ impl Agent {
 
     pub async fn usage(&self) -> Usage {
         self.context.lock().await.usage.clone()
+    }
+
+    pub fn info(&self) -> ModelInfo {
+        self.model_info.clone()
     }
 }
