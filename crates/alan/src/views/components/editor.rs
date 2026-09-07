@@ -163,7 +163,10 @@ impl PromptEditor {
                 ActionStatus::Handled
             }
             event => {
-                if !self.editor.input(event) {
+                let o = self.editor.cursor();
+                let modified = self.editor.input(event);
+                let t = self.editor.cursor();
+                if !modified && o == t {
                     return ActionStatus::Continue;
                 }
                 refresh_completion(
