@@ -41,10 +41,12 @@ pub struct ChatController {
     aborting: bool,
     revision: u64,
     usage: Usage,
+    model_name: String,
 }
 
 impl ChatController {
     pub fn new(agent: Agent) -> Self {
+        let name = agent.info().name;
         Self {
             agent: Arc::new(agent),
             entries: Vec::new(),
@@ -53,6 +55,7 @@ impl ChatController {
             aborting: false,
             revision: 0,
             usage: Usage::default(),
+            model_name: name,
         }
     }
 
@@ -63,6 +66,7 @@ impl ChatController {
     pub async fn restore_session_history(&mut self) {
         let messages = self.agent.messages().await;
         self.usage = self.agent.usage().await;
+        self.model_name = self.agent.info().name;
         self.entries.clear();
 
         for message in messages {
@@ -127,6 +131,10 @@ impl ChatController {
 
     pub fn usage(&self) -> Usage {
         self.usage.clone()
+    }
+
+    pub fn model_name(&self) -> String {
+        self.model_name.clone()
     }
 
     pub fn toggle_mode(&mut self) {

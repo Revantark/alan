@@ -17,6 +17,7 @@ pub struct StatusSnapshot {
     pub activity: Activity,
     pub mode: Mode,
     pub usage: Usage,
+    pub model_name: String,
 }
 
 /// Status line between the chat and the editor: activity, key hints, and the
@@ -89,6 +90,11 @@ fn status_line(snap: &StatusSnapshot) -> Line<'static> {
         Span::styled(status.hints, Style::default().fg(theme::MUTED_FG)),
     ];
     spans.extend(badges(snap));
+    spans.push(Span::styled(
+        format!(" · {}", snap.model_name),
+        Style::default().fg(theme::MUTED_FG),
+    ));
+
     Line::from(spans)
 }
 

@@ -178,6 +178,7 @@ impl AlanRoot {
             activity: inner.controller.activity(),
             mode: inner.controller.mode(),
             usage: inner.controller.usage(),
+            model_name: inner.controller.model_name(),
         };
         let unchanged = cx
             .read(status, |status| status.matches(&snap))
