@@ -31,7 +31,7 @@ use crate::core::{Controller, ImageAttachment};
 use crate::login_overlay::LoginOverlay;
 use crate::views::Header;
 use crate::views::theme;
-use crate::views::{ChatHistory, ChatSnapshot, PromptEditor, Status, StatusSnapshot};
+use crate::views::{ChatHistory, ChatSnapshot, PromptEditor};
 
 /// How often streamed agent output is collected while the app is idle.
 const TICK_INTERVAL: Duration = Duration::from_millis(16);
@@ -111,7 +111,6 @@ pub struct AlanRoot {
     /// Retained so the poll stream keeps running. Dropping it cancels the stream.
     poll: Option<Subscription>,
     header: Option<Entity<Header>>,
-    status: Option<Entity<Status>>,
     chat: Option<Entity<ChatHistory>>,
     editor: Option<Entity<PromptEditor>>,
 }
@@ -128,7 +127,6 @@ impl AlanRoot {
             credentials,
             poll: None,
             header: None,
-            status: None,
             chat: None,
             editor: None,
         }
@@ -141,39 +139,23 @@ impl AlanRoot {
         ));
     }
 
-    /// Push the status-line snapshot into the `Status` entity. Plain-data
-    /// mapping lives here so `Status` never names core types. Skips the push
-    /// when the snapshot is unchanged so the 16ms poll tick stays quiet.
-    fn push_status(&self, cx: &mut Context<'_, Self, AlanAction>, controller: &mut Controller) {
-        let Some(status) = self.status else {
-            return;
-        };
-        let snap = StatusSnapshot {
-            activity: controller.activity(),
-            mode: controller.mode(),
-            usage: controller.usage(),
-            model_name: controller.model_name(),
-        };
-        let unchanged = cx
-            .read(status, |status| status.matches(&snap))
-            .unwrap_or(false);
-        if unchanged {
-            return;
-        }
-        cx.update(status, |status| status.set(snap));
-    }
-
-    /// Push the transcript snapshot into the `ChatHistory` entity. Plain-data
-    /// mapping lives here so `ChatHistory` never names a core type. Skips the
-    /// push when the snapshot is unchanged so the 16ms poll tick stays quiet.
+    /// Push the transcript snapshot (and its pinned status line) into the
+    /// `ChatHistory` entity. Plain-data mapping lives here so `ChatHistory`
+    /// never names a core type. Status (activity, mode, cost, model) can change
+    /// between chat revisions, so it is pushed every tick; the transcript is
+    /// skipped when its revision is unchanged so the 16ms poll tick stays
+    /// quiet.
     fn push_chat(&self, cx: &mut Context<'_, Self, AlanAction>, controller: &mut Controller) {
         let Some(chat) = self.chat else {
             return;
         };
 
         let revision = controller.chat_revision();
+        let activity = controller.activity();
         let unchanged = cx
-            .read(chat, |chat| chat.matches_revision(revision))
+            .read(chat, |chat| {
+                chat.matches_revision(revision) && chat.matches_activity(activity)
+            })
             .unwrap_or(false);
         if unchanged {
             return;
@@ -182,6 +164,10 @@ impl AlanRoot {
         let snap = ChatSnapshot {
             entries: controller.chat().to_vec(),
             revision,
+            activity,
+            mode: controller.mode(),
+            usage: controller.usage(),
+            model_name: controller.model_name(),
         };
         cx.update(chat, |chat| chat.set(snap));
     }
@@ -193,17 +179,16 @@ impl Component<AlanAction> for AlanRoot {
         Self: Sized,
     {
         self.header = Some(cx.insert(Header));
-        self.status = Some(cx.insert(Status::default()));
         self.chat = Some(cx.insert(ChatHistory::default()));
         self.editor = Some(cx.insert(PromptEditor::new()));
         cx.focus_entity(self.editor.expect("editor entity"));
         // The root stays the input target; it routes mouse / wheel / page
         // actions to the transcript and keyboard / paste to the editor.
-        // Seed the status line and transcript so the first frame isn't blank
-        // before the first poll tick; later ticks skip them while unchanged.
+        // Seed the transcript (and its pinned status line) so the first frame isn't
+        // blank before the first poll tick; later ticks skip them while
+        // unchanged.
         {
             let mut controller = self.controller.lock().expect("alan root poisoned");
-            self.push_status(cx, &mut controller);
             self.push_chat(cx, &mut controller);
         }
         self.poll = Some(cx.subscribe_stream(poll_ticks(), |event, root, cx| {
@@ -215,7 +200,6 @@ impl Component<AlanAction> for AlanRoot {
 
             let chat = root.chat;
 
-            root.push_status(cx, &mut controller);
             root.push_chat(cx, &mut controller);
             // Apply queued wheel notches on the tick.
             if let Some(chat) = chat
@@ -356,7 +340,6 @@ impl Component<AlanAction> for AlanRoot {
 
     fn render(&self, frame: &mut Frame, area: Rect, cx: &RenderContext<'_, AlanAction>) {
         let chat = self.chat;
-        let status = self.status;
 
         // Body area is everything below the header row (if present).
         let body_area = if let Some(header) = self.header {
@@ -370,14 +353,15 @@ impl Component<AlanAction> for AlanRoot {
 
         // The footer is sized from the wrapped editor rows plus attachments,
         // measured from the editor entity itself so it always reflects the
-        // current buffer.
+        // current buffer. `ChatHistory` owns the pinned status line, which
+        // occupies the last row of the chat area, directly above the footer.
         let editor = self.editor.expect("editor entity");
         let editor_width = body_area.width.saturating_sub(theme::PROMPT_GUTTER);
         let editor_rows = cx.read(editor, |e| e.rows(editor_width)).unwrap_or(1);
         let attachment_height = cx.read(editor, |e| e.attachment_height()).unwrap_or(0);
         let [chat_area, footer_area] = Layout::vertical([
             Constraint::Min(1),
-            Constraint::Length(4 + editor_rows + attachment_height),
+            Constraint::Length(2 + editor_rows + attachment_height),
         ])
         .areas(body_area);
 
@@ -385,31 +369,9 @@ impl Component<AlanAction> for AlanRoot {
             cx.render_entity(chat, frame, chat_area);
         }
         cx.render_entity(editor, frame, footer_area);
-
-        paint_status(status, footer_area, attachment_height, frame, cx);
         // paint_popup(popup, footer_area, frame, cx);
         // paint_popup_v2(self.popup_v2, footer_area, frame, cx);
     }
-}
-
-/// Paint the status line over the footer's reserved status row, which sits one
-/// row below the attachment area (`area.y + attachment_height + 1`).
-fn paint_status(
-    status: Option<Entity<Status>>,
-    footer: Rect,
-    attachment_height: u16,
-    frame: &mut Frame,
-    cx: &RenderContext<'_, AlanAction>,
-) {
-    let Some(status) = status else {
-        return;
-    };
-    let status_area = Rect {
-        y: footer.y + attachment_height + 1,
-        height: 1,
-        ..footer
-    };
-    cx.render_entity(status, frame, status_area);
 }
 
 fn poll_ticks() -> impl Stream<Item = PollTick> + Send + 'static {

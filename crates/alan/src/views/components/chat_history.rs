@@ -5,17 +5,22 @@
 //! `cx.update`; mouse / wheel / PageUp / PageDown input is routed to it by the
 //! parent and handled here.
 
+use crate::core::Activity;
 use crate::core::Entry;
 use crate::root::AlanAction;
 use crate::views::selection;
 use crate::views::selection::{Selection, TextPosition};
 use crate::views::theme;
+use agent::Mode;
 use crossterm::event::Event;
 use crossterm::event::{KeyCode, KeyEventKind, MouseButton, MouseEvent, MouseEventKind};
+use llm::Usage;
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span, Text};
+use ratatui::widgets::Block;
+use ratatui::widgets::Padding;
 use ratatui::widgets::{Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState};
 use std::cell::RefCell;
 use std::time::Instant;
@@ -32,13 +37,17 @@ const WHEEL_LINES_PER_NOTCH: isize = 1;
 /// of events; without a bound the tail keeps scrolling long after the fingers stop.
 const MAX_PENDING_WHEEL: isize = 48;
 
-/// Plain-data view of the transcript. The parent builds this from
-/// `ChatController` each tick and pushes it down with `cx.update`, so
-/// `ChatHistory` never names a core controller type.
+/// Plain-data view of the transcript and its pinned status line. The parent
+/// builds this from `ChatController` each tick and pushes it down with
+/// `cx.update`, so `ChatHistory` never names a core controller type.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ChatSnapshot {
     pub entries: Vec<Entry>,
     pub revision: u64,
+    pub activity: Activity,
+    pub mode: Mode,
+    pub usage: Usage,
+    pub model_name: String,
 }
 
 /// The chat transcript area: owns the incremental wrap cache, scroll state,
@@ -51,6 +60,7 @@ pub struct ChatSnapshot {
 #[derive(Debug, Default)]
 pub struct ChatHistory {
     view: RefCell<View>,
+    status: Status,
 }
 
 #[derive(Debug)]
@@ -100,7 +110,13 @@ impl Default for View {
 
 impl ChatHistory {
     pub fn set(&mut self, snap: ChatSnapshot) {
-        self.view.borrow_mut().snap = Some(snap);
+        self.view.borrow_mut().snap = Some(snap.clone());
+        self.status.set(StatusSnapshot {
+            activity: snap.activity,
+            mode: snap.mode,
+            usage: snap.usage,
+            model_name: snap.model_name,
+        });
     }
 
     /// Whether the entity already holds a snapshot with this revision.
@@ -110,6 +126,13 @@ impl ChatHistory {
             .snap
             .as_ref()
             .map_or(false, |s| s.revision == revision)
+    }
+
+    pub fn matches_activity(&self, activity: Activity) -> bool {
+        self.status
+            .snap
+            .as_ref()
+            .is_some_and(|snap| snap.activity == activity)
     }
 
     /// Whether wheel notches are queued and need a flush this tick.
@@ -358,14 +381,20 @@ impl Component<AlanAction> for ChatHistory {
         }
     }
 
-    fn render(&self, frame: &mut Frame, area: Rect, _cx: &RenderContext<'_, AlanAction>) {
+    fn render(&self, frame: &mut Frame, area: Rect, cx: &RenderContext<'_, AlanAction>) {
         let mut view = self.view.borrow_mut();
         let Some(snap) = view.snap.clone() else {
             return;
         };
 
+        let [content_area, status_area] = if area.height >= 2 {
+            Layout::vertical([Constraint::Min(1), Constraint::Length(2)]).areas(area)
+        } else {
+            return;
+        };
+
         let [content_area, scrollbar_area] =
-            Layout::horizontal([Constraint::Min(1), Constraint::Length(1)]).areas(area);
+            Layout::horizontal([Constraint::Min(1), Constraint::Length(1)]).areas(content_area);
         view.chat_area = content_area;
         view.layout
             .sync(&snap.entries, snap.revision, content_area.width.max(1));
@@ -398,6 +427,8 @@ impl Component<AlanAction> for ChatHistory {
                 .thumb_style(Style::default().fg(Color::DarkGray));
             frame.render_stateful_widget(scrollbar_widget, scrollbar_area, &mut scrollbar);
         }
+
+        self.status.render(frame, status_area, cx);
     }
 }
 
@@ -406,6 +437,100 @@ impl ChatHistory {
     /// the viewport or selection changed and a redraw is needed.
     fn handle_mouse_action(&mut self, mouse: &MouseEvent) -> bool {
         self.view.borrow_mut().handle_mouse(mouse)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct StatusSnapshot {
+    pub activity: Activity,
+    pub mode: Mode,
+    pub usage: Usage,
+    pub model_name: String,
+}
+
+/// Status line pinned to the bottom of the chat area: activity, key hints,
+/// and the mode/cost badges.
+#[derive(Debug, Default)]
+pub struct Status {
+    snap: Option<StatusSnapshot>,
+}
+
+impl Status {
+    pub fn set(&mut self, snap: StatusSnapshot) {
+        self.snap = Some(snap);
+    }
+}
+
+/// How an [`Activity`] presents itself in the status line.
+struct StatusStyle {
+    style: Style,
+    label: &'static str,
+    hints: &'static str,
+}
+
+impl From<Activity> for StatusStyle {
+    fn from(activity: Activity) -> Self {
+        match activity {
+            Activity::Thinking => StatusStyle {
+                label: "  ● thinking",
+                hints: "  Ctrl-C stop",
+                style: Style::default().italic().fg(ratatui::style::Color::Yellow),
+            },
+            Activity::Idle => StatusStyle {
+                label: "  ● idle",
+                hints: "  Enter send · Ctrl-C quit",
+                style: Style::default().fg(ratatui::style::Color::Green),
+            },
+        }
+    }
+}
+
+/// Flags that layer onto any activity.
+fn badges(snap: &StatusSnapshot) -> Vec<Span<'static>> {
+    let mut badges = Vec::new();
+    let badge = match snap.mode {
+        Mode::Plan => Some((" · Plan mode", ratatui::style::Color::White)),
+        Mode::Review => Some((" · Review mode", ratatui::style::Color::White)),
+        Mode::Normal => None,
+    };
+    if let Some((label, color)) = badge {
+        badges.push(Span::styled(label, Style::default().fg(color)));
+    }
+    if let Some(cost) = snap.usage.cost {
+        badges.push(Span::styled(
+            format!(" · ${:.4}", (cost * 10_000.0).trunc() / 10_000.0),
+            Style::default().fg(theme::MUTED_FG),
+        ));
+    }
+    badges
+}
+
+fn status_line(snap: &StatusSnapshot) -> Line<'static> {
+    let status = StatusStyle::from(snap.activity);
+    let mut spans = vec![
+        Span::styled(status.label, status.style),
+        Span::styled(status.hints, Style::default().fg(theme::MUTED_FG)),
+    ];
+    spans.extend(badges(snap));
+    spans.push(Span::styled(
+        format!(" · {}", snap.model_name),
+        Style::default().fg(theme::MUTED_FG),
+    ));
+
+    Line::from(spans)
+}
+
+impl<A: 'static> Component<A> for Status {
+    fn render(&self, frame: &mut Frame, area: Rect, _cx: &RenderContext<'_, A>) {
+        let Some(snap) = &self.snap else {
+            return;
+        };
+        frame.render_widget(
+            Paragraph::new(status_line(snap))
+                .style(Style::default().bg(theme::EDITOR_BG))
+                .block(Block::new().padding(Padding::new(0, 0, 1, 0))),
+            area,
+        );
     }
 }
 

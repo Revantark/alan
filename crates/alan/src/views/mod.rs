@@ -2,6 +2,4 @@ mod components;
 pub mod selection;
 pub mod theme;
 
-pub(crate) use components::{
-    ChatHistory, ChatSnapshot, Header, PromptEditor, Status, StatusSnapshot,
-};
+pub(crate) use components::{ChatHistory, ChatSnapshot, Header, PromptEditor};
