@@ -154,7 +154,7 @@ impl AlanRoot {
         let activity = controller.activity();
         let unchanged = cx
             .read(chat, |chat| {
-                chat.matches_revision(revision) || chat.matches_activity(activity)
+                chat.matches_revision(revision) && chat.matches_activity(activity)
             })
             .unwrap_or(false);
         if unchanged {
