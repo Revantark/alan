@@ -154,7 +154,7 @@ impl AlanRoot {
         let activity = controller.activity();
         let unchanged = cx
             .read(chat, |chat| {
-                chat.matches_revision(revision) && chat.matches_activity(activity)
+                chat.matches_revision(revision) || chat.matches_activity(activity)
             })
             .unwrap_or(false);
         if unchanged {
@@ -252,8 +252,14 @@ impl Component<AlanAction> for AlanRoot {
                 ActionStatus::Handled
             }
             AlanAction::ToggleMode => {
+                let Some(chat) = self.chat else {
+                    return ActionStatus::Continue;
+                };
                 let mut controller = self.controller.lock().expect("alan root poisoned");
                 controller.toggle_mode();
+                cx.update(chat, |c| {
+                    c.set_mode(controller.mode());
+                });
                 drop(controller);
                 cx.notify();
                 ActionStatus::Handled
