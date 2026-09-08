@@ -521,20 +521,10 @@ impl Component<AlanAction> for PromptEditor {
         let background = Paragraph::new("").style(Style::default().bg(theme::EDITOR_BG));
         frame.render_widget(background, area);
 
-        let [
-            attachment_area,
-            _top_padding,
-            _status_area,
-            _status_editor_gap,
-            editor_area,
-            _bottom_padding,
-        ] = Layout::vertical([
+        let [attachment_area, _status_editor_gap, editor_area] = Layout::vertical([
             Constraint::Length(self.attachment_height()),
             Constraint::Length(1),
-            Constraint::Length(1),
-            Constraint::Length(1),
             Constraint::Min(1),
-            Constraint::Length(1),
         ])
         .areas(area);
 
