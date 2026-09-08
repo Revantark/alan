@@ -119,6 +119,10 @@ impl ChatHistory {
         });
     }
 
+    pub fn set_mode(&mut self, mode: Mode) {
+        self.status.set_mode(mode);
+    }
+
     /// Whether the entity already holds a snapshot with this revision.
     pub fn matches_revision(&self, revision: u64) -> bool {
         self.view
@@ -458,6 +462,12 @@ pub struct Status {
 impl Status {
     pub fn set(&mut self, snap: StatusSnapshot) {
         self.snap = Some(snap);
+    }
+
+    pub fn set_mode(&mut self, mode: Mode) {
+        if let Some(snap) = &mut self.snap {
+            snap.mode = mode;
+        }
     }
 }
 
