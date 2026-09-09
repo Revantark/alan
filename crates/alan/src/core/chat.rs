@@ -1,7 +1,37 @@
 //! Chat feature state and agent stream coordination.
 
-use super::Poll;
 use super::action::ImageAttachment;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Poll {
+    Idle,
+    Changed,
+    Finished,
+    Error,
+    Aborted,
+}
+
+impl Poll {
+    pub(crate) fn combine(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::Error, _) | (_, Self::Error) => Self::Error,
+            (Self::Aborted, _) | (_, Self::Aborted) => Self::Aborted,
+            (Self::Finished, _) | (_, Self::Finished) => Self::Finished,
+            (Self::Changed, _) | (_, Self::Changed) => Self::Changed,
+            _ => Self::Idle,
+        }
+    }
+}
+
+/// What the prompt is doing, and so what Enter does to it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Activity {
+    /// Streaming a response.
+    Thinking,
+
+    /// Waiting on a prompt.
+    Idle,
+}
 use agent::{Agent, AgentEvent, AgentStream};
 use llm::Usage;
 use std::sync::Arc;
@@ -155,8 +185,7 @@ impl ChatController {
         self.revision = self.revision.wrapping_add(1);
     }
 
-    pub fn submit(&mut self, text: impl Into<String>, images: Vec<ImageAttachment>) {
-        let text = text.into();
+    pub fn submit(&mut self, text: String, images: Vec<ImageAttachment>) {
         let text = text.trim();
         if (text.is_empty() && images.is_empty()) || self.busy {
             return;

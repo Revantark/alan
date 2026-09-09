@@ -4,7 +4,7 @@ mod login_overlay;
 mod root;
 mod views;
 
-use core::Controller;
+use crate::core::ChatController;
 use llm::ServerTool;
 use std::time::Duration;
 
@@ -60,7 +60,7 @@ async fn main() -> anyhow::Result<()> {
     }
     let agent = agent_builder.build()?;
 
-    let mut app = Controller::new(agent);
+    let mut app = ChatController::new(agent);
     if was_resumed {
         app.restore_session_history().await;
     }
