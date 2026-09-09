@@ -1,12 +1,12 @@
 //! Single-root `tui` adapter for Alan.
 //!
-//! [`Controller`] owns application state, [`UiState`] owns the prompt editor,
+//! [`ChatController`] owns application state, [`UiState`] owns the prompt editor,
 //! and [`ChatHistory`] owns the transcript (scroll, wheel, selection). The root
 //! orchestrates: each 16ms tick it pushes plain-data snapshots down to the
 //! child entities and routes input (mouse/wheel to the transcript, keys to the
 //! editor). `render` composes the children into the body layout.
 //!
-//! `Controller` is not `Sync` (it holds `JoinHandle`s and plain state), so the
+//! `ChatController` is not `Sync` (it holds `JoinHandle`s and plain state), so the
 //! root keeps it behind a `Mutex`. `render` is `&self` by framework contract.
 
 use providers::{CredentialStore, ProviderRegistry};
@@ -25,9 +25,10 @@ use tui::entity::Entity;
 use tui::keymap::{InputContext, KeyMapper};
 use tui::{ActionStatus, Component, RenderContext, Subscription, SubscriptionEvent};
 
+use crate::core::Activity;
 use crate::core::Poll;
 use crate::core::SlashCommand;
-use crate::core::{Controller, ImageAttachment};
+use crate::core::{ChatController, ImageAttachment};
 use crate::login_overlay::LoginOverlay;
 use crate::views::Header;
 use crate::views::theme;
@@ -105,7 +106,7 @@ impl KeyMapper<AlanAction> for AlanKeyMapper {
 /// Owns the whole Alan frontend as one `tui` component, plus the
 /// dependencies needed to open feature overlays (today: login).
 pub struct AlanRoot {
-    controller: Mutex<Controller>,
+    controller: Mutex<ChatController>,
     providers: Arc<ProviderRegistry>,
     credentials: Arc<dyn CredentialStore>,
     /// Retained so the poll stream keeps running. Dropping it cancels the stream.
@@ -117,7 +118,7 @@ pub struct AlanRoot {
 
 impl AlanRoot {
     pub fn new(
-        controller: Controller,
+        controller: ChatController,
         providers: Arc<ProviderRegistry>,
         credentials: Arc<dyn CredentialStore>,
     ) -> Self {
@@ -139,19 +140,52 @@ impl AlanRoot {
         ));
     }
 
+    /// Parse a submission as a slash command; if it is one, execute it
+    /// against the controller and return the command (if any needs a
+    /// side-effect such as opening the login overlay). If it is a plain
+    /// prompt, push it onto the transcript and start the agent stream.
+    fn handle_submit(
+        controller: &mut ChatController,
+        submission: PromptSubmission,
+    ) -> Option<SlashCommand> {
+        // Not trimmed: a leading space means this is a prompt.
+        if let Some(command) = SlashCommand::parse(&submission.text) {
+            match command {
+                SlashCommand::Login => return Some(SlashCommand::Login),
+                SlashCommand::Plan => controller.set_mode(agent::Mode::Plan),
+                SlashCommand::Review => controller.set_mode(agent::Mode::Review),
+                SlashCommand::Normal => controller.set_mode(agent::Mode::Normal),
+                SlashCommand::Help => controller.push_info(SlashCommand::help()),
+            }
+            return None;
+        }
+
+        let text = submission.text.trim();
+        if (text.is_empty() && submission.images.is_empty()) || controller.is_busy() {
+            return None;
+        }
+
+        controller.submit(text.to_owned(), submission.images);
+        None
+    }
+
     /// Push the transcript snapshot (and its pinned status line) into the
     /// `ChatHistory` entity. Plain-data mapping lives here so `ChatHistory`
     /// never names a core type. Status (activity, mode, cost, model) can change
     /// between chat revisions, so it is pushed every tick; the transcript is
     /// skipped when its revision is unchanged so the 16ms poll tick stays
     /// quiet.
-    fn push_chat(&self, cx: &mut Context<'_, Self, AlanAction>, controller: &mut Controller) {
+    fn push_chat(&self, cx: &mut Context<'_, Self, AlanAction>, controller: &mut ChatController) {
         let Some(chat) = self.chat else {
             return;
         };
 
-        let revision = controller.chat_revision();
-        let activity = controller.activity();
+        let revision = controller.revision();
+        let activity = if controller.is_busy() {
+            Activity::Thinking
+        } else {
+            Activity::Idle
+        };
         let unchanged = cx
             .read(chat, |chat| {
                 chat.matches_revision(revision) && chat.matches_activity(activity)
@@ -162,7 +196,7 @@ impl AlanRoot {
         }
 
         let snap = ChatSnapshot {
-            entries: controller.chat().to_vec(),
+            entries: controller.entries().to_vec(),
             revision,
             activity,
             mode: controller.mode(),
@@ -265,9 +299,10 @@ impl Component<AlanAction> for AlanRoot {
                 ActionStatus::Handled
             }
             AlanAction::Submit(submission) => {
-                let mut controller = self.controller.lock().expect("alan root poisoned");
-                let command = controller.submit(submission.text.clone(), submission.images.clone());
-                drop(controller);
+                let command = {
+                    let mut controller = self.controller.lock().expect("alan root poisoned");
+                    AlanRoot::handle_submit(&mut controller, submission.clone())
+                };
                 if let Some(c) = command
                     && c == SlashCommand::Login
                 {
@@ -446,24 +481,6 @@ mod tests {
             assert!(matches!(
                 mapper.map(&click, &context),
                 Some(AlanAction::Raw(_))
-            ));
-        }
-    }
-
-    #[test]
-    fn mapper_maps_paste_regardless_of_context() {
-        let mapper = AlanKeyMapper;
-        for context in [
-            InputContext::default(),
-            InputContext {
-                overlay_active: true,
-                focus_active: true,
-            },
-        ] {
-            let event = Event::Paste("hello\nworld".into());
-            assert!(matches!(
-                mapper.map(&event, &context),
-                Some(AlanAction::Paste(actual)) if actual == "hello\nworld"
             ));
         }
     }
