@@ -1,44 +1,27 @@
 //! Single-root `tui` adapter for Alan.
 //!
-//! [`ChatController`] owns application state, [`UiState`] owns the prompt editor,
-//! and [`ChatHistory`] owns the transcript (scroll, wheel, selection). The root
-//! orchestrates: each 16ms tick it pushes plain-data snapshots down to the
-//! child entities and routes input (mouse/wheel to the transcript, keys to the
-//! editor). `render` composes the children into the body layout.
-//!
-//! `ChatController` is not `Sync` (it holds `JoinHandle`s and plain state), so the
-//! root keeps it behind a `Mutex`. `render` is `&self` by framework contract.
+//! The chat session (controller + agent stream) lives in [`ChatHistory`], the
+//! prompt editor owns input, and this root is a thin layout/router: it routes
+//! input to the focused child or dispatches it to the chat component, and
+//! composes the header, transcript, and footer. It also owns the providers and
+//! credentials needed to open the login overlay.
 
 use providers::{CredentialStore, ProviderRegistry};
 use ratatui::layout::Constraint;
 use ratatui::layout::Layout;
 use std::sync::Arc;
-use std::sync::Mutex;
-use std::time::Duration;
 
-use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers, MouseEventKind};
-use futures_util::Stream;
+use crossterm::event::{Event, KeyCode, KeyModifiers, MouseEventKind};
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use tui::context::Context;
 use tui::entity::Entity;
 use tui::keymap::{InputContext, KeyMapper};
-use tui::{ActionStatus, Component, RenderContext, Subscription, SubscriptionEvent};
+use tui::{ActionStatus, Component, RenderContext, Subscription};
 
-use crate::core::Activity;
-use crate::core::Poll;
-use crate::core::SlashCommand;
-use crate::core::{ChatController, ImageAttachment};
+use crate::core::ImageAttachment;
 use crate::login_overlay::LoginOverlay;
-use crate::views::Header;
-use crate::views::theme;
-use crate::views::{ChatHistory, ChatSnapshot, PromptEditor};
-
-/// How often streamed agent output is collected while the app is idle.
-const TICK_INTERVAL: Duration = Duration::from_millis(16);
-
-/// Item type of the poll ticker. The value is unused; each item means "poll now".
-type PollTick = ();
+use crate::views::{ChatHistory, ChatView, Header, LoginRequested};
 
 /// Semantic input for the Alan frontend.
 ///
@@ -106,30 +89,30 @@ impl KeyMapper<AlanAction> for AlanKeyMapper {
 /// Owns the whole Alan frontend as one `tui` component, plus the
 /// dependencies needed to open feature overlays (today: login).
 pub struct AlanRoot {
-    controller: Mutex<ChatController>,
     providers: Arc<ProviderRegistry>,
     credentials: Arc<dyn CredentialStore>,
-    /// Retained so the poll stream keeps running. Dropping it cancels the stream.
-    poll: Option<Subscription>,
+    /// The chat component to install on `init`; taken when inserted.
+    chat_source: Option<ChatHistory>,
     header: Option<Entity<Header>>,
-    chat: Option<Entity<ChatHistory>>,
-    editor: Option<Entity<PromptEditor>>,
+    view: Option<Entity<ChatView>>,
+    /// Subscription that opens the login overlay when the chat requests it.
+    /// Kept alive so the request is never missed.
+    login_subscription: Option<Subscription>,
 }
 
 impl AlanRoot {
     pub fn new(
-        controller: ChatController,
+        chat: ChatHistory,
         providers: Arc<ProviderRegistry>,
         credentials: Arc<dyn CredentialStore>,
     ) -> Self {
         Self {
-            controller: Mutex::new(controller),
             providers,
             credentials,
-            poll: None,
+            chat_source: Some(chat),
             header: None,
-            chat: None,
-            editor: None,
+            view: None,
+            login_subscription: None,
         }
     }
 
@@ -139,72 +122,6 @@ impl AlanRoot {
             Arc::clone(&self.credentials),
         ));
     }
-
-    /// Parse a submission as a slash command; if it is one, execute it
-    /// against the controller and return the command (if any needs a
-    /// side-effect such as opening the login overlay). If it is a plain
-    /// prompt, push it onto the transcript and start the agent stream.
-    fn handle_submit(
-        controller: &mut ChatController,
-        submission: PromptSubmission,
-    ) -> Option<SlashCommand> {
-        // Not trimmed: a leading space means this is a prompt.
-        if let Some(command) = SlashCommand::parse(&submission.text) {
-            match command {
-                SlashCommand::Login => return Some(SlashCommand::Login),
-                SlashCommand::Plan => controller.set_mode(agent::Mode::Plan),
-                SlashCommand::Review => controller.set_mode(agent::Mode::Review),
-                SlashCommand::Normal => controller.set_mode(agent::Mode::Normal),
-                SlashCommand::Help => controller.push_info(SlashCommand::help()),
-            }
-            return None;
-        }
-
-        let text = submission.text.trim();
-        if (text.is_empty() && submission.images.is_empty()) || controller.is_busy() {
-            return None;
-        }
-
-        controller.submit(text.to_owned(), submission.images);
-        None
-    }
-
-    /// Push the transcript snapshot (and its pinned status line) into the
-    /// `ChatHistory` entity. Plain-data mapping lives here so `ChatHistory`
-    /// never names a core type. Status (activity, mode, cost, model) can change
-    /// between chat revisions, so it is pushed every tick; the transcript is
-    /// skipped when its revision is unchanged so the 16ms poll tick stays
-    /// quiet.
-    fn push_chat(&self, cx: &mut Context<'_, Self, AlanAction>, controller: &mut ChatController) {
-        let Some(chat) = self.chat else {
-            return;
-        };
-
-        let revision = controller.revision();
-        let activity = if controller.is_busy() {
-            Activity::Thinking
-        } else {
-            Activity::Idle
-        };
-        let unchanged = cx
-            .read(chat, |chat| {
-                chat.matches_revision(revision) && chat.matches_activity(activity)
-            })
-            .unwrap_or(false);
-        if unchanged {
-            return;
-        }
-
-        let snap = ChatSnapshot {
-            entries: controller.entries().to_vec(),
-            revision,
-            activity,
-            mode: controller.mode(),
-            usage: controller.usage(),
-            model_name: controller.model_name(),
-        };
-        cx.update(chat, |chat| chat.set(snap));
-    }
 }
 
 impl Component<AlanAction> for AlanRoot {
@@ -213,42 +130,20 @@ impl Component<AlanAction> for AlanRoot {
         Self: Sized,
     {
         self.header = Some(cx.insert(Header));
-        self.chat = Some(cx.insert(ChatHistory::default()));
-        self.editor = Some(cx.insert(PromptEditor::new()));
-        cx.focus_entity(self.editor.expect("editor entity"));
-        // The root stays the input target; it routes mouse / wheel / page
-        // actions to the transcript and keyboard / paste to the editor.
-        // Seed the transcript (and its pinned status line) so the first frame isn't
-        // blank before the first poll tick; later ticks skip them while
-        // unchanged.
-        {
-            let mut controller = self.controller.lock().expect("alan root poisoned");
-            self.push_chat(cx, &mut controller);
-        }
-        self.poll = Some(cx.subscribe_stream(poll_ticks(), |event, root, cx| {
-            let SubscriptionEvent::Item(()) = event else {
-                return;
-            };
-            let mut controller = root.controller.lock().expect("alan root poisoned");
-            let poll = controller.poll();
-
-            let chat = root.chat;
-
-            root.push_chat(cx, &mut controller);
-            // Apply queued wheel notches on the tick.
-            if let Some(chat) = chat
-                && cx
-                    .read(chat, |chat| chat.has_pending_wheel())
-                    .unwrap_or(false)
-            {
-                cx.update(chat, |chat| {
-                    chat.tick();
-                });
-            }
-            if poll == Poll::Changed {
-                cx.notify();
-            }
-        }));
+        let view = cx.insert(ChatView::new(
+            self.chat_source
+                .take()
+                .expect("chat component installed once"),
+        ));
+        self.view = Some(view);
+        // The chat cannot open the login overlay itself (the root owns the
+        // providers and credentials), so it emits a typed request the root
+        // handles here.
+        self.login_subscription = Some(
+            cx.subscribe::<LoginRequested, ChatView, _>(view, |_event, root, _view, cx| {
+                root.open_login(cx)
+            }),
+        );
     }
 
     fn handle_action(
@@ -260,128 +155,20 @@ impl Component<AlanAction> for AlanRoot {
         Self: Sized,
     {
         match action {
-            // Wheel and mouse traffic is owned by `ChatHistory`; the root just
-            // routes it. `ChatHistory` hit-tests its own rect and ignores
-            // misses, so no parent-side geometry check is needed.
-            AlanAction::MouseScrollUp | AlanAction::MouseScrollDown => {
-                let chat = self.chat;
-                if let Some(chat) = chat {
-                    cx.dispatch(chat, action);
-                }
-                ActionStatus::Handled
-            }
-            AlanAction::Quit => {
-                let mut controller = self.controller.lock().expect("alan root poisoned");
-                if !controller.abort() {
-                    cx.quit();
-                };
-                drop(controller);
-                ActionStatus::Handled
-            }
             // A resize invalidates cached layouts; components re-measure on
-            // the next render pass. The dimensions are informational here —
-            // the framework already re-renders on the next frame.
+            // the next render pass. The framework already re-renders on the
+            // next frame, so this just asks for one.
             AlanAction::Resize => {
                 cx.notify();
                 ActionStatus::Handled
             }
-            AlanAction::ToggleMode => {
-                let Some(chat) = self.chat else {
-                    return ActionStatus::Continue;
-                };
-                let mut controller = self.controller.lock().expect("alan root poisoned");
-                controller.toggle_mode();
-                cx.update(chat, |c| {
-                    c.set_mode(controller.mode());
-                });
-                drop(controller);
-                cx.notify();
-                ActionStatus::Handled
-            }
-            AlanAction::Submit(submission) => {
-                let command = {
-                    let mut controller = self.controller.lock().expect("alan root poisoned");
-                    AlanRoot::handle_submit(&mut controller, submission.clone())
-                };
-                if let Some(c) = command
-                    && c == SlashCommand::Login
-                {
-                    self.open_login(cx);
-                }
-                cx.notify();
-                ActionStatus::Handled
-            }
-            AlanAction::Raw(event) => match event {
-                // Mouse traffic is owned by `ChatHistory`; the root just routes
-                // it there. `ChatHistory` hit-tests its own rect and ignores
-                // misses.
-                Event::Mouse(_) => {
-                    let chat = self.chat;
-                    if let Some(chat) = chat {
-                        cx.dispatch(chat, action);
-                    }
-                    ActionStatus::Handled
-                }
-                // PageUp/PageDown scroll the transcript, not the editor.
-                Event::Key(key)
-                    if matches!(
-                        key.code,
-                        crossterm::event::KeyCode::PageUp | crossterm::event::KeyCode::PageDown
-                    ) && key.kind == KeyEventKind::Press =>
-                {
-                    let chat = self.chat;
-                    if let Some(chat) = chat {
-                        cx.dispatch(chat, action);
-                    }
-                    ActionStatus::Handled
-                }
-                // Esc clears an active transcript selection before it reaches
-                // the editor (which pops attachments). Selection state is owned
-                // by `ChatHistory`, so the parent only arbitrates priority.
-                Event::Key(key)
-                    if key.code == KeyCode::Esc
-                        && key.kind == KeyEventKind::Press
-                        && cx
-                            .read(self.chat.expect("chat entity"), |c| {
-                                c.has_active_selection()
-                            })
-                            .unwrap_or(false) =>
-                {
-                    cx.update(self.chat.expect("chat entity"), |c| {
-                        c.clear_selection();
-                    });
-                    ActionStatus::Handled
-                }
-                // Everything else is editor input.
-                _ => {
-                    // Typing cancels queued wheel momentum, as before.
-                    // if let Some(chat) = self.chat {
-                    //     cx.update(chat, |c| c.cancel_wheel());
-                    // }
-
-                    // A submitted prompt resumes bottom-following.
-                    // if is_submit && let Some(chat) = self.chat {
-                    //     cx.update(chat, |c| c.resume_follow());
-                    // }
-                    // if let Some(outcome) = outcome {
-                    //     if outcome.quit {
-                    //         cx.quit();
-                    //     }
-                    //     drop(inner);
-                    //     if outcome.open_login {
-                    //         self.open_login(cx);
-                    //     }
-                    // }
-                    ActionStatus::Handled
-                }
-            },
+            // All other actions are handled by the chat column (transcript,
+            // status, editor) or by the focused editor before they reach here.
             _ => ActionStatus::Continue,
         }
     }
 
     fn render(&self, frame: &mut Frame, area: Rect, cx: &RenderContext<'_, AlanAction>) {
-        let chat = self.chat;
-
         // Body area is everything below the header row (if present).
         let body_area = if let Some(header) = self.header {
             let [header_area, body] =
@@ -392,34 +179,10 @@ impl Component<AlanAction> for AlanRoot {
             area
         };
 
-        // The footer is sized from the wrapped editor rows plus attachments,
-        // measured from the editor entity itself so it always reflects the
-        // current buffer. `ChatHistory` owns the pinned status line, which
-        // occupies the last row of the chat area, directly above the footer.
-        let editor = self.editor.expect("editor entity");
-        let editor_width = body_area.width.saturating_sub(theme::PROMPT_GUTTER);
-        let editor_rows = cx.read(editor, |e| e.rows(editor_width)).unwrap_or(1);
-        let attachment_height = cx.read(editor, |e| e.attachment_height()).unwrap_or(0);
-        let [chat_area, footer_area] = Layout::vertical([
-            Constraint::Min(1),
-            Constraint::Length(2 + editor_rows + attachment_height),
-        ])
-        .areas(body_area);
-
-        if let Some(chat) = chat {
-            cx.render_entity(chat, frame, chat_area);
+        if let Some(view) = self.view {
+            cx.render_entity(view, frame, body_area);
         }
-        cx.render_entity(editor, frame, footer_area);
-        // paint_popup(popup, footer_area, frame, cx);
-        // paint_popup_v2(self.popup_v2, footer_area, frame, cx);
     }
-}
-
-fn poll_ticks() -> impl Stream<Item = PollTick> + Send + 'static {
-    futures_util::stream::unfold((), |state| async move {
-        tokio::time::sleep(TICK_INTERVAL).await;
-        Some(((), state))
-    })
 }
 
 #[cfg(test)]

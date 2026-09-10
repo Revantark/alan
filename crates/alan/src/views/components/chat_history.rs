@@ -1,32 +1,32 @@
 //! The chat transcript as a self-contained `tui` component.
 //!
-//! Owns the incremental wrap cache, scroll state, wheel coalescing, and
-//! selection. Rendered from a [`ChatSnapshot`] pushed by the parent via
-//! `cx.update`; mouse / wheel / PageUp / PageDown input is routed to it by the
-//! parent and handled here.
+//! Owns the chat session model ([`ChatController`]), the incremental wrap
+//! cache, scroll state, wheel coalescing, and selection. It subscribes to the
+//! agent event stream itself and handles submit / mode / quit / mouse / wheel /
+//! PageUp / PageDown input, which the root dispatches to it.
 
-use crate::core::Activity;
-use crate::core::Entry;
-use crate::root::AlanAction;
+use crate::core::{Activity, ChatController, SlashCommand};
+use crate::root::{AlanAction, PromptSubmission};
 use crate::views::selection;
 use crate::views::selection::{Selection, TextPosition};
 use crate::views::theme;
-use agent::Mode;
+use agent::{AgentEvent, AgentStream, Mode};
 use crossterm::event::Event;
 use crossterm::event::{KeyCode, KeyEventKind, MouseButton, MouseEvent, MouseEventKind};
+use futures_util::Stream;
 use llm::Usage;
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Style};
-use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::Block;
-use ratatui::widgets::Padding;
+use ratatui::text::Text;
 use ratatui::widgets::{Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState};
 use std::cell::RefCell;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tui::component::{ActionStatus, Component, RenderContext};
 use tui::context::Context;
-use unicode_width::UnicodeWidthChar;
+use tui::{Subscription, SubscriptionEvent};
+
+use super::transcript::{TranscriptLayout, scrollbar_position};
 
 /// Lines moved per mouse-wheel notch. Crossterm reports the wheel as discrete
 /// notches with no pressure data, so one line per notch keeps a single tick
@@ -37,12 +37,29 @@ const WHEEL_LINES_PER_NOTCH: isize = 1;
 /// of events; without a bound the tail keeps scrolling long after the fingers stop.
 const MAX_PENDING_WHEEL: isize = 48;
 
-/// Plain-data view of the transcript and its pinned status line. The parent
-/// builds this from `ChatController` each tick and pushes it down with
-/// `cx.update`, so `ChatHistory` never names a core controller type.
+/// Cadence of the self-scheduled momentum ticker. While wheel notches are
+/// pending, one flush step is applied per interval; the ticker cancels itself
+/// once the queue drains, so no timer runs while the transcript is idle.
+const MOMENTUM_TICK_INTERVAL: Duration = Duration::from_millis(16);
+
+/// Idle ticks the momentum ticker stays alive after the queue drains. This
+/// keeps one timer running across the natural lulls within a scroll session
+/// instead of tearing the worker down and paying a fresh startup on every
+/// notch, which showed up as lag.
+const MOMENTUM_IDLE_TICKS: u16 = 16;
+
+/// Repaint cadence for streamed agent output. Stream items mutate the model
+/// immediately but only this ticker redraws the transcript, so a fast token
+/// stream cannot outpace the renderer or starve scroll input. Terminal events
+/// (finish, error, disconnect) still repaint at once.
+const STREAM_REPAINT_INTERVAL: Duration = Duration::from_millis(32);
+
+/// Cached, plain-data view of the transcript status, rebuilt from the
+/// [`ChatController`] by [`ChatHistory::refresh`] whenever the transcript
+/// revision or activity changes. The transcript entries themselves are read
+/// directly from the controller during render, so they are not cloned here.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ChatSnapshot {
-    pub entries: Vec<Entry>,
     pub revision: u64,
     pub activity: Activity,
     pub mode: Mode,
@@ -50,17 +67,40 @@ pub struct ChatSnapshot {
     pub model_name: String,
 }
 
-/// The chat transcript area: owns the incremental wrap cache, scroll state,
-/// wheel coalescing, and selection.
+/// The chat transcript area: owns the session controller, incremental wrap
+/// cache, scroll state, wheel coalescing, and selection.
 ///
 /// Render-mutable state (the layout cache and scroll position) sits behind a
 /// `RefCell` because `render` is `&self` by framework contract yet must sync
 /// the wrap cache against the width it is given. Input handlers run with
 /// `&mut self` and borrow through the same `RefCell`.
-#[derive(Debug, Default)]
 pub struct ChatHistory {
+    /// The UI-agnostic chat session model. `None` only in tests that exercise
+    /// transcript layout/scroll in isolation.
+    controller: Option<ChatController>,
     view: RefCell<View>,
-    status: Status,
+    /// Subscription to the in-flight agent stream. Dropping it cancels the run.
+    prompt: Option<Subscription>,
+    /// Fixed-rate repaint ticker, alive only while the agent is streaming.
+    /// Keeps render cadence independent of the token rate.
+    stream_repaint: Option<Subscription>,
+    /// Set when a `/login` submission needs the root to open the login overlay
+    /// (the root owns the providers and credentials). Polled by the root after
+    /// it dispatches a submission; the chat cannot dispatch back to its parent
+    /// without deadlocking on the parent's locked slot.
+    login_requested: bool,
+    /// Self-scheduled momentum ticker, alive only while wheel notches are
+    /// draining (plus a short idle grace). Dropping it cancels the ticker.
+    momentum: Option<Subscription>,
+    /// Consecutive ticker ticks with an empty queue; used to end the idle
+    /// grace period.
+    momentum_idle: u16,
+}
+
+impl Default for ChatHistory {
+    fn default() -> Self {
+        Self::from_controller(None)
+    }
 }
 
 #[derive(Debug)]
@@ -109,34 +149,149 @@ impl Default for View {
 }
 
 impl ChatHistory {
-    pub fn set(&mut self, snap: ChatSnapshot) {
-        self.view.borrow_mut().snap = Some(snap.clone());
-        self.status.set(StatusSnapshot {
-            activity: snap.activity,
-            mode: snap.mode,
-            usage: snap.usage,
-            model_name: snap.model_name,
+    /// Build a chat component that owns its session controller.
+    pub fn new(controller: ChatController) -> Self {
+        Self::from_controller(Some(controller))
+    }
+
+    fn from_controller(controller: Option<ChatController>) -> Self {
+        Self {
+            controller,
+            view: RefCell::new(View::default()),
+            prompt: None,
+            stream_repaint: None,
+            login_requested: false,
+            momentum: None,
+            momentum_idle: 0,
+        }
+    }
+
+    /// Drive the transcript mouse state from a raw mouse event. Returns true if
+    /// the viewport or selection changed and a redraw is needed.
+    fn handle_mouse_action(&mut self, mouse: &MouseEvent) -> bool {
+        self.view.borrow_mut().handle_mouse(mouse)
+    }
+
+    /// Refresh the cached snapshot from the controller when the transcript
+    /// revision, mode, or activity changed. A cheap no-op otherwise.
+    fn refresh(&self) {
+        let Some(controller) = &self.controller else {
+            return;
+        };
+        let activity = if controller.is_busy() {
+            Activity::Thinking
+        } else {
+            Activity::Idle
+        };
+        let revision = controller.revision();
+        let mode = controller.mode();
+        let mut view = self.view.borrow_mut();
+        let unchanged = view
+            .snap
+            .as_ref()
+            .is_some_and(|s| s.revision == revision && s.mode == mode && s.activity == activity);
+        if unchanged {
+            return;
+        }
+
+        let usage = controller.usage();
+        let model_name = controller.model_name();
+        view.snap = Some(ChatSnapshot {
+            revision,
+            activity,
+            mode,
+            usage,
+            model_name,
         });
     }
 
-    pub fn set_mode(&mut self, mode: Mode) {
-        self.status.set_mode(mode);
+    /// Snapshot of the current transcript status, refreshed from the controller.
+    /// The chat container reads this during render to paint the status band it
+    /// owns; the transcript entries themselves stay in the controller.
+    pub fn snapshot(&self) -> Option<ChatSnapshot> {
+        self.refresh();
+        self.view.borrow().snap.clone()
     }
 
-    /// Whether the entity already holds a snapshot with this revision.
-    pub fn matches_revision(&self, revision: u64) -> bool {
-        self.view
-            .borrow()
-            .snap
-            .as_ref()
-            .map_or(false, |s| s.revision == revision)
+    /// Route a submission: slash commands act on the controller (login is
+    /// forwarded to the parent), a plain prompt starts the agent stream and
+    /// subscribes to it.
+    fn handle_submit(
+        &mut self,
+        submission: PromptSubmission,
+        cx: &mut Context<'_, Self, AlanAction>,
+    ) {
+        let Some(controller) = &mut self.controller else {
+            return;
+        };
+
+        // Not trimmed: a leading space means this is a prompt.
+        if let Some(command) = SlashCommand::parse(&submission.text) {
+            match command {
+                // The root owns the login overlay; flag it to open on return.
+                SlashCommand::Login => self.login_requested = true,
+                SlashCommand::Plan => controller.set_mode(agent::Mode::Plan),
+                SlashCommand::Review => controller.set_mode(agent::Mode::Review),
+                SlashCommand::Normal => controller.set_mode(agent::Mode::Normal),
+                SlashCommand::Help => controller.push_info(SlashCommand::help()),
+            }
+            return;
+        }
+
+        let text = submission.text.trim().to_owned();
+        let Some(stream) = controller.submit(text, submission.images) else {
+            return;
+        };
+        self.prompt = Some(
+            cx.subscribe_stream(agent_events(stream), |event, chat, cx| {
+                match event {
+                    SubscriptionEvent::Item(result) => {
+                        if let Some(controller) = &mut chat.controller {
+                            controller.apply_event(result);
+                        }
+                    }
+                    SubscriptionEvent::Closed => {
+                        if let Some(controller) = &mut chat.controller {
+                            controller.disconnect_stream();
+                        }
+                        chat.prompt = None;
+                    }
+                }
+                // Redraw immediately only once the run leaves the busy state
+                // (finished, error, or disconnect); while it is still streaming
+                // the fixed-rate ticker owns repaints so a fast token stream
+                // cannot starve scroll input.
+                if chat.controller.as_ref().is_none_or(|c| !c.is_busy()) {
+                    chat.stream_repaint = None;
+                    cx.notify();
+                }
+            }),
+        );
+        self.ensure_stream_repaint(cx);
     }
 
-    pub fn matches_activity(&self, activity: Activity) -> bool {
-        self.status
-            .snap
-            .as_ref()
-            .is_some_and(|snap| snap.activity == activity)
+    /// Start the fixed-rate repaint ticker if a run is in flight and it is not
+    /// already running. The ticker repaints the transcript at
+    /// `STREAM_REPAINT_INTERVAL`; it is cancelled once the run finishes.
+    fn ensure_stream_repaint(&mut self, cx: &mut Context<'_, Self, AlanAction>) {
+        if self.stream_repaint.is_some() || !self.controller.as_ref().is_some_and(|c| c.is_busy()) {
+            return;
+        }
+        self.stream_repaint = Some(cx.subscribe_stream(
+            stream_repaint_ticks(),
+            |event, chat, cx| {
+                if matches!(event, SubscriptionEvent::Closed) || !chat.is_streaming() {
+                    chat.stream_repaint = None;
+                    return;
+                }
+                cx.notify();
+            },
+        ));
+    }
+
+    /// Whether an agent run is currently in flight.
+    fn is_streaming(&self) -> bool {
+        self.controller.as_ref().is_some_and(|c| c.is_busy())
     }
 
     /// Whether wheel notches are queued and need a flush this tick.
@@ -144,11 +299,50 @@ impl ChatHistory {
         self.view.borrow().pending_wheel != 0
     }
 
-    /// Keep bottom-follow state synchronized and apply queued wheel notches.
-    /// Called from the parent's 16ms poll tick when wheel notches are pending;
-    /// bottom-follow itself is synchronized by `sync_scroll` during render.
-    pub fn tick(&mut self) {
-        self.view.borrow_mut().flush_wheel();
+    /// Take the pending `/login` request, if any. Read by the root after it
+    /// dispatches a submission so it can open the login overlay.
+    pub(crate) fn take_login_request(&mut self) -> bool {
+        std::mem::take(&mut self.login_requested)
+    }
+
+    /// Apply one capped step of queued wheel notches, returning whether the
+    /// viewport moved. Driven by the self-scheduled momentum ticker
+    /// (`ensure_momentum`); bottom-follow itself is synchronized by
+    /// `sync_scroll` during render.
+    fn tick(&mut self) -> bool {
+        self.view.borrow_mut().flush_wheel()
+    }
+
+    /// Start the momentum ticker if wheel notches are queued and it is not
+    /// already running. The ticker applies one capped flush step per
+    /// `MOMENTUM_TICK_INTERVAL`, requests a redraw only when the viewport
+    /// actually moved, and cancels itself after `MOMENTUM_IDLE_TICKS` idle
+    /// ticks — so no timer runs once scrolling settles.
+    fn ensure_momentum(&mut self, cx: &mut Context<'_, Self, AlanAction>) {
+        if self.momentum.is_some() || self.view.borrow().pending_wheel == 0 {
+            return;
+        }
+        self.momentum_idle = 0;
+        self.momentum = Some(cx.subscribe_stream(momentum_ticks(), |event, chat, cx| {
+            match event {
+                SubscriptionEvent::Item(()) => {}
+                SubscriptionEvent::Closed => {
+                    chat.momentum = None;
+                    return;
+                }
+            }
+            if chat.tick() {
+                cx.notify();
+            }
+            if chat.has_pending_wheel() {
+                chat.momentum_idle = 0;
+            } else {
+                chat.momentum_idle += 1;
+                if chat.momentum_idle >= MOMENTUM_IDLE_TICKS {
+                    chat.momentum = None;
+                }
+            }
+        }));
     }
 
     /// Whether there is a non-empty selection active.
@@ -349,13 +543,43 @@ impl Component<AlanAction> for ChatHistory {
         cx: &mut Context<'_, Self, AlanAction>,
     ) -> ActionStatus {
         match action {
-            // Wheel notches are coalesced; the 16ms poll tick flushes them.
+            AlanAction::Submit(submission) => {
+                self.handle_submit(submission.clone(), cx);
+                cx.notify();
+                ActionStatus::Handled
+            }
+            AlanAction::ToggleMode => {
+                if let Some(controller) = &mut self.controller {
+                    controller.toggle_mode();
+                    cx.notify();
+                }
+                ActionStatus::Handled
+            }
+            // Ctrl-C: cancel the in-flight run by dropping its subscription,
+            // otherwise quit.
+            AlanAction::Quit => {
+                if self.controller.as_ref().is_some_and(|c| c.is_busy()) {
+                    self.prompt = None;
+                    self.stream_repaint = None;
+                    if let Some(controller) = &mut self.controller {
+                        controller.finish_stream();
+                    }
+                    cx.notify();
+                } else {
+                    cx.quit();
+                }
+                ActionStatus::Handled
+            }
+            // Wheel notches are coalesced; the self-scheduled momentum ticker
+            // drains them a capped step at a time.
             AlanAction::MouseScrollUp => {
                 self.push_wheel(-WHEEL_LINES_PER_NOTCH);
+                self.ensure_momentum(cx);
                 ActionStatus::Handled
             }
             AlanAction::MouseScrollDown => {
                 self.push_wheel(WHEEL_LINES_PER_NOTCH);
+                self.ensure_momentum(cx);
                 ActionStatus::Handled
             }
             AlanAction::Raw(event) => match event {
@@ -379,29 +603,41 @@ impl Component<AlanAction> for ChatHistory {
                     }
                     ActionStatus::Handled
                 }
+                // Esc clears an active transcript selection (the editor gets
+                // first refusal and pops attachments).
+                Event::Key(key)
+                    if key.code == KeyCode::Esc
+                        && key.kind == KeyEventKind::Press
+                        && self.has_active_selection() =>
+                {
+                    self.clear_selection();
+                    cx.notify();
+                    ActionStatus::Handled
+                }
                 _ => ActionStatus::Continue,
             },
             _ => ActionStatus::Continue,
         }
     }
 
-    fn render(&self, frame: &mut Frame, area: Rect, cx: &RenderContext<'_, AlanAction>) {
+    fn render(&self, frame: &mut Frame, area: Rect, _cx: &RenderContext<'_, AlanAction>) {
+        self.refresh();
+        let Some(controller) = &self.controller else {
+            return;
+        };
         let mut view = self.view.borrow_mut();
         let Some(snap) = view.snap.clone() else {
             return;
         };
 
-        let [content_area, status_area] = if area.height >= 2 {
-            Layout::vertical([Constraint::Min(1), Constraint::Length(2)]).areas(area)
-        } else {
-            return;
-        };
-
         let [content_area, scrollbar_area] =
-            Layout::horizontal([Constraint::Min(1), Constraint::Length(1)]).areas(content_area);
+            Layout::horizontal([Constraint::Min(1), Constraint::Length(1)]).areas(area);
         view.chat_area = content_area;
-        view.layout
-            .sync(&snap.entries, snap.revision, content_area.width.max(1));
+        view.layout.sync(
+            controller.entries(),
+            snap.revision,
+            content_area.width.max(1),
+        );
 
         let content_height = view.layout.height();
         let viewport_height = usize::from(content_area.height.max(1));
@@ -431,547 +667,48 @@ impl Component<AlanAction> for ChatHistory {
                 .thumb_style(Style::default().fg(Color::DarkGray));
             frame.render_stateful_widget(scrollbar_widget, scrollbar_area, &mut scrollbar);
         }
-
-        self.status.render(frame, status_area, cx);
     }
 }
 
-impl ChatHistory {
-    /// Drive the transcript mouse state from a raw mouse event. Returns true if
-    /// the viewport or selection changed and a redraw is needed.
-    fn handle_mouse_action(&mut self, mouse: &MouseEvent) -> bool {
-        self.view.borrow_mut().handle_mouse(mouse)
-    }
-}
+impl ChatHistory {}
 
-#[derive(Debug, Clone, PartialEq)]
-pub struct StatusSnapshot {
-    pub activity: Activity,
-    pub mode: Mode,
-    pub usage: Usage,
-    pub model_name: String,
-}
-
-/// Status line pinned to the bottom of the chat area: activity, key hints,
-/// and the mode/cost badges.
-#[derive(Debug, Default)]
-pub struct Status {
-    snap: Option<StatusSnapshot>,
-}
-
-impl Status {
-    pub fn set(&mut self, snap: StatusSnapshot) {
-        self.snap = Some(snap);
-    }
-
-    pub fn set_mode(&mut self, mode: Mode) {
-        if let Some(snap) = &mut self.snap {
-            snap.mode = mode;
+/// Emit an item immediately, then one per `MOMENTUM_TICK_INTERVAL`. The
+/// immediate first item removes the startup dead zone so the first notch moves
+/// on the next frame; the stream is owned by the momentum subscription, so it
+/// stops as soon as the subscription is cancelled and dropped.
+fn momentum_ticks() -> impl Stream<Item = ()> + Send + 'static {
+    futures_util::stream::unfold(true, |first| async move {
+        if !first {
+            tokio::time::sleep(MOMENTUM_TICK_INTERVAL).await;
         }
-    }
+        Some(((), false))
+    })
 }
 
-/// How an [`Activity`] presents itself in the status line.
-struct StatusStyle {
-    style: Style,
-    label: &'static str,
-    hints: &'static str,
+/// Emit one item per `STREAM_REPAINT_INTERVAL`. Drives fixed-rate repaints
+/// while the agent streams; owned by the repaint subscription, so it stops when
+/// that subscription is dropped.
+fn stream_repaint_ticks() -> impl Stream<Item = ()> + Send + 'static {
+    futures_util::stream::unfold((), |_| async {
+        tokio::time::sleep(STREAM_REPAINT_INTERVAL).await;
+        Some(((), ()))
+    })
 }
 
-impl From<Activity> for StatusStyle {
-    fn from(activity: Activity) -> Self {
-        match activity {
-            Activity::Thinking => StatusStyle {
-                label: "  ● thinking",
-                hints: "  Ctrl-C stop",
-                style: Style::default().italic().fg(ratatui::style::Color::Yellow),
-            },
-            Activity::Idle => StatusStyle {
-                label: "  ● idle",
-                hints: "  Enter send · Ctrl-C quit",
-                style: Style::default().fg(ratatui::style::Color::Green),
-            },
-        }
-    }
-}
-
-/// Flags that layer onto any activity.
-fn badges(snap: &StatusSnapshot) -> Vec<Span<'static>> {
-    let mut badges = Vec::new();
-    let badge = match snap.mode {
-        Mode::Plan => Some((" · Plan mode", ratatui::style::Color::White)),
-        Mode::Review => Some((" · Review mode", ratatui::style::Color::White)),
-        Mode::Normal => None,
-    };
-    if let Some((label, color)) = badge {
-        badges.push(Span::styled(label, Style::default().fg(color)));
-    }
-    if let Some(cost) = snap.usage.cost {
-        badges.push(Span::styled(
-            format!(" · ${:.4}", (cost * 10_000.0).trunc() / 10_000.0),
-            Style::default().fg(theme::MUTED_FG),
-        ));
-    }
-    badges
-}
-
-fn status_line(snap: &StatusSnapshot) -> Line<'static> {
-    let status = StatusStyle::from(snap.activity);
-    let mut spans = vec![
-        Span::styled(status.label, status.style),
-        Span::styled(status.hints, Style::default().fg(theme::MUTED_FG)),
-    ];
-    spans.extend(badges(snap));
-    spans.push(Span::styled(
-        format!(" · {}", snap.model_name),
-        Style::default().fg(theme::MUTED_FG),
-    ));
-
-    Line::from(spans)
-}
-
-impl<A: 'static> Component<A> for Status {
-    fn render(&self, frame: &mut Frame, area: Rect, _cx: &RenderContext<'_, A>) {
-        let Some(snap) = &self.snap else {
-            return;
-        };
-        frame.render_widget(
-            Paragraph::new(status_line(snap))
-                .style(Style::default().bg(theme::EDITOR_BG))
-                .block(Block::new().padding(Padding::new(0, 0, 1, 0))),
-            area,
-        );
-    }
-}
-
-// --- Layout cache and line-wrapping helpers (moved from the old `chat.rs`). ---
-
-#[derive(Debug, Default)]
-struct TranscriptLayout {
-    width: u16,
-    revision: u64,
-    entries: Vec<Entry>,
-    line_offsets: Vec<usize>,
-    lines: Vec<Line<'static>>,
-}
-
-impl TranscriptLayout {
-    fn sync(&mut self, entries: &[Entry], revision: u64, width: u16) {
-        if self.width == width && self.revision == revision {
-            return;
-        }
-        if self.width != width {
-            self.rebuild(entries, revision, width);
-            return;
-        }
-
-        let unchanged = self
-            .entries
-            .iter()
-            .zip(entries)
-            .take_while(|(cached, entry)| cached == entry)
-            .count();
-        if unchanged == self.entries.len() && unchanged == entries.len() {
-            self.revision = revision;
-            return;
-        }
-
-        let line_start = self.line_offsets[unchanged];
-        self.entries.truncate(unchanged);
-        self.line_offsets.truncate(unchanged + 1);
-        self.lines.truncate(line_start);
-        self.append(&entries[unchanged..], width);
-        self.revision = revision;
-    }
-
-    fn rebuild(&mut self, entries: &[Entry], revision: u64, width: u16) {
-        self.width = width;
-        self.revision = revision;
-        self.entries.clear();
-        self.line_offsets.clear();
-        self.line_offsets.push(0);
-        self.lines.clear();
-        self.append(entries, width);
-    }
-
-    fn append(&mut self, entries: &[Entry], width: u16) {
-        let width = usize::from(width.max(1));
-        let content_width = width.saturating_sub(theme::CHAT_PADDING * 2).max(1);
-        for entry in entries {
-            self.lines.extend(wrap_entry(entry, width, content_width));
-            self.entries.push(entry.clone());
-            self.line_offsets.push(self.lines.len());
-        }
-    }
-
-    fn height(&self) -> usize {
-        self.lines.len()
-    }
-
-    fn lines(&self) -> &[Line<'static>] {
-        &self.lines
-    }
-
-    fn viewport(&self, scroll: usize, height: usize) -> Vec<Line<'static>> {
-        let end = scroll.saturating_add(height).min(self.lines.len());
-        self.lines[scroll.min(end)..end].to_vec()
-    }
-}
-
-fn scrollbar_position(scroll: usize, max_scroll: usize, content_height: usize) -> usize {
-    if max_scroll == 0 || content_height <= 1 {
-        return 0;
-    }
-    scroll
-        .saturating_mul(content_height - 1)
-        .saturating_add(max_scroll / 2)
-        / max_scroll
-}
-
-fn wrap_entry(entry: &Entry, width: usize, content_width: usize) -> Vec<Line<'static>> {
-    match entry {
-        Entry::Prompt(text) => {
-            let mut lines = Vec::new();
-            lines.push(background_line("", width, theme::USER_FG, theme::USER_BG));
-            if text.is_empty() {
-                // Image-only submission: no text accompanied the attachment.
-                lines.push(indented_line("(attachment)", theme::MUTED_FG));
-            } else {
-                for line in wrap_text(text, content_width) {
-                    lines.push(background_line(
-                        &line,
-                        width,
-                        theme::USER_FG,
-                        theme::USER_BG,
-                    ));
-                }
-            }
-            lines.push(background_line("", width, theme::USER_FG, theme::USER_BG));
-            lines
-        }
-        Entry::Response(text) => {
-            let mut lines = vec![Line::default()];
-            if text.is_empty() {
-                lines.push(indented_line("(empty response)", theme::MUTED_FG));
-            } else {
-                lines.extend(wrap_markdown(text, content_width));
-            }
-            lines.push(Line::default());
-            lines
-        }
-        Entry::Reasoning(text) => {
-            let mut lines = vec![Line::default()];
-            if text.is_empty() {
-                lines.push(indented_line("(reasoning)", theme::MUTED_FG));
-            } else {
-                for line in wrap_text(text, content_width) {
-                    lines.push(indented_line(&line, theme::REASONING_FG));
-                }
-            }
-            lines.push(Line::default());
-            lines
-        }
-        // Rendered as markdown so command output keeps its formatting.
-        Entry::Info(text) => {
-            let mut lines = vec![Line::default()];
-            lines.extend(wrap_markdown(text, content_width));
-            lines.push(Line::default());
-            lines
-        }
-        Entry::ToolCall {
-            name,
-            arguments,
-            output,
-            status,
-            ..
-        } => {
-            let (background, foreground) = match status {
-                crate::core::chat::ToolStatus::Running => (theme::TOOL_BG, theme::TOOL_FG),
-                crate::core::chat::ToolStatus::Completed => {
-                    (theme::TOOL_DONE_BG, theme::TOOL_DONE_FG)
-                }
-                crate::core::chat::ToolStatus::Failed(_) => {
-                    (theme::TOOL_ERROR_BG, theme::TOOL_ERROR_FG)
-                }
-            };
-            let mut lines = vec![tool_line("", width, foreground, background)];
-            let argument_summary = compact_arguments(name, arguments);
-
-            if name == "bash" {
-                if !argument_summary.is_empty() {
-                    for line in wrap_text(&argument_summary, content_width.saturating_sub(2)) {
-                        lines.push(tool_detail_line(&line, width, foreground, background));
-                    }
-                }
-            } else {
-                let status_color = match status {
-                    crate::core::chat::ToolStatus::Running => Color::Yellow,
-                    crate::core::chat::ToolStatus::Completed => foreground,
-                    crate::core::chat::ToolStatus::Failed(_) => foreground,
-                };
-                lines.push(tool_header(name, width, status_color, background));
-                if !argument_summary.is_empty() {
-                    for line in wrap_text(&argument_summary, content_width.saturating_sub(2)) {
-                        lines.push(tool_detail_line(&line, width, foreground, background));
-                    }
-                }
-            }
-
-            match status {
-                crate::core::chat::ToolStatus::Failed(error) => {
-                    for line in wrap_text(error, content_width.saturating_sub(2)) {
-                        lines.push(tool_detail_line(&line, width, foreground, background));
-                    }
-                }
-                _ if output.is_empty() => {
-                    lines.push(tool_detail_line(
-                        "(no output)",
-                        width,
-                        foreground,
-                        background,
-                    ));
-                }
-                _ => {
-                    for line in wrap_text(output, content_width.saturating_sub(2)) {
-                        lines.push(tool_detail_line(&line, width, foreground, background));
-                    }
-                }
-            }
-            lines.push(tool_line("", width, foreground, background));
-            lines
-        }
-        Entry::Error(text) => {
-            let mut lines = vec![Line::default()];
-            for line in wrap_text(text, content_width) {
-                lines.push(indented_line(&line, Color::Red));
-            }
-            lines.push(Line::default());
-            lines
-        }
-    }
-}
-
-fn background_line(
-    text: &str,
-    width: usize,
-    foreground: Color,
-    background: Color,
-) -> Line<'static> {
-    let content = format!("{}{}", " ".repeat(theme::CHAT_PADDING), text);
-    let used_width = Line::from(content.as_str()).width();
-    let trailing = " ".repeat(width.saturating_sub(used_width));
-    Line::from(Span::styled(
-        format!("{content}{trailing}"),
-        Style::default().fg(foreground).bg(background),
-    ))
-}
-
-fn indented_line(text: &str, foreground: Color) -> Line<'static> {
-    Line::from(Span::styled(
-        format!("{}{}", " ".repeat(theme::CHAT_PADDING), text),
-        Style::default().fg(foreground),
-    ))
-}
-
-fn compact_arguments(name: &str, arguments: &str) -> String {
-    let Ok(value) = serde_json::from_str::<serde_json::Value>(arguments) else {
-        return arguments.to_owned();
-    };
-
-    match name {
-        "bash" => value
-            .get("command")
-            .and_then(serde_json::Value::as_str)
-            .map(|command| format!("$ {command}"))
-            .unwrap_or_default(),
-        "read" | "write" => value
-            .get("path")
-            .and_then(serde_json::Value::as_str)
-            .map(|path| format!("{name}: {path}"))
-            .unwrap_or_default(),
-        _ => value.to_string(),
-    }
-}
-
-fn tool_header(name: &str, width: usize, foreground: Color, background: Color) -> Line<'static> {
-    let content = format!("{}▸ {name}", " ".repeat(theme::CHAT_PADDING));
-    Line::from(Span::styled(
-        pad_line(&content, width),
-        Style::default().fg(foreground).bg(background).bold(),
-    ))
-}
-
-fn tool_line(text: &str, width: usize, foreground: Color, background: Color) -> Line<'static> {
-    let content = format!("{}{}", " ".repeat(theme::CHAT_PADDING), text);
-    let used_width = Line::from(content.as_str()).width();
-    let trailing = " ".repeat(width.saturating_sub(used_width));
-    Line::from(Span::styled(
-        format!("{content}{trailing}"),
-        Style::default().fg(foreground).bg(background),
-    ))
-}
-
-fn tool_detail_line(
-    text: &str,
-    width: usize,
-    foreground: Color,
-    background: Color,
-) -> Line<'static> {
-    let content = format!("{}{}{}", " ".repeat(theme::CHAT_PADDING), "  ", text);
-    let used_width = Line::from(content.as_str()).width();
-    let trailing = " ".repeat(width.saturating_sub(used_width));
-    Line::from(Span::styled(
-        format!("{content}{trailing}"),
-        Style::default().fg(foreground).bg(background),
-    ))
-}
-
-fn pad_line(text: &str, width: usize) -> String {
-    let used_width = Line::from(text).width();
-    format!("{text}{}", " ".repeat(width.saturating_sub(used_width)))
-}
-
-#[derive(Clone, Copy, Debug, Default)]
-struct MarkdownStyleSheet;
-
-impl tui_markdown::StyleSheet for MarkdownStyleSheet {
-    fn heading(&self, level: u8) -> Style {
-        tui_markdown::DefaultStyleSheet.heading(level).bold()
-    }
-
-    fn code(&self) -> Style {
-        Style::default().fg(theme::RESPONSE_FG).bg(Color::Reset)
-    }
-}
-
-fn wrap_markdown(text: &str, width: usize) -> Vec<Line<'static>> {
-    let options = tui_markdown::Options::new(MarkdownStyleSheet);
-    let markdown = tui_markdown::from_str_with_options(text, &options);
-    let mut lines = Vec::new();
-    let prefix = " ".repeat(theme::CHAT_PADDING);
-    let available = width.saturating_sub(theme::CHAT_PADDING).max(1);
-
-    for source in markdown.lines {
-        let mut current = Line::from(Span::styled(
-            prefix.clone(),
-            Style::default().fg(theme::RESPONSE_FG),
-        ));
-        let mut current_width = theme::CHAT_PADDING;
-
-        for span in source.spans {
-            let style = span.style;
-            for character in span.content.chars() {
-                let character_width = UnicodeWidthChar::width(character).unwrap_or(0);
-                if current_width > theme::CHAT_PADDING
-                    && current_width - theme::CHAT_PADDING + character_width > available
-                {
-                    lines.push(current);
-                    current = Line::from(Span::styled(
-                        prefix.clone(),
-                        Style::default().fg(theme::RESPONSE_FG),
-                    ));
-                    current_width = theme::CHAT_PADDING;
-                }
-                current.push_span(Span::styled(
-                    character.to_string(),
-                    Style::default().fg(theme::RESPONSE_FG).patch(style),
-                ));
-                current_width += character_width;
-            }
-        }
-        lines.push(current);
-    }
-
-    if lines.is_empty() {
-        lines.push(indented_line("", theme::RESPONSE_FG));
-    }
-    lines
-}
-
-fn wrap_text(text: &str, width: usize) -> Vec<String> {
-    let mut wrapped = Vec::new();
-    for source_line in text.lines() {
-        if source_line.is_empty() {
-            wrapped.push(String::new());
-            continue;
-        }
-
-        let mut current = String::new();
-        let mut current_width = 0;
-        for character in source_line.chars() {
-            let character_width = character.width().unwrap_or(0);
-            if current_width > 0 && current_width + character_width > width {
-                wrapped.push(std::mem::take(&mut current));
-                current_width = 0;
-            }
-            current.push(character);
-            current_width += character_width;
-        }
-        wrapped.push(current);
-    }
-    if wrapped.is_empty() {
-        wrapped.push(String::new());
-    }
-    wrapped
+/// Adapt an [`AgentStream`] into a `futures_util::Stream` so it can be driven
+/// by `cx.subscribe_stream`. Each item is one display event; the stream ends
+/// when the agent task finishes or the subscription is dropped.
+fn agent_events(
+    stream: AgentStream,
+) -> impl Stream<Item = Result<AgentEvent, agent::AgentError>> + Send + 'static {
+    futures_util::stream::unfold(stream, |mut stream| async move {
+        stream.recv().await.map(|event| (event, stream))
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::chat::ToolStatus;
-
-    // --- Migrated from the old `chat.rs` (layout / wrapping), verbatim. ---
-
-    #[test]
-    fn maps_scroll_endpoints_to_scrollbar_endpoints() {
-        assert_eq!(scrollbar_position(0, 80, 100), 0);
-        assert_eq!(scrollbar_position(40, 80, 100), 50);
-        assert_eq!(scrollbar_position(80, 80, 100), 99);
-    }
-
-    #[test]
-    fn wraps_by_display_width_without_splitting_utf8() {
-        assert_eq!(wrap_text("abcdef", 3), ["abc", "def"]);
-        assert_eq!(wrap_text("界界界", 4), ["界界", "界"]);
-    }
-
-    #[test]
-    fn transcript_layout_reuses_unchanged_entries() {
-        let entries = vec![
-            Entry::Prompt("first".into()),
-            Entry::ToolCall {
-                id: "call-1".into(),
-                name: "bash".into(),
-                arguments: r#"{\"command\":\"echo first\"}"#.into(),
-                output: "first output".into(),
-                status: ToolStatus::Completed,
-            },
-        ];
-        let mut layout = TranscriptLayout::default();
-        layout.sync(&entries, 1, 80);
-        let cached_first = layout.lines[..layout.line_offsets[1]].to_vec();
-
-        let mut changed = entries.clone();
-        changed.push(Entry::Response("second".into()));
-        layout.sync(&changed, 2, 80);
-
-        assert_eq!(
-            &layout.lines[..layout.line_offsets[1]],
-            cached_first.as_slice()
-        );
-        assert_eq!(layout.entries, changed);
-    }
-
-    #[test]
-    fn transcript_layout_rebuilds_on_width_change() {
-        let entries = vec![Entry::Response("abcdefgh".into())];
-        let mut layout = TranscriptLayout::default();
-        layout.sync(&entries, 1, 12);
-        let narrow_height = layout.height();
-        layout.sync(&entries, 1, 80);
-
-        assert!(layout.height() < narrow_height);
-    }
 
     // --- Migrated from `UiState` (scroll / follow / wheel), adapted to the
     // `RefCell<View>` storage. ---

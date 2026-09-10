@@ -19,6 +19,7 @@ use tui::Runtime;
 
 use crate::logging::init;
 use crate::root::{AlanKeyMapper, AlanRoot};
+use crate::views::ChatHistory;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -60,14 +61,15 @@ async fn main() -> anyhow::Result<()> {
     }
     let agent = agent_builder.build()?;
 
-    let mut app = ChatController::new(agent);
+    let mut controller = ChatController::new(agent);
     if was_resumed {
-        app.restore_session_history().await;
+        controller.restore_session_history().await;
     }
     // `Runtime::run` consumes the root, so keep the agent for the saved-session
     // message printed after the TUI exits.
-    let agent = app.agent();
-    let result = Runtime::builder(AlanRoot::new(app, registry, credential_store))
+    let agent = controller.agent();
+    let chat = ChatHistory::new(controller);
+    let result = Runtime::builder(AlanRoot::new(chat, registry, credential_store))
         .key_mapper(AlanKeyMapper)
         .tick_rate(Duration::from_millis(16))
         .build()

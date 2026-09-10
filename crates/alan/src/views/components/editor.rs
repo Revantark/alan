@@ -12,7 +12,6 @@ use crossterm::event::{Event, KeyCode, KeyModifiers};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::Style;
-use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Paragraph, Widget};
 use strum::IntoEnumIterator;
 use tui::context::Context;
@@ -521,36 +520,9 @@ impl Component<AlanAction> for PromptEditor {
         let background = Paragraph::new("").style(Style::default().bg(theme::EDITOR_BG));
         frame.render_widget(background, area);
 
-        let [attachment_area, _status_editor_gap, editor_area] = Layout::vertical([
-            Constraint::Length(self.attachment_height()),
-            Constraint::Length(1),
-            Constraint::Min(1),
-        ])
-        .areas(area);
-
-        // Render attachment section when there are pending images.
-        if !self.attachments.is_empty() {
-            let mut lines: Vec<Line<'static>> = vec![
-                Line::from("\n"),
-                Line::from(Span::styled(
-                    "  Attachments  (esc removes last)",
-                    Style::default().fg(theme::ATTACHMENT_FG).bold(),
-                )),
-            ];
-            for attachment in self.attachments() {
-                lines.push(Line::from(Span::styled(
-                    format!("   - {}", attachment.name),
-                    Style::default().fg(theme::ATTACHMENT_FG),
-                )));
-            }
-            let attachments =
-                Paragraph::new(Text::from(lines)).style(Style::default().bg(theme::ATTACHMENT_BG));
-            frame.render_widget(attachments, attachment_area);
-        }
-
         let [prompt_area, input_area] =
             Layout::horizontal([Constraint::Length(theme::PROMPT_GUTTER), Constraint::Min(1)])
-                .areas(editor_area);
+                .areas(area);
         frame.render_widget(
             Paragraph::new("  › ")
                 .style(Style::default().fg(theme::PROMPT_FG).bg(theme::EDITOR_BG)),
