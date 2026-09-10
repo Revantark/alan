@@ -439,15 +439,11 @@ fn popup_completion_request(editor: &TextArea<'static>) -> Option<CompletionRequ
 
 /// A spawned scan: walks the workspace and returns its relative paths.
 /// Runs on the blocking thread pool, so it never blocks the UI loop.
-async fn scan_task(
-    root: std::path::PathBuf,
-) -> Result<Vec<String>, tui::TaskError> {
+async fn scan_task(root: std::path::PathBuf) -> Result<Vec<String>, tui::TaskError> {
     let result =
         tokio::task::spawn_blocking(move || crate::core::completion::scan::scan_dir(&root))
             .await
-            .unwrap_or_else(|_| {
-                Err(std::io::Error::other("scan panicked"))
-            });
+            .unwrap_or_else(|_| Err(std::io::Error::other("scan panicked")));
     result.map_err(|error| tui::TaskError(Box::new(error)))
 }
 
