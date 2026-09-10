@@ -91,7 +91,7 @@ impl LoginOverlay {
             AuthMethod::ApiKey => providers::AuthResult::ApiKey(std::mem::take(input)),
         };
 
-        let Some(provider) = self.providers.get(&provider_id) else {
+        let Some(provider) = self.providers.get(provider_id) else {
             self.state = LoginState::Error("Provider not found".into());
             cx.notify();
             return;
@@ -110,7 +110,7 @@ impl LoginOverlay {
                 match auth_result {
                     AuthResult::ApiKey(key) => {
                         let credential = providers::Credential::ApiKey { key };
-                        if let Err(e) = credentials.put(&provider.id(), credential).await {
+                        if let Err(e) = credentials.put(provider.id(), credential).await {
                             return Err(tui::TaskError(e.into()));
                         }
                     }
@@ -176,7 +176,7 @@ impl LoginOverlay {
             }
             LoginState::Prompting { .. } => self.submit_input(cx),
             LoginState::Validating { .. } => {}
-            LoginState::Success { .. } | LoginState::Error(_) => {
+            LoginState::Success | LoginState::Error(_) => {
                 self.dismiss(cx);
             }
         }

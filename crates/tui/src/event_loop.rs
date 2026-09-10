@@ -301,6 +301,7 @@ where
                 deliver_observations(source, &mut state, &store);
             }
             close_overlays(&mut state, &mut store);
+            flush_requests(&mut state, &mut store);
             state.cleanup_subscriptions(&store);
             if state.take_dirty() {
                 let focused = state.focus.current();
