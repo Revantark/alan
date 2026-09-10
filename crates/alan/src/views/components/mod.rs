@@ -1,8 +1,11 @@
 mod chat_history;
+mod chat_view;
 mod editor;
 mod header;
 mod popup_v2;
+mod status;
+mod transcript;
 
-pub use chat_history::{ChatHistory, ChatSnapshot};
-pub use editor::PromptEditor;
+pub use chat_history::ChatHistory;
+pub use chat_view::{ChatView, LoginRequested};
 pub use header::Header;

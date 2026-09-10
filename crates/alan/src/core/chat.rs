@@ -2,26 +2,9 @@
 
 use super::action::ImageAttachment;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Poll {
-    Idle,
-    Changed,
-    Finished,
-    Error,
-    Aborted,
-}
-
-impl Poll {
-    pub(crate) fn combine(self, other: Self) -> Self {
-        match (self, other) {
-            (Self::Error, _) | (_, Self::Error) => Self::Error,
-            (Self::Aborted, _) | (_, Self::Aborted) => Self::Aborted,
-            (Self::Finished, _) | (_, Self::Finished) => Self::Finished,
-            (Self::Changed, _) | (_, Self::Changed) => Self::Changed,
-            _ => Self::Idle,
-        }
-    }
-}
+use agent::{Agent, AgentEvent, AgentStream};
+use llm::Usage;
+use std::sync::Arc;
 
 /// What the prompt is doing, and so what Enter does to it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -32,10 +15,6 @@ pub enum Activity {
     /// Waiting on a prompt.
     Idle,
 }
-use agent::{Agent, AgentEvent, AgentStream};
-use llm::Usage;
-use std::sync::Arc;
-use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Entry {
@@ -60,15 +39,10 @@ pub enum ToolStatus {
     Failed(String),
 }
 
-const POLL_EVENT_LIMIT: usize = 256;
-const POLL_TIME_BUDGET: Duration = Duration::from_millis(2);
-
 pub struct ChatController {
     agent: Arc<Agent>,
     entries: Vec<Entry>,
-    stream: Option<AgentStream>,
     busy: bool,
-    aborting: bool,
     revision: u64,
     usage: Usage,
     model_name: String,
@@ -80,9 +54,7 @@ impl ChatController {
         Self {
             agent: Arc::new(agent),
             entries: Vec::new(),
-            stream: None,
             busy: false,
-            aborting: false,
             revision: 0,
             usage: Usage::default(),
             model_name: name,
@@ -185,10 +157,16 @@ impl ChatController {
         self.revision = self.revision.wrapping_add(1);
     }
 
-    pub fn submit(&mut self, text: String, images: Vec<ImageAttachment>) {
+    /// Push the prompt and start the agent run, returning the stream of
+    /// display events for the caller to feed back via [`apply_event`](Self::apply_event).
+    ///
+    /// Returns `None` when the prompt is empty, the controller is busy, or the
+    /// agent rejects the request (in which case an error entry replaces the
+    /// placeholder prompt).
+    pub fn submit(&mut self, text: String, images: Vec<ImageAttachment>) -> Option<AgentStream> {
         let text = text.trim();
         if (text.is_empty() && images.is_empty()) || self.busy {
-            return;
+            return None;
         }
 
         self.entries.push(Entry::Prompt(text.to_owned()));
@@ -209,7 +187,7 @@ impl ChatController {
         match self.agent.ask(builder) {
             Ok(stream) => {
                 self.busy = true;
-                self.stream = Some(stream);
+                Some(stream)
             }
             Err(error) => {
                 // Replace the placeholder prompt with the failure so a
@@ -217,136 +195,99 @@ impl ChatController {
                 self.entries.pop();
                 self.entries.push(Entry::Error(error.to_string()));
                 self.revision = self.revision.wrapping_add(1);
+                None
             }
         }
     }
 
-    pub fn abort(&mut self) -> bool {
-        if !self.busy {
-            return false;
-        }
-
-        self.aborting = true;
-        if let Some(stream) = &self.stream {
-            stream.abort();
-            return true;
-        }
-        false
-    }
-
-    pub fn poll(&mut self) -> Poll {
-        let Some(mut stream) = self.stream.take() else {
-            return Poll::Idle;
-        };
-
-        let mut outcome = Poll::Idle;
-        let started = Instant::now();
-        let mut processed = 0;
-        let mut pending_text = String::new();
+    /// Apply one display event from the agent stream, mutating the transcript
+    /// and status. `Finished` and error events clear the busy state.
+    pub fn apply_event(&mut self, result: Result<AgentEvent, agent::AgentError>) {
         let mut changed = false;
-
-        while processed < POLL_EVENT_LIMIT && started.elapsed() < POLL_TIME_BUDGET {
-            match stream.try_recv() {
-                Ok(Ok(event)) => {
-                    processed += 1;
-                    match event {
-                        AgentEvent::TextDelta(text) => {
-                            pending_text.push_str(&text);
-                        }
-                        AgentEvent::ReasoningDelta(reasoning) => {
-                            changed |= Self::append_delta(&mut self.entries, &pending_text);
-                            pending_text.clear();
-                            changed |= Self::append_reasoning(&mut self.entries, &reasoning);
-                        }
-                        AgentEvent::ToolCallStarted {
-                            id,
-                            name,
-                            arguments,
-                        } => {
-                            Self::append_delta(&mut self.entries, &pending_text);
-                            pending_text.clear();
-                            self.entries.push(Entry::ToolCall {
-                                id,
-                                name,
-                                arguments,
-                                output: String::new(),
-                                status: ToolStatus::Running,
-                            });
-                            changed = true;
-                        }
-                        AgentEvent::ToolCallFinished { id, output } => {
-                            changed |= Self::update_tool_call(
-                                &mut self.entries,
-                                &id,
-                                output,
-                                ToolStatus::Completed,
-                            );
-                        }
-                        AgentEvent::ToolCallFailed { id, error } => {
-                            changed |= Self::update_tool_call(
-                                &mut self.entries,
-                                &id,
-                                String::new(),
-                                ToolStatus::Failed(error),
-                            );
-                        }
-                        AgentEvent::Usage { usage } => {
-                            self.usage = usage;
-                            changed = true;
-                        }
-                        AgentEvent::Finished { usage, .. } => {
-                            changed |= Self::append_delta(&mut self.entries, &pending_text);
-                            pending_text.clear();
-                            changed |= Self::ensure_response_entry(&mut self.entries);
-                            self.usage = usage;
-                            self.busy = false;
-                            outcome = Poll::Finished;
-                            break;
-                        }
-                    }
+        match result {
+            Ok(event) => match event {
+                AgentEvent::TextDelta(text) => {
+                    changed |= Self::append_delta(&mut self.entries, &text);
                 }
-                Ok(Err(error)) => {
-                    changed |= Self::append_delta(&mut self.entries, &pending_text);
-                    pending_text.clear();
-                    self.busy = false;
-                    if matches!(error, agent::AgentError::Aborted) || self.aborting {
-                        self.aborting = false;
-                        outcome = Poll::Aborted;
-                    } else {
-                        self.entries.push(Entry::Error(error.to_string()));
-                        changed = true;
-                        outcome = Poll::Error;
-                    }
-                    break;
+                AgentEvent::ReasoningDelta(reasoning) => {
+                    changed |= Self::append_reasoning(&mut self.entries, &reasoning);
                 }
-                Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
-                Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
-                    changed |= Self::append_delta(&mut self.entries, &pending_text);
-                    pending_text.clear();
+                AgentEvent::ToolCallStarted {
+                    id,
+                    name,
+                    arguments,
+                } => {
+                    self.entries.push(Entry::ToolCall {
+                        id,
+                        name,
+                        arguments,
+                        output: String::new(),
+                        status: ToolStatus::Running,
+                    });
+                    changed = true;
+                }
+                AgentEvent::ToolCallFinished { id, output } => {
+                    changed |= Self::update_tool_call(
+                        &mut self.entries,
+                        &id,
+                        output,
+                        ToolStatus::Completed,
+                    );
+                }
+                AgentEvent::ToolCallFailed { id, error } => {
+                    changed |= Self::update_tool_call(
+                        &mut self.entries,
+                        &id,
+                        String::new(),
+                        ToolStatus::Failed(error),
+                    );
+                }
+                AgentEvent::Usage { usage } => {
+                    self.usage = usage;
+                    changed = true;
+                }
+                AgentEvent::Finished { usage, .. } => {
+                    Self::ensure_response_entry(&mut self.entries);
+                    self.usage = usage;
                     self.busy = false;
-                    if self.aborting {
-                        self.aborting = false;
-                        outcome = Poll::Aborted;
-                    } else {
-                        self.entries
-                            .push(Entry::Error("agent stream disconnected".into()));
-                        changed = true;
-                        outcome = Poll::Error;
-                    }
-                    break;
+                    changed = true;
+                }
+            },
+            Err(error) => {
+                self.busy = false;
+                // An aborted run (the stream was dropped) carries no message.
+                if !matches!(error, agent::AgentError::Aborted) {
+                    self.entries.push(Entry::Error(error.to_string()));
+                    changed = true;
                 }
             }
         }
-        changed |= Self::append_delta(&mut self.entries, &pending_text);
+
         if changed {
             self.revision = self.revision.wrapping_add(1);
-            outcome = outcome.combine(Poll::Changed);
         }
+    }
 
+    /// Clear the busy state without recording an error. Used when the run was
+    /// intentionally cancelled (the stream subscription was dropped). No-op
+    /// once `Finished`/error has already been applied.
+    pub fn finish_stream(&mut self) {
         if self.busy {
-            self.stream = Some(stream);
+            self.busy = false;
+            self.revision = self.revision.wrapping_add(1);
         }
-        outcome
+    }
+
+    /// Handle the event stream closing. If the run is still busy, the task
+    /// ended without a terminal event (e.g. it panicked); record a disconnect
+    /// error. A completed or errored run has already cleared `busy`.
+    pub fn disconnect_stream(&mut self) {
+        if self.busy {
+            self.busy = false;
+            self.entries
+                .push(Entry::Error("agent stream disconnected".into()));
+            self.revision = self.revision.wrapping_add(1);
+        }
     }
 
     fn append_delta(entries: &mut Vec<Entry>, delta: &str) -> bool {
