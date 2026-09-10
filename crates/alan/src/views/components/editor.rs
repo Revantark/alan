@@ -409,10 +409,7 @@ fn spawn_path_scan(
     let trigger = request.trigger;
     let request_clone = request.clone();
     cx.spawn(scan_task(root_path), move |result, root, cx| {
-        let paths = match result {
-            Ok(paths) => paths,
-            Err(_) => Vec::new(),
-        };
+        let paths: Vec<String> = result.unwrap_or_default();
         let ctx = PathsContext {
             paths,
             status: crate::core::CompletionStatus::Ready,
@@ -442,21 +439,16 @@ fn popup_completion_request(editor: &TextArea<'static>) -> Option<CompletionRequ
 
 /// A spawned scan: walks the workspace and returns its relative paths.
 /// Runs on the blocking thread pool, so it never blocks the UI loop.
-fn scan_task(
+async fn scan_task(
     root: std::path::PathBuf,
-) -> impl std::future::Future<Output = Result<Vec<String>, tui::TaskError>> + Send + 'static {
-    async move {
-        let result =
-            tokio::task::spawn_blocking(move || crate::core::completion::scan::scan_dir(&root))
-                .await
-                .unwrap_or_else(|_| {
-                    Err(std::io::Error::new(
-                        std::io::ErrorKind::Other,
-                        "scan panicked",
-                    ))
-                });
-        result.map_err(|error| tui::TaskError(Box::new(error)))
-    }
+) -> Result<Vec<String>, tui::TaskError> {
+    let result =
+        tokio::task::spawn_blocking(move || crate::core::completion::scan::scan_dir(&root))
+            .await
+            .unwrap_or_else(|_| {
+                Err(std::io::Error::other("scan panicked"))
+            });
+    result.map_err(|error| tui::TaskError(Box::new(error)))
 }
 
 impl Component<AlanAction> for PromptEditor {
@@ -535,10 +527,10 @@ impl Component<AlanAction> for PromptEditor {
             frame.set_cursor_position(position);
         }
 
-        if let Some(area) = PopupListv2::area_above(area, frame.area(), 5) {
-            if let Some(popup) = self.popup {
-                cx.render_entity(popup, frame, area);
-            }
+        if let Some(area) = PopupListv2::area_above(area, frame.area(), 5)
+            && let Some(popup) = self.popup
+        {
+            cx.render_entity(popup, frame, area);
         }
     }
 }

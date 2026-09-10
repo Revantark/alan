@@ -136,9 +136,6 @@ impl Component<AlanAction> for AlanRoot {
                 .expect("chat component installed once"),
         ));
         self.view = Some(view);
-        // The chat cannot open the login overlay itself (the root owns the
-        // providers and credentials), so it emits a typed request the root
-        // handles here.
         self.login_subscription = Some(
             cx.subscribe::<LoginRequested, ChatView, _>(view, |_event, root, _view, cx| {
                 root.open_login(cx)
