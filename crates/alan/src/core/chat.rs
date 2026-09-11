@@ -7,10 +7,14 @@ use llm::Usage;
 use std::sync::Arc;
 
 /// What the prompt is doing, and so what Enter does to it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Activity {
     /// Streaming a response.
     Thinking,
+
+    /// A blocking, non-agent operation is in flight (for example
+    /// `/summarize-new`); the string is the label shown in the status line.
+    Loading(String),
 
     /// Waiting on a prompt.
     Idle,
@@ -43,6 +47,10 @@ pub struct ChatController {
     agent: Arc<Agent>,
     entries: Vec<Entry>,
     busy: bool,
+    /// Blocking operation label in flight, e.g. `Some("summarizing")` during
+    /// `/summarize-new`. While set, input is blocked and the status line shows
+    /// the label in place of the idle indicator.
+    loading: Option<String>,
     revision: u64,
     usage: Usage,
     model_name: String,
@@ -55,6 +63,7 @@ impl ChatController {
             agent: Arc::new(agent),
             entries: Vec::new(),
             busy: false,
+            loading: None,
             revision: 0,
             usage: Usage::default(),
             model_name: name,
@@ -127,6 +136,21 @@ impl ChatController {
         self.busy
     }
 
+    /// The blocking-operation label, if one is in flight.
+    pub fn loading(&self) -> Option<&str> {
+        self.loading.as_deref()
+    }
+
+    /// Set (or clear) the blocking-operation label. Bumps the revision only
+    /// when the value actually changes, so `refresh` rebuilds exactly once.
+    pub fn set_loading(&mut self, loading: Option<String>) {
+        if self.loading == loading {
+            return;
+        }
+        self.loading = loading;
+        self.revision = self.revision.wrapping_add(1);
+    }
+
     pub fn mode(&self) -> agent::Mode {
         self.agent.mode()
     }
@@ -172,7 +196,7 @@ impl ChatController {
     /// placeholder prompt).
     pub fn submit(&mut self, text: String, images: Vec<ImageAttachment>) -> Option<AgentStream> {
         let text = text.trim();
-        if (text.is_empty() && images.is_empty()) || self.busy {
+        if (text.is_empty() && images.is_empty()) || self.busy || self.loading.is_some() {
             return None;
         }
 
@@ -433,5 +457,34 @@ mod tests {
             "usage must reset"
         );
         assert!(controller.revision() > before, "revision must advance");
+    }
+
+    #[tokio::test]
+    async fn set_loading_toggles_state_and_bumps_revision() {
+        let mut controller = ChatController::new(test_agent());
+        assert!(controller.loading().is_none());
+
+        let before = controller.revision();
+        controller.set_loading(Some("summarizing".to_owned()));
+        assert_eq!(controller.loading(), Some("summarizing"));
+        assert!(controller.revision() > before, "revision must advance");
+
+        // Setting the same value is a no-op.
+        let after = controller.revision();
+        controller.set_loading(Some("summarizing".to_owned()));
+        assert_eq!(controller.revision(), after, "no change, no bump");
+
+        controller.set_loading(None);
+        assert!(controller.loading().is_none());
+    }
+
+    #[tokio::test]
+    async fn submit_is_rejected_while_loading() {
+        let mut controller = ChatController::new(test_agent());
+        controller.set_loading(Some("summarizing".to_owned()));
+        assert!(
+            controller.submit("hi".to_owned(), Vec::new()).is_none(),
+            "submit must be rejected while loading"
+        );
     }
 }

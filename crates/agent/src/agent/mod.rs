@@ -93,7 +93,39 @@ impl Agent {
     pub async fn reset_session(&self) -> Result<(), AgentError> {
         let model = self.model.lock().await;
         self.clear_conversation().await;
-        persistence::ensure_session(self, &model).await
+        persistence::ensure_session(self, &model, None).await
+    }
+
+    /// Produce a summary of the current conversation, optionally focused.
+    ///
+    /// Runs one tool-less round over the context as-is plus a summarization
+    /// instruction; the caller decides whether to persist the result.
+    pub async fn summarize(&self, focus: Option<&str>) -> Result<String, AgentError> {
+        let model = self.model.lock().await;
+        let context = self.context.lock().await;
+        prompt::summarize(&model, &context, &prompt::summary_instruction(focus)).await
+    }
+
+    /// Reset to a fresh session seeded with `seed` messages.
+    ///
+    /// Captures the current session id first and records it as the `parent` of
+    /// the new session, so a summarized session stays traceable to its origin.
+    /// Then clears state, creates the new session file, and appends the seed
+    /// (persisted to the new session file).
+    pub async fn reset_session_with(&self, seed: Vec<AgentMessage>) -> Result<(), AgentError> {
+        // Capture before `clear_conversation` overwrites the id.
+        let parent = self.session_id.lock().await.clone();
+        let model = self.model.lock().await;
+        self.clear_conversation().await;
+        persistence::ensure_session(self, &model, Some(parent)).await?;
+        if seed.is_empty() {
+            return Ok(());
+        }
+        let mut context = self.context.lock().await;
+        for message in seed {
+            persistence::append_context_message(self, &mut context, message).await?;
+        }
+        Ok(())
     }
 
     /// Fresh id, no active session, empty conversation and usage.

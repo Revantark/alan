@@ -10,7 +10,14 @@ use super::Agent;
 
 /// Ensure a session exists. On the first call this creates and persists a
 /// session file; subsequent calls are no-ops.
-pub(super) async fn ensure_session(agent: &Agent, model: &Model) -> Result<(), AgentError> {
+///
+/// `parent` records the session this one was derived from; `None` for a fresh
+/// start (the normal prompt path).
+pub(super) async fn ensure_session(
+    agent: &Agent,
+    model: &Model,
+    parent: Option<String>,
+) -> Result<(), AgentError> {
     let mut active_session = agent.active_session.lock().await;
     if active_session.is_some() {
         return Ok(());
@@ -34,6 +41,7 @@ pub(super) async fn ensure_session(agent: &Agent, model: &Model) -> Result<(), A
             model.info().provider.0.clone(),
             model.info().id.clone(),
             model.reasoning_effort(),
+            parent,
         )
         .await?;
 

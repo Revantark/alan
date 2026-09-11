@@ -87,6 +87,13 @@ impl Component<AlanAction> for ChatView {
     where
         Self: Sized,
     {
+        // While a blocking operation (e.g. `/summarize-new`) is in flight, all
+        // input is swallowed so it cannot race the in-flight task.
+        if let Some(chat) = self.chat
+            && cx.read(chat, |c| c.is_loading()).unwrap_or(false)
+        {
+            return ActionStatus::Handled;
+        }
         match action {
             // The editor bubbles submissions up to here. Run them on the
             // transcript, then forward a `/login` request to the root as a
