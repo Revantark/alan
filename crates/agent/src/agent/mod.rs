@@ -89,6 +89,22 @@ impl Agent {
         ))
     }
 
+    /// Reset to a brand-new, empty session in place.
+    pub async fn reset_session(&self) -> Result<(), AgentError> {
+        let model = self.model.lock().await;
+        self.clear_conversation().await;
+        persistence::ensure_session(self, &model).await
+    }
+
+    /// Fresh id, no active session, empty conversation and usage.
+    async fn clear_conversation(&self) {
+        *self.session_id.lock().await = uuid::Uuid::new_v4().to_string();
+        *self.active_session.lock().await = None;
+        let mut context = self.context.lock().await;
+        context.messages.clear();
+        context.usage = llm::Usage::default();
+    }
+
     pub async fn session_id(&self) -> Option<String> {
         self.active_session
             .lock()

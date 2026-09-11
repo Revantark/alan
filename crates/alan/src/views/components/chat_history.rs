@@ -234,6 +234,10 @@ impl ChatHistory {
                 SlashCommand::Review => controller.set_mode(agent::Mode::Review),
                 SlashCommand::Normal => controller.set_mode(agent::Mode::Normal),
                 SlashCommand::Help => controller.push_info(SlashCommand::help()),
+                SlashCommand::New => {
+                    self.start_new_session(cx);
+                    return;
+                }
             }
             return;
         }
@@ -268,6 +272,36 @@ impl ChatHistory {
             }),
         );
         self.ensure_stream_repaint(cx);
+    }
+
+    /// `/new`: reset to a fresh, empty session.
+    fn start_new_session(&mut self, cx: &mut Context<'_, Self, AlanAction>) {
+        let agent = match &self.controller {
+            Some(controller) if !controller.is_busy() => controller.agent(),
+            _ => return,
+        };
+        cx.spawn(
+            async move {
+                agent
+                    .reset_session()
+                    .await
+                    .map_err(|error| tui::TaskError(Box::new(error)))
+            },
+            move |result, chat, cx| {
+                if let Some(controller) = &mut chat.controller {
+                    match result {
+                        Ok(()) => {
+                            controller.clear_transcript();
+                            controller.push_info("Started a new session.");
+                        }
+                        Err(error) => {
+                            controller.push_info(format!("failed to start new session: {error}"))
+                        }
+                    }
+                }
+                cx.notify();
+            },
+        );
     }
 
     /// Start the fixed-rate repaint ticker if a run is in flight and it is not
