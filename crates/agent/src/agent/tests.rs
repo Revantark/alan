@@ -553,6 +553,36 @@ async fn first_prompt_creates_session_and_persists_messages() {
 }
 
 #[tokio::test]
+async fn reset_session_clears_state_and_changes_id() {
+    let root = std::env::temp_dir().join(format!("alan-plan3-reset-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&root).unwrap();
+    let manager = Arc::new(SessionManager::new(&root));
+    let a = agent_with_manager(model(), manager.clone());
+
+    // Seed some state so reset has something to clear.
+    let _ = a
+        .ask(a.prompt().content("hello"))
+        .unwrap()
+        .into_response()
+        .await;
+    let before = a
+        .session_id()
+        .await
+        .expect("session created by first prompt");
+    assert_eq!(a.messages().await.len(), 2);
+
+    a.reset_session().await.expect("reset");
+    assert!(a.messages().await.is_empty());
+    let after = a.session_id().await.expect("session created by reset");
+    assert_ne!(after, before, "session id must change");
+    let cwd = std::env::current_dir().unwrap();
+    assert!(
+        manager.get_session(&after, &cwd).await.is_ok(),
+        "new id must be resumable"
+    );
+}
+
+#[tokio::test]
 async fn provider_is_not_called_if_session_creation_fails() {
     let _root =
         std::env::temp_dir().join(format!("alan-plan3-fail-create-{}", uuid::Uuid::new_v4()));

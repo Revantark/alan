@@ -157,6 +157,13 @@ impl ChatController {
         self.revision = self.revision.wrapping_add(1);
     }
 
+    /// Clear the visible transcript and reset the displayed usage total.
+    pub fn clear_transcript(&mut self) {
+        self.entries.clear();
+        self.usage = Usage::default();
+        self.revision = self.revision.wrapping_add(1);
+    }
+
     /// Push the prompt and start the agent run, returning the stream of
     /// display events for the caller to feed back via [`apply_event`](Self::apply_event).
     ///
@@ -346,5 +353,85 @@ impl ChatController {
             return true;
         }
         false
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use agent::Agent;
+    use async_trait::async_trait;
+    use llm::{ContentBlock, LlmApi, LlmError, LlmEvent, LlmRequest, LlmResponse, StopReason};
+    use providers::{
+        ApiId, ApiKeyAuth, ModelCapabilities, ModelInfo, OpenRouterProvider, Provider, ProviderId,
+    };
+    use std::sync::Arc;
+
+    struct FakeApi;
+
+    #[async_trait]
+    impl LlmApi for FakeApi {
+        async fn stream(&self, _request: LlmRequest<'_>) -> Result<llm::LlmStream, LlmError> {
+            let response = LlmResponse {
+                content: vec![ContentBlock::Text("ok".into())],
+                stop_reason: StopReason::Stop,
+                usage: None,
+                model: None,
+                reasoning: None,
+                reasoning_details: Vec::new(),
+            };
+            let text = response.text();
+            Ok(Box::pin(futures_util::stream::iter([
+                Ok(LlmEvent::TextDelta { text }),
+                Ok(LlmEvent::Done {
+                    stop_reason: StopReason::Stop,
+                    usage: None,
+                    model: None,
+                }),
+            ])))
+        }
+    }
+
+    fn test_agent() -> Agent {
+        let info = ModelInfo {
+            provider: ProviderId::new("openrouter"),
+            id: "test".into(),
+            name: "Test".into(),
+            api: ApiId::ChatCompletions,
+            capabilities: ModelCapabilities::default(),
+            pricing: None,
+        };
+        let model = OpenRouterProvider::builder("key")
+            .with_auth(Arc::new(ApiKeyAuth::new("key")))
+            .with_models([info])
+            .with_api(Arc::new(FakeApi))
+            .build()
+            .unwrap()
+            .bind("test")
+            .unwrap();
+        Agent::builder(model).build().unwrap()
+    }
+
+    #[tokio::test]
+    async fn clear_transcript_drops_entries_and_usage() {
+        let mut controller = ChatController::new(test_agent());
+        controller.push_info("note");
+        controller.usage = llm::Usage {
+            input_tokens: 5,
+            output_tokens: 7,
+            ..Default::default()
+        };
+        let before = controller.revision();
+        assert_eq!(controller.entries().len(), 1);
+        assert_eq!(controller.usage().input_tokens, 5);
+
+        controller.clear_transcript();
+        assert!(controller.entries().is_empty(), "transcript must be empty");
+        assert_eq!(
+            controller.usage(),
+            llm::Usage::default(),
+            "usage must reset"
+        );
+        assert!(controller.revision() > before, "revision must advance");
     }
 }
