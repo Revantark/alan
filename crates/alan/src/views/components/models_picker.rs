@@ -112,7 +112,7 @@ impl Component<AlanAction> for SearchListOverlay {
 
     fn render(&self, frame: &mut Frame, area: Rect, _: &RenderContext<'_, AlanAction>) {
         let width = area.width.saturating_sub(8).min(100);
-        let height = area.height.clamp(12, 1);
+        let height = area.height.clamp(1, 12);
         let popup = Rect {
             x: area.x + area.width.saturating_sub(width) / 2,
             y: area.y + area.height.saturating_sub(height) / 2,
