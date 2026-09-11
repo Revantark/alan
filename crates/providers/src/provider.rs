@@ -16,13 +16,15 @@ pub enum ProviderError {
     MissingApi { model: String },
     #[error("authentication is not configured")]
     MissingAuth,
+    #[error("failed to fetch models: {0}")]
+    Fetch(String),
 }
 
 #[async_trait]
 pub trait Provider: Send + Sync {
     fn id(&self) -> &ProviderId;
 
-    fn models(&self) -> &[ModelInfo];
+    fn models(&self) -> Vec<ModelInfo>;
 
     fn server_tools(&self) -> &[ServerToolInfo];
 
@@ -42,6 +44,13 @@ pub trait Provider: Send + Sync {
     ) -> Result<Model, ProviderError> {
         let _ = options;
         self.bind(model_id)
+    }
+
+    /// Refresh the provider's model catalog from its source, updating the
+    /// catalog returned by [`Provider::models`]. Providers without a live
+    /// catalog keep their static list and the default body is a no-op.
+    async fn fetch_models(&self) -> Result<(), ProviderError> {
+        Ok(())
     }
 }
 

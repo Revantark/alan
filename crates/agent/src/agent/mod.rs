@@ -41,7 +41,7 @@ pub struct Agent {
     pub(super) active_session: Mutex<Option<Session>>,
     /// Working directory reported in the conversation's first message.
     pub(super) working_directory: Option<PathBuf>,
-    pub(super) model_info: ModelInfo,
+    pub(super) model_info: Mutex<ModelInfo>,
 }
 
 impl Agent {
@@ -170,7 +170,30 @@ impl Agent {
         self.context.lock().await.usage.clone()
     }
 
-    pub fn info(&self) -> ModelInfo {
-        self.model_info.clone()
+    pub async fn info(&self) -> ModelInfo {
+        self.model_info.lock().await.clone()
+    }
+
+    /// Replace the bound model. The next prompt uses the new model;
+    /// the reported model info is updated to match. Fails only if
+    /// another prompt currently holds the model lock (i.e. a run is
+    /// streaming), in which case the agent is left untouched.
+    pub async fn set_model(&self, model: Model) -> Result<(), AgentError> {
+        let mut current = self.model.try_lock().map_err(|_| {
+            AgentError::Model(providers::ModelError::Llm(llm::LlmError::Configuration(
+                "agent is busy: cannot switch models mid-run".into(),
+            )))
+        })?;
+        let info = model.info().clone();
+        let reasoning = model.reasoning_effort();
+        *current = model;
+        *self.model_info.lock().await = info.clone();
+
+        let mut active = self.active_session.lock().await;
+        if let (Some(manager), Some(session)) = (&self.session_manager, &mut *active) {
+            session.set_model(&info.provider.0, &info.id, reasoning);
+            manager.update_header_model(session).await?;
+        }
+        Ok(())
     }
 }

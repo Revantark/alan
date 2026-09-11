@@ -55,6 +55,12 @@ pub enum StoreError {
     NotFound(PathBuf),
     #[error("file is locked by another writer: {0}")]
     Locked(PathBuf),
+    #[error("failed to rewrite session header {}: {source}", path.display())]
+    Rewrite {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
 }
 
 /// Stateless append-only JSONL store.
@@ -122,6 +128,38 @@ impl JsonlStore {
                 }
             }
         })
+    }
+
+    /// Replace the first line of the file; all other lines are preserved.
+    pub(crate) async fn rewrite_first_line(path: &Path, line: &str) -> Result<(), StoreError> {
+        let path = path.to_path_buf();
+        let content = fs::read_to_string(&path)
+            .await
+            .map_err(|source| StoreError::ReadFile {
+                path: path.clone(),
+                source,
+            })?;
+        // The file content is "first\nsecond\n...\n" where each
+        // record is newline-terminated. split('\n') gives
+        // ["first", "second", ..., ""]. Drop the trailing empty
+        // string from the final newline.
+        let mut parts: Vec<&str> = content.split('\n').collect();
+        if parts.last() == Some(&"") {
+            parts.pop();
+        }
+        // parts[0] is the old header, rest are messages/usage.
+        let rest = &parts[1..];
+        // `line` comes from SessionRecord::to_jsonl() which
+        // already includes a trailing newline, so write it
+        // directly and append the remaining records.
+        let new_content = if rest.is_empty() {
+            line.to_string()
+        } else {
+            format!("{}{}\n", line, rest.join("\n"))
+        };
+        tokio::fs::write(&path, new_content)
+            .await
+            .map_err(|source| StoreError::Rewrite { path, source })
     }
 }
 
@@ -358,6 +396,38 @@ mod tests {
             .await
             .expect("append after unlock");
         assert_eq!(JsonlStore::read(&path).await.unwrap(), "x\ny\n");
+        cleanup(&root);
+    }
+
+    #[tokio::test]
+    async fn rewrite_first_line_replaces_header_keeps_rest() {
+        let root = temp_root("rewrite");
+        let path = file(&root, "k", "f");
+
+        // Create with a to_jsonl()-style line that ends in \n,
+        // matching production behavior.
+        JsonlStore::create(&path, r#"{"type":"session","id":"old"}"#)
+            .await
+            .expect("create");
+        JsonlStore::append(&path, r#"{"type":"message","msg":"keep"}"#)
+            .await
+            .expect("append");
+
+        // The header record from to_jsonl() already ends with \n,
+        // matching production behavior.
+        let new_header = r#"{"type":"session","id":"new"}"#;
+        let new_header_with_newline = format!("{}\n", new_header);
+        JsonlStore::rewrite_first_line(&path, &new_header_with_newline)
+            .await
+            .expect("rewrite");
+
+        let content = JsonlStore::read(&path).await.unwrap();
+        let mut lines = content.lines();
+        assert_eq!(lines.next().unwrap(), r#"{"type":"session","id":"new"}"#);
+        assert_eq!(lines.next().unwrap(), r#"{"type":"message","msg":"keep"}"#);
+        // The original "old" line is gone; content should have
+        // exactly the new header and the kept message.
+        assert!(lines.next().is_none());
         cleanup(&root);
     }
 }

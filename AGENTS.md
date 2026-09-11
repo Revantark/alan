@@ -40,7 +40,12 @@ cargo test -p providers
 
 Run formatting and checks after Rust code changes. Do not run release or destructive Git commands unless requested.
 
-## Runtime
+### Model selection
+
+`/models` opens a picker backed by the OpenRouter model catalog. The catalog
+is fetched on first use and cached; selecting a model switches the active
+conversation model and updates the session header.
+
 
 Alan currently uses OpenRouter:
 

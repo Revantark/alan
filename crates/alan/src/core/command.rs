@@ -9,6 +9,7 @@ use strum::{EnumIter, EnumString, IntoEnumIterator, IntoStaticStr};
 #[strum(serialize_all = "kebab-case")]
 pub enum SlashCommand {
     Login,
+    Models,
     New,
     SummarizeNew,
     Plan,
@@ -58,6 +59,7 @@ impl SlashCommand {
     pub fn description(self) -> &'static str {
         match self {
             Self::Login => "sign in to a provider",
+            Self::Models => "pick a model for this conversation",
             Self::New => "start a new session",
             Self::SummarizeNew => "summarize this session into a new one",
             Self::Plan => "turn on plan mode (also Shift+Tab)",
@@ -96,6 +98,15 @@ mod tests {
         assert_eq!(SlashCommand::parse("/login"), Some(SlashCommand::Login));
         assert_eq!(SlashCommand::parse("/help  "), Some(SlashCommand::Help));
         assert_eq!(SlashCommand::parse("/plan now"), Some(SlashCommand::Plan));
+    }
+
+    #[test]
+    fn parses_models_command_with_and_without_argument() {
+        assert_eq!(SlashCommand::parse("/models"), Some(SlashCommand::Models));
+        assert_eq!(
+            SlashCommand::parse("/models openai/gpt-4o"),
+            Some(SlashCommand::Models)
+        );
     }
 
     #[test]
