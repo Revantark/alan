@@ -161,6 +161,7 @@ mod tests {
             options,
             credential: None,
             reasoning_effort: None,
+            provider_order: None,
         }
     }
 

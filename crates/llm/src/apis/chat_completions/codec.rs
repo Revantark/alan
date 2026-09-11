@@ -1,10 +1,8 @@
 use crate::{LlmError, LlmEvent, LlmRequest, Message, Role, StopReason, ToolSpec, Usage};
 use serde::{Deserialize, Serialize};
 
-/// Providers to prioritize, in order. Hardcoded to DeepSeek until provider
-/// routing is configurable.
-const PROVIDER_ORDER: &[&str] = &["deepinfra"];
-
+/// Providers to prioritize, in order. Sent only when the caller configures one;
+/// otherwise the request carries no `provider` block at all.
 #[derive(Serialize)]
 struct Request<'a> {
     model: &'a str,
@@ -24,12 +22,13 @@ struct Request<'a> {
     prompt_cache_key: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     cache_control: Option<&'a crate::PromptCacheControl>,
-    provider: WireProvider,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    provider: Option<WireProvider>,
 }
 
 #[derive(Serialize)]
 struct WireProvider {
-    order: &'static [&'static str],
+    order: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -173,6 +172,13 @@ pub(crate) fn serialize_request(request: &LlmRequest<'_>) -> Result<String, LlmE
         effort: effort.as_str().to_string(),
         exclude: None,
     });
+    let provider = request
+        .provider_order
+        .filter(|order| !order.is_empty())
+        .map(|order| WireProvider {
+            order: order.to_vec(),
+        });
+
     serde_json::to_string(&Request {
         model: request.model_id,
         stream: true,
@@ -184,9 +190,7 @@ pub(crate) fn serialize_request(request: &LlmRequest<'_>) -> Result<String, LlmE
         session_id: request.options.session_id.as_deref(),
         prompt_cache_key: request.options.prompt_cache_key.as_deref(),
         cache_control: request.options.cache_control.as_ref(),
-        provider: WireProvider {
-            order: PROVIDER_ORDER,
-        },
+        provider,
     })
     .map_err(LlmError::Serialization)
 }
@@ -389,6 +393,7 @@ mod tests {
             options,
             credential: None,
             reasoning_effort: None,
+            provider_order: None,
         }
     }
 
@@ -454,6 +459,43 @@ mod tests {
         assert!(json.get("tools").is_none());
         assert!(json.get("temperature").is_none());
         assert!(json.get("max_tokens").is_none());
+    }
+
+    #[test]
+    fn omits_provider_block_when_unconfigured() {
+        let messages = [Message::user("hello")];
+        let options = RequestOptions::default();
+        let mut request = request("model-a", &messages, &[], &options);
+        request.provider_order = None;
+        let json: serde_json::Value =
+            serde_json::from_str(&serialize_request(&request).unwrap()).unwrap();
+        assert!(json.get("provider").is_none());
+    }
+
+    #[test]
+    fn omits_provider_block_when_order_is_empty() {
+        let messages = [Message::user("hello")];
+        let options = RequestOptions::default();
+        let mut request = request("model-a", &messages, &[], &options);
+        request.provider_order = Some(&[]);
+        let json: serde_json::Value =
+            serde_json::from_str(&serialize_request(&request).unwrap()).unwrap();
+        assert!(json.get("provider").is_none());
+    }
+
+    #[test]
+    fn serializes_provider_order_when_configured() {
+        let messages = [Message::user("hello")];
+        let options = RequestOptions::default();
+        let order = vec!["deepseek".to_string(), "fireworks".to_string()];
+        let mut request = request("model-a", &messages, &[], &options);
+        request.provider_order = Some(&order);
+        let json: serde_json::Value =
+            serde_json::from_str(&serialize_request(&request).unwrap()).unwrap();
+        assert_eq!(
+            json["provider"]["order"],
+            serde_json::json!(["deepseek", "fireworks"])
+        );
     }
 
     #[test]

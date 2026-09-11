@@ -36,6 +36,7 @@ async fn main() -> anyhow::Result<()> {
         ModelOptions {
             server_tools,
             reasoning_effort,
+            provider_order: configured_provider_order()?,
         },
     )?;
     let registry = Arc::new(ProviderRegistry::new([
@@ -128,6 +129,23 @@ fn configured_reasoning_effort() -> anyhow::Result<Option<ReasoningEffort>> {
             "ALAN_REASONING_EFFORT must be one of none, minimal, low, medium, high, xhigh, max; got {value:?}"
         )),
     }
+}
+
+fn configured_provider_order() -> anyhow::Result<Vec<String>> {
+    let Some(value) = std::env::var_os("ALAN_OR_MODEL_PROVIDER") else {
+        return Ok(Vec::new());
+    };
+    let order = value
+        .to_string_lossy()
+        .split(',')
+        .map(|entry| entry.trim())
+        .map(|entry| entry.to_string())
+        .filter(|entry| !entry.is_empty())
+        .collect::<Vec<_>>();
+    if order.is_empty() {
+        return Err(anyhow::anyhow!("ALAN_OR_MODEL_PROVIDER must not be empty"));
+    }
+    Ok(order)
 }
 
 fn auth_path() -> anyhow::Result<PathBuf> {

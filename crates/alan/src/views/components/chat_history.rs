@@ -275,6 +275,7 @@ impl ChatHistory {
         let Some(stream) = controller.submit(text, submission.images) else {
             return;
         };
+        self.view.borrow_mut().stick_to_bottom();
         self.prompt = Some(
             cx.subscribe_stream(agent_events(stream), |event, chat, cx| {
                 match event {
@@ -559,6 +560,13 @@ impl View {
         self.scroll_offset = self.scroll_target;
         self.follow_output = self.scroll_offset == self.max_scroll;
         true
+    }
+
+    fn stick_to_bottom(&mut self) {
+        self.follow_output = true;
+        self.scroll_target = self.max_scroll;
+        self.scroll_offset = self.max_scroll;
+        self.pending_wheel = 0;
     }
 
     /// Synchronize scroll bounds with the current content/viewport size.
@@ -953,6 +961,23 @@ mod tests {
         // At the bottom already: scrolling down moves nothing.
         assert!(!view_mut(&mut state).scroll_by(10));
         assert_eq!(view(&state).scroll_offset, 80);
+    }
+
+    #[test]
+    fn stick_to_bottom_resumes_follow_after_scroll_up() {
+        let mut state = ChatHistory::default();
+        view_mut(&mut state).sync_scroll(100, 20);
+
+        view_mut(&mut state).scroll_by(-20);
+        assert!(!view(&state).follow_output);
+
+        view_mut(&mut state).stick_to_bottom();
+        assert!(view(&state).follow_output);
+        assert_eq!(view(&state).scroll_offset, 80);
+
+        // New content keeps following from here.
+        assert_eq!(view_mut(&mut state).sync_scroll(140, 20), 120);
+        assert!(view(&state).follow_output);
     }
 
     #[test]

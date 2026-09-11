@@ -102,4 +102,7 @@ pub struct LlmRequest<'a> {
     pub options: &'a RequestOptions,
     pub credential: Option<&'a Credential>,
     pub reasoning_effort: Option<ReasoningEffort>,
+    /// Ordered provider list forwarded to the API. `None` means the request
+    /// carries no `provider` block at all.
+    pub provider_order: Option<&'a [String]>,
 }

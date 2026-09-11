@@ -73,6 +73,7 @@ All variables are optional:
 | `ALAN_MODEL` | Model id | `openai/gpt-4o-mini` |
 | `ALAN_HOME` | Alan home directory (Alan uses `$ALAN_HOME/.alan/`) | `$HOME` |
 | `ALAN_SESSION` | Resume this session ID from the current working directory | unset |
+| `ALAN_OR_MODEL_PROVIDER` | Comma-separated ordered provider list forwarded to the API | unset |
 | `ALAN_REASONING_EFFORT` | `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max` | unset |
 | `ALAN_OPENROUTER_WEB_SEARCH` | Enable web search tool (`1`, `true`, `yes`, `on`) | off |
 | `ALAN_OPENROUTER_WEB_FETCH` | Enable web fetch tool (`1`, `true`, `yes`, `on`) | off |

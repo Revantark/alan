@@ -19,6 +19,9 @@ pub enum ModelError {
 pub struct ModelOptions {
     pub server_tools: Vec<ServerTool>,
     pub reasoning_effort: Option<ReasoningEffort>,
+    /// Ordered provider list forwarded to the API. Empty means the request
+    /// carries no `provider` block at all.
+    pub provider_order: Vec<String>,
 }
 
 #[derive(Clone)]
@@ -28,6 +31,7 @@ pub struct Model {
     auth: Arc<dyn AuthResolver>,
     server_tools: Vec<ServerTool>,
     reasoning_effort: Option<ReasoningEffort>,
+    provider_order: Vec<String>,
 }
 
 impl Model {
@@ -44,6 +48,7 @@ impl Model {
             auth,
             server_tools: options.server_tools,
             reasoning_effort,
+            provider_order: options.provider_order,
         }
     }
 
@@ -73,6 +78,8 @@ impl Model {
             options: input.options,
             credential: Some(&credential),
             reasoning_effort: self.reasoning_effort,
+            provider_order: (!self.provider_order.is_empty())
+                .then_some(self.provider_order.as_slice()),
         };
         Ok(self.api.complete(request).await?)
     }
@@ -87,6 +94,8 @@ impl Model {
             options: input.options,
             credential: Some(&credential),
             reasoning_effort: self.reasoning_effort,
+            provider_order: (!self.provider_order.is_empty())
+                .then_some(self.provider_order.as_slice()),
         };
         Ok(self.api.stream(request).await?)
     }
