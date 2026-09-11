@@ -51,7 +51,13 @@ Alan stores credentials at `~/.alan/auth.json` by default. Set `ALAN_HOME` to ch
   matches anywhere; `@src/co` matches by directory).
 - Slash commands:
   - `/models` — pick a model from the provider catalog
+  - `/login` — sign in to a provider interactively
+  - `/new` — start a fresh session
+  - `/summarize-new [focus]` — summarize this session and restart into a new one
+    seeded with the summary; the optional quoted text is an extra focus hint
   - `/plan` — toggle plan mode (also `Shift+Tab`)
+  - `/review` — toggle review mode (also `Shift+Tab`)
+  - `/normal` — turn off plan and review mode
   - `/help` — list available commands
 - Key bindings: `Esc` clears input/selection, `Ctrl+C` interrupts the agent,
   `Ctrl+U` deletes to line start, `Ctrl+Z` undoes an edit,

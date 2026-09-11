@@ -26,6 +26,11 @@ pub struct Session {
     pub usage: Usage,
     pub created_at_ms: u64,
     pub updated_at_ms: u64,
+    /// The session this one was derived from (e.g. after a `/summarize-new`).
+    /// `None` for sessions started fresh. Backwards compatible: old header
+    /// lines without this field deserialize to `None`.
+    #[serde(default)]
+    pub parent: Option<String>,
 }
 
 impl Session {
@@ -34,6 +39,7 @@ impl Session {
         provider: impl Into<String>,
         model: impl Into<String>,
         thinking_level: Option<ReasoningEffort>,
+        parent: Option<String>,
     ) -> Self {
         let now = now_ms();
         Self {
@@ -47,6 +53,7 @@ impl Session {
             usage: Usage::default(),
             created_at_ms: now,
             updated_at_ms: now,
+            parent,
         }
     }
 
@@ -61,6 +68,7 @@ impl Session {
             thinking_level: self.thinking_level,
             created_at_ms: self.created_at_ms,
             updated_at_ms: self.updated_at_ms,
+            parent: self.parent.clone(),
         }
     }
 
@@ -110,6 +118,8 @@ pub enum SessionRecord {
         thinking_level: Option<ReasoningEffort>,
         created_at_ms: u64,
         updated_at_ms: u64,
+        #[serde(default)]
+        parent: Option<String>,
     },
     Message {
         message: AgentMessage,
@@ -197,7 +207,7 @@ mod tests {
 
     #[test]
     fn header_record_preserves_session_metadata() {
-        let mut session = Session::new("/tmp/project", "openrouter", "test-model", None);
+        let mut session = Session::new("/tmp/project", "openrouter", "test-model", None, None);
         session.created_at_ms = 1_000;
         session.updated_at_ms = 2_000;
 
@@ -211,6 +221,7 @@ mod tests {
                 thinking_level,
                 created_at_ms,
                 updated_at_ms,
+                parent,
             } => {
                 assert_eq!(schema_version, SESSION_SCHEMA_VERSION);
                 assert_eq!(id, session.id);
@@ -220,14 +231,48 @@ mod tests {
                 assert_eq!(thinking_level, None);
                 assert_eq!(created_at_ms, 1_000);
                 assert_eq!(updated_at_ms, 2_000);
+                assert_eq!(parent, None);
             }
             other => panic!("expected header record, got {other:?}"),
         }
     }
 
+    /// A header line written before `parent` existed must still deserialize,
+    /// defaulting the field to `None` — old session files keep loading.
+    #[test]
+    fn header_without_parent_is_backwards_compatible() {
+        let line = "\
+{\"type\":\"session\",\"version\":1,\"id\":\"018f\",\"pwd\":\"/tmp/project\",\
+\"provider\":\"openrouter\",\"model\":\"test-model\",\"thinking_level\":null,\
+\"created_at_ms\":1,\"updated_at_ms\":2}";
+        let record = SessionRecord::parse(line).expect("parse");
+        let SessionRecord::Session { parent, .. } = record else {
+            panic!("expected session header, got {record:?}");
+        };
+        assert_eq!(parent, None);
+    }
+
+    /// A header with a parent round-trips through JSONL.
+    #[test]
+    fn header_with_parent_round_trips() {
+        let session = Session::new(
+            "/tmp/project",
+            "openrouter",
+            "test-model",
+            None,
+            Some("018e".to_owned()),
+        );
+        let line = session.header_record().to_jsonl().expect("serialize");
+        let record = SessionRecord::parse(line.trim_end()).expect("parse");
+        let SessionRecord::Session { parent, .. } = record else {
+            panic!("expected session header, got {record:?}");
+        };
+        assert_eq!(parent, Some("018e".to_owned()));
+    }
+
     #[test]
     fn apply_record_appends_messages_and_replaces_usage_snapshot() {
-        let mut session = Session::new("/tmp/project", "openrouter", "test-model", None);
+        let mut session = Session::new("/tmp/project", "openrouter", "test-model", None, None);
 
         session.record(SessionRecord::Message {
             message: AgentMessage::user("first"),
@@ -250,7 +295,13 @@ mod tests {
 
     #[test]
     fn set_model_updates_fields_and_timestamp() {
-        let mut session = Session::new("/tmp/project", "old-provider", "old-model", None);
+        let mut session = Session::new(
+            "/tmp/project",
+            "old-provider",
+            "old-model",
+            None,
+            Some("018e".to_owned()),
+        );
         session.created_at_ms = 1_000;
         session.updated_at_ms = 1_000;
 

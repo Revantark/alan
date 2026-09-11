@@ -54,6 +54,11 @@ const MOMENTUM_IDLE_TICKS: u16 = 16;
 /// (finish, error, disconnect) still repaint at once.
 const STREAM_REPAINT_INTERVAL: Duration = Duration::from_millis(32);
 
+/// Cadence of the dot animation shown in the status line while a blocking
+/// operation (e.g. `/summarize-new`) is in flight. One tick per interval; the
+/// dot count advances by one and wraps at 4 (0 → 1 → 2 → 3 → 0 → …).
+const LOADING_DOT_INTERVAL: Duration = Duration::from_millis(350);
+
 /// Cached, plain-data view of the transcript status, rebuilt from the
 /// [`ChatController`] by [`ChatHistory::refresh`] whenever the transcript
 /// revision or activity changes. The transcript entries themselves are read
@@ -62,6 +67,9 @@ const STREAM_REPAINT_INTERVAL: Duration = Duration::from_millis(32);
 pub struct ChatSnapshot {
     pub revision: u64,
     pub activity: Activity,
+    /// Current dot count (0..3) for the loading animation. Only meaningful
+    /// while `activity` is `Activity::Loading`.
+    pub loading_dots: usize,
     pub mode: Mode,
     pub usage: Usage,
     pub model_name: String,
@@ -84,6 +92,9 @@ pub struct ChatHistory {
     /// Fixed-rate repaint ticker, alive only while the agent is streaming.
     /// Keeps render cadence independent of the token rate.
     stream_repaint: Option<Subscription>,
+    /// Fixed-rate ticker driving the loading-dot animation, alive only while a
+    /// blocking operation is in flight. Dropping it cancels the animation.
+    loading_repaint: Option<Subscription>,
     /// Set when a `/login` submission needs the root to open the login overlay
     /// (the root owns the providers and credentials). Polled by the root after
     /// it dispatches a submission; the chat cannot dispatch back to its parent
@@ -128,6 +139,9 @@ struct View {
     pending_wheel: isize,
     /// Last click timestamp and position for double-click detection.
     last_click: Option<(Instant, u16, u16)>,
+    /// Current dot count (0..3) driving the loading animation. Advanced by the
+    /// loading-repaint ticker while a blocking operation is in flight.
+    loading_dots: usize,
 }
 
 impl Default for View {
@@ -145,6 +159,7 @@ impl Default for View {
             selection: None,
             pending_wheel: 0,
             last_click: None,
+            loading_dots: 0,
         }
     }
 }
@@ -161,6 +176,7 @@ impl ChatHistory {
             view: RefCell::new(View::default()),
             prompt: None,
             stream_repaint: None,
+            loading_repaint: None,
             login_requested: false,
             models_requested: false,
             momentum: None,
@@ -182,16 +198,21 @@ impl ChatHistory {
         };
         let activity = if controller.is_busy() {
             Activity::Thinking
+        } else if let Some(label) = controller.loading() {
+            Activity::Loading(label.to_owned())
         } else {
             Activity::Idle
         };
         let revision = controller.revision();
         let mode = controller.mode();
         let mut view = self.view.borrow_mut();
-        let unchanged = view
-            .snap
-            .as_ref()
-            .is_some_and(|s| s.revision == revision && s.mode == mode && s.activity == activity);
+        let loading_dots = view.loading_dots;
+        let unchanged = view.snap.as_ref().is_some_and(|s| {
+            s.revision == revision
+                && s.mode == mode
+                && s.activity == activity
+                && s.loading_dots == loading_dots
+        });
         if unchanged {
             return;
         }
@@ -201,6 +222,7 @@ impl ChatHistory {
         view.snap = Some(ChatSnapshot {
             revision,
             activity,
+            loading_dots,
             mode,
             usage,
             model_name,
@@ -237,6 +259,14 @@ impl ChatHistory {
                 SlashCommand::Review => controller.set_mode(agent::Mode::Review),
                 SlashCommand::Normal => controller.set_mode(agent::Mode::Normal),
                 SlashCommand::Help => controller.push_info(SlashCommand::help()),
+                SlashCommand::New => {
+                    self.start_new_session(cx);
+                    return;
+                }
+                SlashCommand::SummarizeNew => {
+                    self.start_summarize_new(cx, &submission.text);
+                    return;
+                }
             }
             return;
         }
@@ -273,6 +303,89 @@ impl ChatHistory {
         self.ensure_stream_repaint(cx);
     }
 
+    /// `/new`: reset to a fresh, empty session.
+    fn start_new_session(&mut self, cx: &mut Context<'_, Self, AlanAction>) {
+        let agent = match &self.controller {
+            Some(controller) if !controller.is_busy() => controller.agent(),
+            _ => return,
+        };
+        cx.spawn(
+            async move {
+                agent
+                    .reset_session()
+                    .await
+                    .map_err(|error| tui::TaskError(Box::new(error)))
+            },
+            move |result, chat, cx| {
+                if let Some(controller) = &mut chat.controller {
+                    match result {
+                        Ok(()) => {
+                            controller.clear_transcript();
+                            controller.push_info("Started a new session.");
+                        }
+                        Err(error) => {
+                            controller.push_info(format!("failed to start new session: {error}"))
+                        }
+                    }
+                }
+                cx.notify();
+            },
+        );
+    }
+
+    /// `/summarize-new [focus]`: summarize, then restart seeded with it.
+    fn start_summarize_new(&mut self, cx: &mut Context<'_, Self, AlanAction>, text: &str) {
+        let agent = match &self.controller {
+            Some(controller) if !controller.is_busy() => controller.agent(),
+            _ => return,
+        };
+        let focus = SlashCommand::parse_with_args(text)
+            .map(|(_, args)| args.trim().to_owned())
+            .filter(|args| !args.is_empty());
+
+        // Set the loading state before spawning so the status line shows the
+        // label immediately; the dot ticker animates it until completion.
+        self.view.borrow_mut().loading_dots = 0;
+        if let Some(controller) = &mut self.controller {
+            controller.set_loading(Some("summarizing".to_owned()));
+        }
+        self.ensure_loading_repaint(cx);
+
+        cx.spawn(
+            async move {
+                let summary = agent
+                    .summarize(focus.as_deref())
+                    .await
+                    .map_err(|error| tui::TaskError(Box::new(error)))?;
+                let seed = vec![agent::AgentMessage::user(format!(
+                    "Session handoff — continue from this state:\n\n{summary}"
+                ))];
+                agent
+                    .reset_session_with(seed)
+                    .await
+                    .map_err(|error| tui::TaskError(Box::new(error)))?;
+                Ok::<(), tui::TaskError>(())
+            },
+            move |result, chat, cx| {
+                // Stop the dot animation and clear the loading state regardless
+                // of outcome; the completion closure runs exactly once.
+                chat.loading_repaint = None;
+                chat.view.borrow_mut().loading_dots = 0;
+                if let Some(controller) = &mut chat.controller {
+                    controller.set_loading(None);
+                    controller.clear_transcript();
+                    match result {
+                        Ok(()) => controller.push_info("Summarized into a new session."),
+                        Err(error) => {
+                            controller.push_info(format!("failed to summarize session: {error}"))
+                        }
+                    }
+                }
+                cx.notify();
+            },
+        );
+    }
+
     /// Start the fixed-rate repaint ticker if a run is in flight and it is not
     /// already running. The ticker repaints the transcript at
     /// `STREAM_REPAINT_INTERVAL`; it is cancelled once the run finishes.
@@ -295,6 +408,31 @@ impl ChatHistory {
     /// Whether an agent run is currently in flight.
     fn is_streaming(&self) -> bool {
         self.controller.as_ref().is_some_and(|c| c.is_busy())
+    }
+
+    /// Start the loading-dot ticker if a blocking operation is in flight and
+    /// the ticker is not already running. The ticker advances the dot count at
+    /// `LOADING_DOT_INTERVAL` and repaints; it is cancelled once loading ends.
+    fn ensure_loading_repaint(&mut self, cx: &mut Context<'_, Self, AlanAction>) {
+        if self.loading_repaint.is_some() || !self.is_loading() {
+            return;
+        }
+        self.loading_repaint = Some(cx.subscribe_stream(loading_ticks(), |event, chat, cx| {
+            if matches!(event, SubscriptionEvent::Closed) || !chat.is_loading() {
+                chat.loading_repaint = None;
+                return;
+            }
+            let next = (chat.view.borrow().loading_dots + 1) % 4;
+            chat.view.borrow_mut().loading_dots = next;
+            cx.notify();
+        }));
+    }
+
+    /// Whether a blocking operation is currently in flight.
+    pub fn is_loading(&self) -> bool {
+        self.controller
+            .as_ref()
+            .is_some_and(|c| c.loading().is_some())
     }
 
     /// Whether wheel notches are queued and need a flush this tick.
@@ -716,6 +854,16 @@ fn momentum_ticks() -> impl Stream<Item = ()> + Send + 'static {
 fn stream_repaint_ticks() -> impl Stream<Item = ()> + Send + 'static {
     futures_util::stream::unfold((), |_| async {
         tokio::time::sleep(STREAM_REPAINT_INTERVAL).await;
+        Some(((), ()))
+    })
+}
+
+/// Emit one item per `LOADING_DOT_INTERVAL`. Drives the status-line dot
+/// animation while a blocking operation is in flight; owned by the loading
+/// subscription, so it stops when that subscription is dropped.
+fn loading_ticks() -> impl Stream<Item = ()> + Send + 'static {
+    futures_util::stream::unfold((), |_| async {
+        tokio::time::sleep(LOADING_DOT_INTERVAL).await;
         Some(((), ()))
     })
 }

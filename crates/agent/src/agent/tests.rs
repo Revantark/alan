@@ -553,6 +553,154 @@ async fn first_prompt_creates_session_and_persists_messages() {
 }
 
 #[tokio::test]
+async fn reset_session_clears_state_and_changes_id() {
+    let root = std::env::temp_dir().join(format!("alan-plan3-reset-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&root).unwrap();
+    let manager = Arc::new(SessionManager::new(&root));
+    let a = agent_with_manager(model(), manager.clone());
+
+    // Seed some state so reset has something to clear.
+    let _ = a
+        .ask(a.prompt().content("hello"))
+        .unwrap()
+        .into_response()
+        .await;
+    let before = a
+        .session_id()
+        .await
+        .expect("session created by first prompt");
+    assert_eq!(a.messages().await.len(), 2);
+
+    a.reset_session().await.expect("reset");
+    assert!(a.messages().await.is_empty());
+    let after = a.session_id().await.expect("session created by reset");
+    assert_ne!(after, before, "session id must change");
+    let cwd = std::env::current_dir().unwrap();
+    assert!(
+        manager.get_session(&after, &cwd).await.is_ok(),
+        "new id must be resumable"
+    );
+}
+
+#[tokio::test]
+async fn reset_session_with_seeds_the_new_session() {
+    let root = std::env::temp_dir().join(format!("alan-plan6-seed-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&root).unwrap();
+    let manager = Arc::new(SessionManager::new(&root));
+    let a = agent_with_manager(model(), manager.clone());
+
+    // Seed some state so reset has something to clear.
+    let _ = a
+        .ask(a.prompt().content("hello"))
+        .unwrap()
+        .into_response()
+        .await;
+    let before = a
+        .session_id()
+        .await
+        .expect("session created by first prompt");
+    assert_eq!(a.messages().await.len(), 2);
+
+    a.reset_session_with(vec![AgentMessage::user("seed")])
+        .await
+        .expect("reset with seed");
+    assert_eq!(a.messages().await, vec![AgentMessage::user("seed")]);
+    assert_eq!(a.usage().await, Usage::default(), "usage must be reset");
+    let after = a.session_id().await.expect("session created by reset");
+    assert_ne!(after, before, "session id must change");
+    let cwd = std::env::current_dir().unwrap();
+    assert!(
+        manager.get_session(&after, &cwd).await.is_ok(),
+        "new id must be resumable"
+    );
+    // The seed must be persisted, so resuming the new session still has it.
+    let session = manager
+        .get_session(&after, &cwd)
+        .await
+        .expect("load new session");
+    let resumed = Arc::new(
+        Agent::builder(model())
+            .session_manager(manager.clone())
+            .resume_session(session)
+            .build()
+            .expect("build with resume"),
+    );
+    assert_eq!(
+        resumed.messages().await,
+        vec![AgentMessage::user("seed")],
+        "resumed session must carry the seed"
+    );
+}
+
+/// A reset-with-seed records the previous session id as the parent of the new
+/// one, so a summarized session stays traceable to its origin.
+#[tokio::test]
+async fn reset_session_with_records_parent_lineage() {
+    let root = std::env::temp_dir().join(format!("alan-plan11-lineage-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&root).unwrap();
+    let manager = Arc::new(SessionManager::new(&root));
+    let a = agent_with_manager(model(), manager.clone());
+
+    let _ = a
+        .ask(a.prompt().content("hello"))
+        .unwrap()
+        .into_response()
+        .await;
+    let before = a
+        .session_id()
+        .await
+        .expect("session created by first prompt");
+
+    a.reset_session_with(vec![AgentMessage::user("seed")])
+        .await
+        .expect("reset with seed");
+    let after = a.session_id().await.expect("session created by reset");
+    assert_ne!(after, before, "session id must change");
+
+    let loaded = manager
+        .get_session(&after, &std::env::current_dir().unwrap())
+        .await
+        .expect("load new session");
+    assert_eq!(
+        loaded.parent.as_deref(),
+        Some(before.as_str()),
+        "new session must record the previous session as its parent"
+    );
+    // The parent session itself is untouched and still resumable.
+    assert!(
+        manager
+            .get_session(&before, &std::env::current_dir().unwrap())
+            .await
+            .is_ok(),
+        "parent session must remain resumable"
+    );
+}
+
+#[tokio::test]
+async fn reset_session_with_empty_seed_is_just_a_reset() {
+    let root = std::env::temp_dir().join(format!("alan-plan6-empty-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&root).unwrap();
+    let manager = Arc::new(SessionManager::new(&root));
+    let a = agent_with_manager(model(), manager.clone());
+
+    let _ = a
+        .ask(a.prompt().content("hello"))
+        .unwrap()
+        .into_response()
+        .await;
+    let before = a
+        .session_id()
+        .await
+        .expect("session created by first prompt");
+    assert_eq!(a.messages().await.len(), 2);
+
+    a.reset_session_with(Vec::new()).await.expect("empty reset");
+    assert!(a.messages().await.is_empty());
+    let after = a.session_id().await.expect("session created by reset");
+    assert_ne!(after, before, "session id must change");
+}
+
+#[tokio::test]
 async fn provider_is_not_called_if_session_creation_fails() {
     let _root =
         std::env::temp_dir().join(format!("alan-plan3-fail-create-{}", uuid::Uuid::new_v4()));
@@ -697,7 +845,7 @@ async fn resumed_agent_includes_restored_messages_in_first_request() {
     let manager = Arc::new(SessionManager::new(&root));
 
     let session = manager
-        .create(&root, "openrouter", "test", None)
+        .create(&root, "openrouter", "test", None, None)
         .await
         .expect("create session");
     manager
@@ -898,7 +1046,7 @@ async fn session_images_roundtrip_through_reload() {
     let manager = Arc::new(SessionManager::new(&root));
 
     let session = manager
-        .create(&root, "openrouter", "test", None)
+        .create(&root, "openrouter", "test", None, None)
         .await
         .expect("create session");
     let images = vec![llm::ImageUrl {
@@ -1152,7 +1300,7 @@ async fn set_model_persists_switch_in_session() {
 
     // Create a session first so there's something to switch on.
     let session = manager
-        .create(&root, "openrouter", "test", None)
+        .create(&root, "openrouter", "test", None, Some("018e".to_owned()))
         .await
         .expect("create session");
     let session_id = session.id.clone();

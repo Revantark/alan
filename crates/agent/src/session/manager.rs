@@ -32,17 +32,19 @@ impl SessionManager {
     /// Create a new session and write its header record immediately.
     ///
     /// Directories are created only here, so constructing the manager does
-    /// not touch the filesystem.
+    /// not touch the filesystem. `parent` records the session this one was
+    /// derived from (e.g. after a `/summarize-new`); `None` for a fresh start.
     pub async fn create(
         &self,
         pwd: impl Into<PathBuf>,
         provider: impl Into<String>,
         model: impl Into<String>,
         thinking_level: Option<ReasoningEffort>,
+        parent: Option<String>,
     ) -> Result<Session, SessionError> {
         let pwd = normalize(pwd.into())?;
         let key = pwd_key(&pwd);
-        let session = Session::new(pwd, provider, model, thinking_level);
+        let session = Session::new(pwd, provider, model, thinking_level, parent);
         validate_session_id(&session.id)?;
         let path = self.file_path(&key, &session.id);
         // `file_path` always builds `root/key/name.jsonl`, so parent is
@@ -224,6 +226,7 @@ fn parse_header(
         thinking_level,
         created_at_ms,
         updated_at_ms,
+        parent,
     } = record
     else {
         return Err(SessionError::InvalidHeader {
@@ -267,6 +270,7 @@ fn parse_header(
         usage: Usage::default(),
         created_at_ms,
         updated_at_ms: updated_at_ms.max(created_at_ms),
+        parent,
     })
 }
 
@@ -305,7 +309,7 @@ mod tests {
         let manager = SessionManager::new(&root);
 
         let session = manager
-            .create("/tmp/project", "openrouter", "test-model", None)
+            .create("/tmp/project", "openrouter", "test-model", None, None)
             .await
             .expect("create session");
 
@@ -332,7 +336,7 @@ mod tests {
         let manager = SessionManager::new(&root);
 
         manager
-            .create("/tmp/project", "openrouter", "test-model", None)
+            .create("/tmp/project", "openrouter", "test-model", None, None)
             .await
             .expect("create session without a pre-existing root");
 
@@ -356,11 +360,11 @@ mod tests {
         let manager = SessionManager::new(&root);
 
         manager
-            .create("/tmp/a", "openrouter", "m", None)
+            .create("/tmp/a", "openrouter", "m", None, None)
             .await
             .expect("create a");
         manager
-            .create("/tmp/b", "openrouter", "m", None)
+            .create("/tmp/b", "openrouter", "m", None, None)
             .await
             .expect("create b");
 
@@ -380,6 +384,7 @@ mod tests {
                 "openrouter",
                 "test-model",
                 Some(ReasoningEffort::High),
+                None,
             )
             .await
             .expect("create");
@@ -426,7 +431,7 @@ mod tests {
         let root = temp_root("usage");
         let manager = SessionManager::new(&root);
         let session = manager
-            .create("/tmp/p", "o", "m", None)
+            .create("/tmp/p", "o", "m", None, None)
             .await
             .expect("create");
 
@@ -452,7 +457,7 @@ mod tests {
         let root = temp_root("truncated");
         let manager = SessionManager::new(&root);
         let session = manager
-            .create("/tmp/p", "o", "m", None)
+            .create("/tmp/p", "o", "m", None, None)
             .await
             .expect("create");
         let path = session_file(&root, "/tmp/p", &session.id);
@@ -489,7 +494,7 @@ mod tests {
         let root = temp_root("cross");
         let manager = SessionManager::new(&root);
         let session = manager
-            .create("/tmp/p", "o", "m", None)
+            .create("/tmp/p", "o", "m", None, None)
             .await
             .expect("create");
 
@@ -514,14 +519,14 @@ mod tests {
         let pwd = "/tmp/p";
 
         let session = manager
-            .create(pwd, "o", "m", None)
+            .create(pwd, "o", "m", None, None)
             .await
             .expect("first create");
         let before = std::fs::read_to_string(session_file(&root, pwd, &session.id)).unwrap();
 
         // Simulate a second create racing onto the same id: the exclusive
         // file creation must refuse rather than truncate the existing file.
-        let mut collision = Session::new(pwd, "o", "m", None);
+        let mut collision = Session::new(pwd, "o", "m", None, None);
         collision.id = session.id.clone();
         collision.created_at_ms = 123_456;
         collision.updated_at_ms = 123_456;
@@ -544,7 +549,10 @@ mod tests {
         let root = temp_root("header");
         let manager = SessionManager::new(&root);
         let pwd = "/tmp/p";
-        let session = manager.create(pwd, "o", "m", None).await.expect("create");
+        let session = manager
+            .create(pwd, "o", "m", None, None)
+            .await
+            .expect("create");
         let path = session_file(&root, pwd, &session.id);
 
         // Wrong schema version.
@@ -561,7 +569,10 @@ mod tests {
         assert!(matches!(err, SessionError::UnsupportedVersion { .. }));
 
         // Mismatched header id (fresh file).
-        let session = manager.create(pwd, "o", "m", None).await.expect("create");
+        let session = manager
+            .create(pwd, "o", "m", None, None)
+            .await
+            .expect("create");
         let path = session_file(&root, pwd, &session.id);
         let content = std::fs::read_to_string(&path).unwrap();
         std::fs::write(&path, content.replace(&session.id, "other-id")).unwrap();
@@ -572,7 +583,10 @@ mod tests {
         assert!(matches!(err, SessionError::InvalidHeader { .. }));
 
         // Mismatched header pwd / cross-directory load (fresh file).
-        let session = manager.create(pwd, "o", "m", None).await.expect("create");
+        let session = manager
+            .create(pwd, "o", "m", None, None)
+            .await
+            .expect("create");
         let path = session_file(&root, pwd, &session.id);
         let content = std::fs::read_to_string(&path).unwrap();
         std::fs::write(&path, content.replace(pwd, "/elsewhere")).unwrap();
@@ -588,7 +602,7 @@ mod tests {
     async fn append_to_missing_session_fails() {
         let root = temp_root("missing-append");
         let manager = SessionManager::new(&root);
-        let session = Session::new("/tmp/p", "o", "m", None);
+        let session = Session::new("/tmp/p", "o", "m", None, None);
 
         let err = manager
             .append_message(&session.id, &session.pwd, &AgentMessage::user("hi"))
@@ -606,7 +620,7 @@ mod tests {
         let root = temp_root("perms");
         let manager = SessionManager::new(&root);
         let session = manager
-            .create("/tmp/p", "o", "m", None)
+            .create("/tmp/p", "o", "m", None, None)
             .await
             .expect("create");
 
@@ -627,7 +641,13 @@ mod tests {
         let manager = SessionManager::new(&root);
 
         let session = manager
-            .create("/tmp/project", "openrouter", "old-model", None)
+            .create(
+                "/tmp/project",
+                "openrouter",
+                "old-model",
+                None,
+                Some("018e".to_owned()),
+            )
             .await
             .expect("create");
         let session_id = session.id.clone();
@@ -655,6 +675,47 @@ mod tests {
             .expect("read file");
         let line_count = content.lines().count();
         assert_eq!(line_count, 2, "file has exactly header + one message line");
+        cleanup(&root);
+    }
+
+    /// A session created with a parent records it, and reading that session
+    /// back round-trips the parent id.
+    #[tokio::test]
+    async fn create_records_parent_and_it_round_trips() {
+        let root = temp_root("parent");
+        let manager = SessionManager::new(&root);
+
+        let child = manager
+            .create("/tmp/p", "o", "m", None, Some("018e".to_owned()))
+            .await
+            .expect("create");
+        assert_eq!(child.parent, Some("018e".to_owned()));
+
+        let loaded = manager
+            .get_session(&child.id, Path::new("/tmp/p"))
+            .await
+            .expect("load");
+        assert_eq!(loaded.parent, Some("018e".to_owned()));
+        cleanup(&root);
+    }
+
+    /// A session created without a parent records `None`, and it round-trips.
+    #[tokio::test]
+    async fn create_without_parent_round_trips_none() {
+        let root = temp_root("noparent");
+        let manager = SessionManager::new(&root);
+
+        let session = manager
+            .create("/tmp/p", "o", "m", None, None)
+            .await
+            .expect("create");
+        assert_eq!(session.parent, None);
+
+        let loaded = manager
+            .get_session(&session.id, Path::new("/tmp/p"))
+            .await
+            .expect("load");
+        assert_eq!(loaded.parent, None);
         cleanup(&root);
     }
 

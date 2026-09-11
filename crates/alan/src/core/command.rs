@@ -10,6 +10,8 @@ use strum::{EnumIter, EnumString, IntoEnumIterator, IntoStaticStr};
 pub enum SlashCommand {
     Login,
     Models,
+    New,
+    SummarizeNew,
     Plan,
     Review,
     Normal,
@@ -32,6 +34,24 @@ impl SlashCommand {
         rest.split_whitespace().next()?.parse().ok()
     }
 
+    /// Like [`parse`](Self::parse), but keeps the text after the command.
+    pub fn parse_with_args(input: &str) -> Option<(Self, &str)> {
+        let rest = input.strip_prefix('/')?;
+        if rest
+            .chars()
+            .any(|c| c.is_whitespace() && !matches!(c, ' ' | '\t'))
+        {
+            return None;
+        }
+        let trimmed = rest.trim_end_matches([' ', '\t']);
+        let (name, args) = match trimmed.split_once([' ', '\t']) {
+            Some((name, args)) => (name, args.trim_start_matches([' ', '\t'])),
+            None => (trimmed, ""),
+        };
+        let command = name.parse().ok()?;
+        Some((command, args))
+    }
+
     pub fn name(self) -> String {
         format!("/{}", <&'static str>::from(self))
     }
@@ -40,6 +60,8 @@ impl SlashCommand {
         match self {
             Self::Login => "sign in to a provider",
             Self::Models => "pick a model for this conversation",
+            Self::New => "start a new session",
+            Self::SummarizeNew => "summarize this session into a new one",
             Self::Plan => "turn on plan mode (also Shift+Tab)",
             Self::Review => "turn on review mode (also Shift+Tab)",
             Self::Normal => "turn off plan and review mode",
@@ -116,5 +138,54 @@ mod tests {
     fn leading_whitespace_is_not_a_command() {
         assert_eq!(SlashCommand::parse(" /plan"), None);
         assert_eq!(SlashCommand::parse("\t/help"), None);
+    }
+
+    #[test]
+    fn parse_with_args_keeps_arguments() {
+        assert_eq!(
+            SlashCommand::parse_with_args("/help"),
+            Some((SlashCommand::Help, ""))
+        );
+        assert_eq!(
+            SlashCommand::parse_with_args("/plan now"),
+            Some((SlashCommand::Plan, "now"))
+        );
+        assert_eq!(
+            SlashCommand::parse_with_args("/plan"),
+            Some((SlashCommand::Plan, ""))
+        );
+        assert_eq!(SlashCommand::parse_with_args("hello"), None);
+    }
+
+    /// The argument is everything after the command, verbatim — even when the
+    /// command takes no args (e.g. `/new`). Validation, if any, is the handler's
+    /// job, not the parser's; `/new foo` is accepted and the `foo` is dropped
+    /// by `start_new_session`.
+    #[test]
+    fn parse_with_args_keeps_the_whole_tail_for_any_command() {
+        assert_eq!(
+            SlashCommand::parse_with_args("/new someting jf"),
+            Some((SlashCommand::New, "someting jf"))
+        );
+        assert_eq!(
+            SlashCommand::parse_with_args("/help a b c"),
+            Some((SlashCommand::Help, "a b c"))
+        );
+    }
+
+    /// `/summarize-new` is its own command, distinct from `/new`, and its
+    /// argument is read by the handler via `parse_with_args`.
+    #[test]
+    fn parses_summarize_new() {
+        assert_eq!(
+            SlashCommand::parse("/summarize-new"),
+            Some(SlashCommand::SummarizeNew)
+        );
+        assert_eq!(
+            SlashCommand::parse_with_args("/summarize-new \"XYZ\""),
+            Some((SlashCommand::SummarizeNew, "\"XYZ\""))
+        );
+        // Must not be confused with the unrelated `/new` command.
+        assert_eq!(SlashCommand::parse("/new"), Some(SlashCommand::New));
     }
 }

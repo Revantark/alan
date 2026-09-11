@@ -132,8 +132,12 @@ Keep UI simple. Avoid borders, unnecessary widgets, and premature abstraction.
 - Supports tools through `AgentTool`.
 - Executes tool calls in rounds.
 - Limits tool rounds with `max_tool_rounds`.
-- Does not yet provide streaming events.
-- Does not yet provide abort, session persistence, or queued prompts.
+- Streams events, supports abort, and persists sessions under
+  `$ALAN_HOME/.alan/sessions` (append-only JSONL).
+- `/new` resets the in-memory conversation and starts a new session file; the
+  old file stays on disk and remains resumable by its id. `/summarize-new
+  [focus]` runs one tool-less summarization round and restarts into a fresh
+  session seeded with the summary (plus an optional quoted focus hint).
 
 `Agent::builder(model).build()` creates agent with no system prompt, skills, or tools.
 
