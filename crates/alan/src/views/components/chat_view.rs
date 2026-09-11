@@ -141,7 +141,7 @@ impl Component<AlanAction> for ChatView {
                                 let items = provider
                                     .models()
                                     .iter()
-                                    .map(|m| format!("{}", m.name))
+                                    .map(|m| m.name.to_string())
                                     .collect();
                                 let _ = cx.update(picker, |p| p.set_items(items));
                             }
