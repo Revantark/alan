@@ -74,6 +74,21 @@ impl Session {
         }
         self.updated_at_ms = self.updated_at_ms.max(timestamp_ms);
     }
+
+    /// Update the session's model identity. Only the in-memory copy
+    /// changes; persisting is the caller's job (see
+    /// [`SessionManager::update_header_model`]).
+    pub fn set_model(
+        &mut self,
+        provider: &str,
+        model: &str,
+        thinking_level: Option<ReasoningEffort>,
+    ) {
+        self.provider = provider.to_owned();
+        self.model = model.to_owned();
+        self.thinking_level = thinking_level;
+        self.updated_at_ms = now_ms();
+    }
 }
 
 /// One JSONL record in a session file.
@@ -231,5 +246,19 @@ mod tests {
         assert_eq!(session.messages.len(), 1);
         assert_eq!(session.usage.input_tokens, 150);
         assert_eq!(session.usage.output_tokens, 60);
+    }
+
+    #[test]
+    fn set_model_updates_fields_and_timestamp() {
+        let mut session = Session::new("/tmp/project", "old-provider", "old-model", None);
+        session.created_at_ms = 1_000;
+        session.updated_at_ms = 1_000;
+
+        session.set_model("new-provider", "new-model", Some(ReasoningEffort::High));
+
+        assert_eq!(session.provider, "new-provider");
+        assert_eq!(session.model, "new-model");
+        assert_eq!(session.thinking_level, Some(ReasoningEffort::High));
+        assert!(session.updated_at_ms > 1_000);
     }
 }

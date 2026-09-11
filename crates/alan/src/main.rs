@@ -60,8 +60,8 @@ async fn main() -> anyhow::Result<()> {
         agent_builder = agent_builder.resume_session(session);
     }
     let agent = agent_builder.build()?;
-
-    let mut controller = ChatController::new(agent);
+    let model_name = agent.info().await.name;
+    let mut controller = ChatController::new(agent, model_name);
     if was_resumed {
         controller.restore_session_history().await;
     }

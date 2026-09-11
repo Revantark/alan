@@ -49,8 +49,7 @@ pub struct ChatController {
 }
 
 impl ChatController {
-    pub fn new(agent: Agent) -> Self {
-        let name = agent.info().name;
+    pub fn new(agent: Agent, name: String) -> Self {
         Self {
             agent: Arc::new(agent),
             entries: Vec::new(),
@@ -67,8 +66,10 @@ impl ChatController {
 
     pub async fn restore_session_history(&mut self) {
         let messages = self.agent.messages().await;
-        self.usage = self.agent.usage().await;
-        self.model_name = self.agent.info().name;
+        let usage = self.agent.usage().await;
+        let info = self.agent.info().await;
+        self.model_name = info.name;
+        self.usage = usage;
         self.entries.clear();
 
         for message in messages {
@@ -290,6 +291,22 @@ impl ChatController {
         }
     }
 
+    /// Apply a completed model switch: refresh the cached model name and
+    /// record the change in the transcript.
+    pub fn apply_model_switch(&mut self, model_name: String) {
+        self.model_name = model_name.clone();
+        self.entries
+            .push(Entry::Info(format!("Switched to {model_name}")));
+        self.revision = self.revision.wrapping_add(1);
+    }
+
+    /// Record a failed switch attempt in the transcript.
+    pub fn apply_model_switch_failed(&mut self, error: String) {
+        self.entries
+            .push(Entry::Error(format!("Model switch failed: {error}")));
+        self.revision = self.revision.wrapping_add(1);
+    }
+
     fn append_delta(entries: &mut Vec<Entry>, delta: &str) -> bool {
         if delta.is_empty() {
             return false;
@@ -346,5 +363,82 @@ impl ChatController {
             return true;
         }
         false
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use providers::{Model, Provider, ProviderId};
+
+    fn test_model() -> Model {
+        providers::OpenRouterProvider::builder("key")
+            .with_models([providers::ModelInfo {
+                provider: ProviderId::new("openrouter"),
+                id: "test".into(),
+                name: "Test".into(),
+                api: providers::ApiId::ChatCompletions,
+                capabilities: providers::ModelCapabilities::default(),
+                pricing: None,
+            }])
+            .with_api(std::sync::Arc::new(FakeApi))
+            .build()
+            .unwrap()
+            .bind("test")
+            .unwrap()
+    }
+
+    struct FakeApi;
+
+    #[async_trait::async_trait]
+    impl llm::LlmApi for FakeApi {
+        async fn stream(
+            &self,
+            _request: llm::LlmRequest<'_>,
+        ) -> Result<llm::LlmStream, llm::LlmError> {
+            Ok(Box::pin(futures_util::stream::iter([
+                Ok(llm::LlmEvent::TextDelta {
+                    text: "test".to_string(),
+                }),
+                Ok(llm::LlmEvent::Done {
+                    stop_reason: llm::StopReason::Stop,
+                    usage: None,
+                    model: None,
+                }),
+            ])))
+        }
+    }
+
+    fn make_controller(name: &str) -> ChatController {
+        let agent = Agent::builder(test_model()).build().unwrap();
+        ChatController::new(agent, name.to_string())
+    }
+
+    #[test]
+    fn apply_model_switch_updates_name_and_logs() {
+        let mut controller = make_controller("old-model");
+        controller.entries.push(Entry::Prompt("test".to_string()));
+        controller.apply_model_switch("new-model".to_string());
+        assert_eq!(controller.model_name(), "new-model");
+        assert_eq!(
+            controller.entries().last(),
+            Some(&Entry::Info("Switched to new-model".to_string()))
+        );
+        // revision incremented by the prompt entry
+        assert_eq!(controller.revision(), 1);
+    }
+
+    #[test]
+    fn apply_model_switch_failed_records_error() {
+        let mut controller = make_controller("old-model");
+        controller.entries.push(Entry::Prompt("test".to_string()));
+        let old_revision = controller.revision();
+        controller.apply_model_switch_failed("timeout".to_string());
+        assert_eq!(controller.model_name(), "old-model");
+        assert_eq!(
+            controller.entries().last(),
+            Some(&Entry::Error("Model switch failed: timeout".to_string()))
+        );
+        assert!(controller.revision() > old_revision);
     }
 }

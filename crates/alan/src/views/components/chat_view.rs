@@ -6,7 +6,10 @@
 //! the root could not interleave them because it held only the editor while
 //! `ChatHistory` owned the status.
 
+use std::sync::Arc;
+
 use crate::root::AlanAction;
+use crate::views::components::{ModelPick, ModelsPicker};
 use crate::views::theme;
 use crossterm::event::{Event, KeyCode, KeyEventKind};
 use ratatui::Frame;
@@ -39,14 +42,20 @@ pub struct ChatView {
     chat_source: Option<ChatHistory>,
     chat: Option<Entity<ChatHistory>>,
     editor: Option<Entity<PromptEditor>>,
+    provider: Arc<dyn providers::Provider>,
+    model_subscription: Option<tui::Subscription>,
+    model_picker: Option<Entity<ModelsPicker>>,
 }
 
 impl ChatView {
-    pub fn new(chat: ChatHistory) -> Self {
+    pub fn new(chat: ChatHistory, provider: Arc<dyn providers::Provider>) -> Self {
         Self {
             chat_source: Some(chat),
             chat: None,
             editor: None,
+            provider,
+            model_subscription: None,
+            model_picker: None,
         }
     }
 
@@ -98,6 +107,75 @@ impl Component<AlanAction> for ChatView {
                 let status = cx.dispatch(chat, action);
                 if cx.update(chat, |c| c.take_login_request()).unwrap_or(false) {
                     cx.emit(LoginRequested);
+                }
+                if cx
+                    .update(chat, |c| c.take_models_request())
+                    .unwrap_or(false)
+                {
+                    let provider = Arc::clone(&self.provider);
+                    let picker = cx.open_overlay(ModelsPicker::new("Models", Vec::new()));
+                    let initial_items = provider
+                        .models()
+                        .iter()
+                        .map(|m| format!("{} — {}", m.id, m.name))
+                        .collect();
+                    let _ = cx.update(picker, |p| p.set_items(initial_items));
+                    let fetch_provider = Arc::clone(&provider);
+                    let _ = cx.spawn(
+                        async move {
+                            fetch_provider
+                                .fetch_models()
+                                .await
+                                .map_err(|e| tui::TaskError(e.into()))?;
+                            Ok(())
+                        },
+                        move |result, _view, cx| {
+                            if result.is_ok() {
+                                let items = provider
+                                    .models()
+                                    .iter()
+                                    .map(|m| format!("{}", m.name))
+                                    .collect();
+                                let _ = cx.update(picker, |p| p.set_items(items));
+                            }
+                        },
+                    );
+                    let provider = Arc::clone(&self.provider);
+                    self.model_subscription = Some(cx.subscribe::<ModelPick, ModelsPicker, _>(
+                        picker,
+                        move |event, _view, _picker, cx| {
+                            if let ModelPick::Chosen(index) = event {
+                                let Some(model_id) =
+                                    provider.models().get(*index).map(|m| m.id.clone())
+                                else {
+                                    return;
+                                };
+                                let Some(agent) = cx.read(chat, |c| c.agent()).flatten() else {
+                                    return;
+                                };
+                                let provider = Arc::clone(&provider);
+                                let _ = cx.spawn(
+                                    async move {
+                                        let model = provider
+                                            .bind(&model_id)
+                                            .map_err(|e| tui::TaskError(e.into()))?;
+                                        let name = model.info().name.clone();
+                                        agent
+                                            .set_model(model)
+                                            .await
+                                            .map_err(|e| tui::TaskError(e.into()))?;
+                                        Ok(name)
+                                    },
+                                    move |result, _view, cx| {
+                                        let _ = cx.update(chat, |c| match result {
+                                            Ok(name) => c.apply_model_switch(name),
+                                            Err(e) => c.apply_model_switch_failed(e.to_string()),
+                                        });
+                                    },
+                                );
+                            }
+                        },
+                    ));
                 }
                 status
             }
@@ -170,6 +248,16 @@ impl Component<AlanAction> for ChatView {
         .areas(area);
 
         cx.render_entity(chat, frame, chat_area);
+        if let Some(picker) = self.model_picker {
+            let picker_height = 7.min(chat_area.height);
+            let picker_area = Rect {
+                x: chat_area.x,
+                y: status_area.y.saturating_sub(picker_height),
+                width: chat_area.width,
+                height: picker_height,
+            };
+            cx.render_entity(picker, frame, picker_area);
+        }
         render_attachments(frame, attachment_area, editor, cx);
         // Paint the whole footer (status through bottom pad) with the editor
         // background, so the gap and bottom padding don't fall back to the

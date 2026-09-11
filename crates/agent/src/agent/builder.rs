@@ -159,7 +159,7 @@ impl AgentBuilder {
             session_manager: self.session_manager,
             active_session: Mutex::new(active_session),
             working_directory: self.working_directory,
-            model_info: info,
+            model_info: Mutex::new(info),
         })
     }
 }

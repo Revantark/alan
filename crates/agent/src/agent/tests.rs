@@ -1110,3 +1110,68 @@ async fn reentering_review_mode_rearms_the_guidelines() {
         other => panic!("expected user message, got {other:?}"),
     }
 }
+
+#[tokio::test]
+async fn set_model_updates_info() {
+    let a = agent(model());
+    let new_model = model_with_api(Arc::new(FakeApi));
+    a.set_model(new_model).await.unwrap();
+    assert_eq!(a.info().await.id, "test");
+}
+
+#[tokio::test]
+async fn set_model_switches_next_prompt() {
+    let a = agent(model());
+    let new_model = model_with_api(Arc::new(FakeApi));
+    a.set_model(new_model).await.unwrap();
+    let response = a
+        .ask(a.prompt().content("hello"))
+        .unwrap()
+        .into_response()
+        .await
+        .unwrap();
+    assert_eq!(response.text(), "echo: hello");
+}
+
+#[tokio::test]
+async fn set_model_fails_while_prompt_runs() {
+    let a = agent(model());
+    let lock = a.model.lock().await;
+    let result = a.set_model(model()).await;
+    assert!(matches!(result, Err(AgentError::Model(_))));
+    drop(lock);
+    a.set_model(model()).await.unwrap();
+}
+
+#[tokio::test]
+async fn set_model_persists_switch_in_session() {
+    let root = std::env::temp_dir().join(format!("alan-plan4-set-model-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&root).unwrap();
+    let manager = Arc::new(SessionManager::new(&root));
+    let m = model();
+
+    // Create a session first so there's something to switch on.
+    let session = manager
+        .create(&root, "openrouter", "test", None)
+        .await
+        .expect("create session");
+    let session_id = session.id.clone();
+
+    let a = Arc::new(
+        Agent::builder(m)
+            .session_manager(manager.clone())
+            .resume_session(session)
+            .build()
+            .unwrap(),
+    );
+
+    let new_model = model_with_api(Arc::new(FakeApi));
+    a.set_model(new_model).await.unwrap();
+
+    let loaded = manager
+        .get_session(&session_id, &root)
+        .await
+        .expect("load session");
+    assert_eq!(loaded.model, "test");
+    assert_eq!(loaded.provider, "openrouter");
+}
