@@ -150,6 +150,24 @@ impl SessionManager {
         Ok(session)
     }
 
+    /// Persist an updated model identity by rewriting the session
+    /// header record. The session's messages and usage records are
+    /// untouched.
+    pub async fn update_header_model(&self, session: &Session) -> Result<(), SessionError> {
+        let key = pwd_key(&session.pwd);
+        let path = self.file_path(&key, &session.id);
+        let header =
+            session
+                .header_record()
+                .to_jsonl()
+                .map_err(|source| SessionError::Serialize {
+                    path: path.clone(),
+                    source,
+                })?;
+        JsonlStore::rewrite_first_line(&path, &header).await?;
+        Ok(())
+    }
+
     async fn append_record(
         &self,
         session_id: &str,
@@ -614,6 +632,49 @@ mod tests {
             .mode();
         assert_eq!(dir_mode & 0o777, 0o700, "directory mode");
         assert_eq!(file_mode & 0o777, 0o600, "session file mode");
+        cleanup(&root);
+    }
+
+    #[tokio::test]
+    async fn update_header_model_rewrites_header_keeps_messages() {
+        let root = temp_root("update-header");
+        let manager = SessionManager::new(&root);
+
+        let session = manager
+            .create(
+                "/tmp/project",
+                "openrouter",
+                "old-model",
+                None,
+                Some("018e".to_owned()),
+            )
+            .await
+            .expect("create");
+        let session_id = session.id.clone();
+
+        manager
+            .append_message(&session_id, &session.pwd, &AgentMessage::user("hello"))
+            .await
+            .expect("append");
+
+        let mut updated = session.clone();
+        updated.set_model("new-provider", "new-model", Some(ReasoningEffort::High));
+        manager
+            .update_header_model(&updated)
+            .await
+            .expect("update header");
+
+        let loaded = manager.get_session(&session_id, &session.pwd).await;
+        let loaded = loaded.expect("load");
+        assert_eq!(loaded.model, "new-model");
+        assert_eq!(loaded.provider, "new-provider");
+        assert_eq!(loaded.thinking_level, Some(ReasoningEffort::High));
+        assert_eq!(loaded.messages, vec![AgentMessage::user("hello")]);
+
+        let content = std::fs::read_to_string(session_file(&root, "/tmp/project", &session_id))
+            .expect("read file");
+        let line_count = content.lines().count();
+        assert_eq!(line_count, 2, "file has exactly header + one message line");
         cleanup(&root);
     }
 

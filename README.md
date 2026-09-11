@@ -50,6 +50,7 @@ Alan stores credentials at `~/.alan/auth.json` by default. Set `ALAN_HOME` to ch
 - Type `@` in the prompt to complete file and folder paths (`@popup.rs`
   matches anywhere; `@src/co` matches by directory).
 - Slash commands:
+  - `/models` — pick a model from the provider catalog
   - `/login` — sign in to a provider interactively
   - `/new` — start a fresh session
   - `/summarize-new [focus]` — summarize this session and restart into a new one

@@ -100,6 +100,7 @@ pub struct ChatHistory {
     /// it dispatches a submission; the chat cannot dispatch back to its parent
     /// without deadlocking on the parent's locked slot.
     login_requested: bool,
+    models_requested: bool,
     /// Self-scheduled momentum ticker, alive only while wheel notches are
     /// draining (plus a short idle grace). Dropping it cancels the ticker.
     momentum: Option<Subscription>,
@@ -177,6 +178,7 @@ impl ChatHistory {
             stream_repaint: None,
             loading_repaint: None,
             login_requested: false,
+            models_requested: false,
             momentum: None,
             momentum_idle: 0,
         }
@@ -252,6 +254,7 @@ impl ChatHistory {
             match command {
                 // The root owns the login overlay; flag it to open on return.
                 SlashCommand::Login => self.login_requested = true,
+                SlashCommand::Models => self.models_requested = true,
                 SlashCommand::Plan => controller.set_mode(agent::Mode::Plan),
                 SlashCommand::Review => controller.set_mode(agent::Mode::Review),
                 SlashCommand::Normal => controller.set_mode(agent::Mode::Normal),
@@ -441,6 +444,28 @@ impl ChatHistory {
     /// dispatches a submission so it can open the login overlay.
     pub(crate) fn take_login_request(&mut self) -> bool {
         std::mem::take(&mut self.login_requested)
+    }
+
+    /// Take the pending `/models` request, if any. Read by the root after it
+    /// dispatches a submission so it can open the model picker overlay.
+    pub(crate) fn take_models_request(&mut self) -> bool {
+        std::mem::take(&mut self.models_requested)
+    }
+
+    pub(crate) fn agent(&self) -> Option<std::sync::Arc<agent::Agent>> {
+        self.controller.as_ref().map(|c| c.agent())
+    }
+
+    pub(crate) fn apply_model_switch(&mut self, name: String) {
+        if let Some(controller) = &mut self.controller {
+            controller.apply_model_switch(name);
+        }
+    }
+
+    pub(crate) fn apply_model_switch_failed(&mut self, error: String) {
+        if let Some(controller) = &mut self.controller {
+            controller.apply_model_switch_failed(error);
+        }
     }
 
     /// Apply one capped step of queued wheel notches, returning whether the

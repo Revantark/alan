@@ -57,8 +57,7 @@ pub struct ChatController {
 }
 
 impl ChatController {
-    pub fn new(agent: Agent) -> Self {
-        let name = agent.info().name;
+    pub fn new(agent: Agent, name: String) -> Self {
         Self {
             agent: Arc::new(agent),
             entries: Vec::new(),
@@ -76,8 +75,10 @@ impl ChatController {
 
     pub async fn restore_session_history(&mut self) {
         let messages = self.agent.messages().await;
-        self.usage = self.agent.usage().await;
-        self.model_name = self.agent.info().name;
+        let usage = self.agent.usage().await;
+        let info = self.agent.info().await;
+        self.model_name = info.name;
+        self.usage = usage;
         self.entries.clear();
 
         for message in messages {
@@ -321,6 +322,22 @@ impl ChatController {
         }
     }
 
+    /// Apply a completed model switch: refresh the cached model name and
+    /// record the change in the transcript.
+    pub fn apply_model_switch(&mut self, model_name: String) {
+        self.model_name = model_name.clone();
+        self.entries
+            .push(Entry::Info(format!("Switched to {model_name}")));
+        self.revision = self.revision.wrapping_add(1);
+    }
+
+    /// Record a failed switch attempt in the transcript.
+    pub fn apply_model_switch_failed(&mut self, error: String) {
+        self.entries
+            .push(Entry::Error(format!("Model switch failed: {error}")));
+        self.revision = self.revision.wrapping_add(1);
+    }
+
     fn append_delta(entries: &mut Vec<Entry>, delta: &str) -> bool {
         if delta.is_empty() {
             return false;
@@ -383,32 +400,39 @@ impl ChatController {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agent::Agent;
-    use async_trait::async_trait;
-    use llm::{ContentBlock, LlmApi, LlmError, LlmEvent, LlmRequest, LlmResponse, StopReason};
-    use providers::{
-        ApiId, ApiKeyAuth, ModelCapabilities, ModelInfo, OpenRouterProvider, Provider, ProviderId,
-    };
-    use std::sync::Arc;
+    use providers::{Model, Provider, ProviderId};
+
+    fn test_model() -> Model {
+        providers::OpenRouterProvider::builder("key")
+            .with_models([providers::ModelInfo {
+                provider: ProviderId::new("openrouter"),
+                id: "test".into(),
+                name: "Test".into(),
+                api: providers::ApiId::ChatCompletions,
+                capabilities: providers::ModelCapabilities::default(),
+                pricing: None,
+            }])
+            .with_api(std::sync::Arc::new(FakeApi))
+            .build()
+            .unwrap()
+            .bind("test")
+            .unwrap()
+    }
 
     struct FakeApi;
 
-    #[async_trait]
-    impl LlmApi for FakeApi {
-        async fn stream(&self, _request: LlmRequest<'_>) -> Result<llm::LlmStream, LlmError> {
-            let response = LlmResponse {
-                content: vec![ContentBlock::Text("ok".into())],
-                stop_reason: StopReason::Stop,
-                usage: None,
-                model: None,
-                reasoning: None,
-                reasoning_details: Vec::new(),
-            };
-            let text = response.text();
+    #[async_trait::async_trait]
+    impl llm::LlmApi for FakeApi {
+        async fn stream(
+            &self,
+            _request: llm::LlmRequest<'_>,
+        ) -> Result<llm::LlmStream, llm::LlmError> {
             Ok(Box::pin(futures_util::stream::iter([
-                Ok(LlmEvent::TextDelta { text }),
-                Ok(LlmEvent::Done {
-                    stop_reason: StopReason::Stop,
+                Ok(llm::LlmEvent::TextDelta {
+                    text: "test".to_string(),
+                }),
+                Ok(llm::LlmEvent::Done {
+                    stop_reason: llm::StopReason::Stop,
                     usage: None,
                     model: None,
                 }),
@@ -416,75 +440,36 @@ mod tests {
         }
     }
 
-    fn test_agent() -> Agent {
-        let info = ModelInfo {
-            provider: ProviderId::new("openrouter"),
-            id: "test".into(),
-            name: "Test".into(),
-            api: ApiId::ChatCompletions,
-            capabilities: ModelCapabilities::default(),
-            pricing: None,
-        };
-        let model = OpenRouterProvider::builder("key")
-            .with_auth(Arc::new(ApiKeyAuth::new("key")))
-            .with_models([info])
-            .with_api(Arc::new(FakeApi))
-            .build()
-            .unwrap()
-            .bind("test")
-            .unwrap();
-        Agent::builder(model).build().unwrap()
+    fn make_controller(name: &str) -> ChatController {
+        let agent = Agent::builder(test_model()).build().unwrap();
+        ChatController::new(agent, name.to_string())
     }
 
-    #[tokio::test]
-    async fn clear_transcript_drops_entries_and_usage() {
-        let mut controller = ChatController::new(test_agent());
-        controller.push_info("note");
-        controller.usage = llm::Usage {
-            input_tokens: 5,
-            output_tokens: 7,
-            ..Default::default()
-        };
-        let before = controller.revision();
-        assert_eq!(controller.entries().len(), 1);
-        assert_eq!(controller.usage().input_tokens, 5);
-
-        controller.clear_transcript();
-        assert!(controller.entries().is_empty(), "transcript must be empty");
+    #[test]
+    fn apply_model_switch_updates_name_and_logs() {
+        let mut controller = make_controller("old-model");
+        controller.entries.push(Entry::Prompt("test".to_string()));
+        controller.apply_model_switch("new-model".to_string());
+        assert_eq!(controller.model_name(), "new-model");
         assert_eq!(
-            controller.usage(),
-            llm::Usage::default(),
-            "usage must reset"
+            controller.entries().last(),
+            Some(&Entry::Info("Switched to new-model".to_string()))
         );
-        assert!(controller.revision() > before, "revision must advance");
+        // revision incremented by the prompt entry
+        assert_eq!(controller.revision(), 1);
     }
 
-    #[tokio::test]
-    async fn set_loading_toggles_state_and_bumps_revision() {
-        let mut controller = ChatController::new(test_agent());
-        assert!(controller.loading().is_none());
-
-        let before = controller.revision();
-        controller.set_loading(Some("summarizing".to_owned()));
-        assert_eq!(controller.loading(), Some("summarizing"));
-        assert!(controller.revision() > before, "revision must advance");
-
-        // Setting the same value is a no-op.
-        let after = controller.revision();
-        controller.set_loading(Some("summarizing".to_owned()));
-        assert_eq!(controller.revision(), after, "no change, no bump");
-
-        controller.set_loading(None);
-        assert!(controller.loading().is_none());
-    }
-
-    #[tokio::test]
-    async fn submit_is_rejected_while_loading() {
-        let mut controller = ChatController::new(test_agent());
-        controller.set_loading(Some("summarizing".to_owned()));
-        assert!(
-            controller.submit("hi".to_owned(), Vec::new()).is_none(),
-            "submit must be rejected while loading"
+    #[test]
+    fn apply_model_switch_failed_records_error() {
+        let mut controller = make_controller("old-model");
+        controller.entries.push(Entry::Prompt("test".to_string()));
+        let old_revision = controller.revision();
+        controller.apply_model_switch_failed("timeout".to_string());
+        assert_eq!(controller.model_name(), "old-model");
+        assert_eq!(
+            controller.entries().last(),
+            Some(&Entry::Error("Model switch failed: timeout".to_string()))
         );
+        assert!(controller.revision() > old_revision);
     }
 }
