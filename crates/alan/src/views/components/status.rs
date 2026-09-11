@@ -21,6 +21,9 @@ pub(crate) const STATUS_HEIGHT: u16 = 2;
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct StatusSnapshot {
     pub activity: Activity,
+    /// Dot count (0..3) for the loading animation; only read when `activity`
+    /// is `Activity::Loading`.
+    pub loading_dots: usize,
     pub mode: Mode,
     pub usage: Usage,
     pub model_name: String,
@@ -30,7 +33,8 @@ impl StatusSnapshot {
     /// Project the transcript snapshot onto the fields the status line reads.
     pub(crate) fn from_snapshot(snap: &super::chat_history::ChatSnapshot) -> Self {
         Self {
-            activity: snap.activity,
+            activity: snap.activity.clone(),
+            loading_dots: snap.loading_dots,
             mode: snap.mode,
             usage: snap.usage.clone(),
             model_name: snap.model_name.clone(),
@@ -38,15 +42,15 @@ impl StatusSnapshot {
     }
 }
 
-/// How an [`Activity`] presents itself in the status line.
+/// How a non-loading [`Activity`] presents itself in the status line.
 struct StatusStyle {
     style: Style,
     label: &'static str,
     hints: &'static str,
 }
 
-impl From<Activity> for StatusStyle {
-    fn from(activity: Activity) -> Self {
+impl From<&Activity> for StatusStyle {
+    fn from(activity: &Activity) -> Self {
         match activity {
             Activity::Thinking => StatusStyle {
                 label: "  ● thinking",
@@ -57,6 +61,13 @@ impl From<Activity> for StatusStyle {
                 label: "  ● idle",
                 hints: "  Enter send · Ctrl-C quit",
                 style: Style::default().fg(Color::Green),
+            },
+            // Loading is rendered separately (it carries a label and a live dot
+            // count); this arm is never used via the `From` path.
+            Activity::Loading(_) => StatusStyle {
+                label: "  ●",
+                hints: "",
+                style: Style::default().fg(Color::Cyan),
             },
         }
     }
@@ -83,10 +94,19 @@ fn badges(snap: &StatusSnapshot) -> Vec<Span<'static>> {
 }
 
 fn status_line(snap: &StatusSnapshot) -> Line<'static> {
-    let status = StatusStyle::from(snap.activity);
+    if let Activity::Loading(text) = &snap.activity {
+        return Line::from(Span::styled(
+            format!("  ● {text} {}", ".".repeat(snap.loading_dots)),
+            Style::default().fg(Color::Cyan),
+        ));
+    }
+    let status = StatusStyle::from(&snap.activity);
     let mut spans = vec![
-        Span::styled(status.label, status.style),
-        Span::styled(status.hints, Style::default().fg(theme::MUTED_FG)),
+        Span::styled(status.label.to_owned(), status.style),
+        Span::styled(
+            status.hints.to_owned(),
+            Style::default().fg(theme::MUTED_FG),
+        ),
     ];
     spans.extend(badges(snap));
     spans.push(Span::styled(

@@ -105,7 +105,7 @@ async fn run_prompt_with_message(
 
     let user_msg = attach_working_directory(agent, &context, user_msg);
 
-    persistence::ensure_session(agent, &model).await?;
+    persistence::ensure_session(agent, &model, None).await?;
     persistence::append_context_message(agent, &mut context, user_msg).await?;
 
     let result = super::tool_loop::run_with(agent, &model, &mut context, cx).await;
@@ -139,6 +139,63 @@ async fn save_partial_on_error(
         .await?;
     }
     Ok(())
+}
+
+/// Instruction sent alongside the conversation when asking for a summary.
+///
+/// Kept as a single constant so the wording is defined in one place and every
+/// caller of [`summary_instruction`] inherits it.
+const SUMMARY_INSTRUCTION: &str = "\
+Summarize this coding session so another agent can continue the work without the \
+original transcript. Keep it under about 2000 tokens. Preserve, with exact paths \
+and names: the current task and goal; what has been done; what is in progress and \
+the next step; files touched and why; decisions made and rejected approaches; open \
+questions and constraints. Prefer concrete facts over prose.";
+
+/// Build the summarization instruction, optionally augmented with a user focus.
+///
+/// With a focus, everything related to it is kept even at the expense of detail
+/// elsewhere — the focus is a priority, not a filter.
+pub(super) fn summary_instruction(focus: Option<&str>) -> String {
+    match focus {
+        Some(focus) if !focus.trim().is_empty() => format!(
+            "{SUMMARY_INSTRUCTION}\n\nExtra focus requested by the user: {focus}\n\
+             Keep everything related to that, even if it means less detail elsewhere."
+        ),
+        _ => SUMMARY_INSTRUCTION.to_owned(),
+    }
+}
+
+/// One buffered, tool-less round that returns the model's text.
+///
+/// Used by [`Agent::summarize`](super::Agent::summarize): the conversation is
+/// sent as-is plus a final instruction, no tools are offered, and only the
+/// text of the reply is returned.
+pub(super) async fn summarize(
+    model: &Model,
+    context: &AgentContext,
+    instruction: &str,
+) -> Result<String, AgentError> {
+    let mut messages = build_messages(context);
+    messages.push(Message::user(instruction));
+
+    let options = RequestOptions::default();
+    let mut stream_resp = model
+        .stream(CompletionInput {
+            messages: &messages,
+            tools: &[],
+            options: &options,
+        })
+        .await?;
+
+    let mut builder = LlmResponseBuilder::new();
+    while let Some(event) = stream_resp.next().await {
+        let event = event.map_err(ModelError::from)?;
+        builder.apply(&event).map_err(ModelError::from)?;
+    }
+
+    let response = builder.finish().map_err(ModelError::from)?;
+    Ok(response.text())
 }
 
 /// Stream a single LLM round: send messages, receive response events,

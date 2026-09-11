@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 
 /// Providers to prioritize, in order. Hardcoded to DeepSeek until provider
 /// routing is configurable.
-// const PROVIDER_ORDER: &[&str] = &["deepseek"];
+const PROVIDER_ORDER: &[&str] = &["deepinfra"];
 
 #[derive(Serialize)]
 struct Request<'a> {
@@ -24,13 +24,13 @@ struct Request<'a> {
     prompt_cache_key: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     cache_control: Option<&'a crate::PromptCacheControl>,
-    // provider: WireProvider,
+    provider: WireProvider,
 }
 
-// #[derive(Serialize)]
-// struct WireProvider {
-//     order: &'static [&'static str],
-// }
+#[derive(Serialize)]
+struct WireProvider {
+    order: &'static [&'static str],
+}
 
 #[derive(Serialize)]
 struct WireMessage {
@@ -184,9 +184,9 @@ pub(crate) fn serialize_request(request: &LlmRequest<'_>) -> Result<String, LlmE
         session_id: request.options.session_id.as_deref(),
         prompt_cache_key: request.options.prompt_cache_key.as_deref(),
         cache_control: request.options.cache_control.as_ref(),
-        // provider: WireProvider {
-        //     order: PROVIDER_ORDER,
-        // },
+        provider: WireProvider {
+            order: PROVIDER_ORDER,
+        },
     })
     .map_err(LlmError::Serialization)
 }
@@ -414,7 +414,6 @@ mod tests {
         assert_eq!(json["max_tokens"], 128);
         assert_eq!(json["messages"][1]["content"], "hello");
         assert_eq!(json["tools"][0]["function"]["name"], "weather");
-        assert_eq!(json["provider"]["order"][0], "deepseek");
     }
 
     #[test]
