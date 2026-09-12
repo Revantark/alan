@@ -110,7 +110,7 @@ impl LoginOverlay {
                 match auth_result {
                     AuthResult::ApiKey(key) => {
                         let credential = providers::Credential::ApiKey { key };
-                        if let Err(e) = credentials.put(provider.id(), credential).await {
+                        if let Err(e) = credentials.put(&provider.id(), credential).await {
                             return Err(tui::TaskError(e.into()));
                         }
                     }

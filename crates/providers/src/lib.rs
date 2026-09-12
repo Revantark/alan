@@ -13,4 +13,4 @@ pub use credentials::{
 };
 pub use model::{Model, ModelError, ModelOptions};
 pub use openrouter::{OpenRouterBuilder, OpenRouterProvider};
-pub use provider::{Provider, ProviderError, ProviderRegistry};
+pub use provider::{Provider, ProviderError, ProviderRegistry, bind_model};

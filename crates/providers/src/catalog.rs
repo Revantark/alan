@@ -44,8 +44,18 @@ pub struct ModelInfo {
     pub provider: ProviderId,
     pub id: String,
     pub name: String,
-    pub api: ApiId,
-    pub capabilities: ModelCapabilities,
     pub pricing: Option<ModelPricing>,
     pub context_length: Option<u64>,
+}
+
+impl ModelInfo {
+    pub fn new(model_id: &str, provider_id: ProviderId) -> Self {
+        ModelInfo {
+            provider: provider_id,
+            id: model_id.into(),
+            name: model_id.into(),
+            pricing: Some(crate::ModelPricing::default()),
+            context_length: None,
+        }
+    }
 }

@@ -417,24 +417,21 @@ impl ChatController {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use providers::{Model, Provider, ProviderId};
+    use providers::{Model, ProviderId};
 
     fn test_model() -> Model {
-        providers::OpenRouterProvider::builder("key")
+        let provider = providers::OpenRouterProvider::builder("key")
             .with_models([providers::ModelInfo {
                 provider: ProviderId::new("openrouter"),
                 id: "test".into(),
                 name: "Test".into(),
-                api: providers::ApiId::ChatCompletions,
-                capabilities: providers::ModelCapabilities::default(),
                 pricing: None,
                 context_length: None,
             }])
             .with_api(std::sync::Arc::new(FakeApi))
             .build()
-            .unwrap()
-            .bind("test")
-            .unwrap()
+            .unwrap();
+        providers::bind_model(&provider, "test", providers::ModelOptions::default()).unwrap()
     }
 
     struct FakeApi;

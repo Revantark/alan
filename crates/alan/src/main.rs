@@ -11,7 +11,7 @@ use std::time::Duration;
 use agent::{Agent, SessionManager, default_tools};
 use llm::ReasoningEffort;
 use providers::{
-    FileCredentialStore, ModelOptions, OpenRouterProvider, Provider, ProviderRegistry,
+    FileCredentialStore, ModelOptions, OpenRouterProvider, Provider, ProviderRegistry, bind_model,
 };
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -27,12 +27,12 @@ async fn main() -> anyhow::Result<()> {
     let _guard = init().unwrap();
     let model_id = std::env::var("ALAN_MODEL").unwrap_or_else(|_| "openai/gpt-4o-mini".into());
     let credential_store = Arc::new(FileCredentialStore::new(auth_path()?));
-    let provider = OpenRouterProvider::from_store(credential_store.clone())
-        .with_model(&model_id)
-        .build()?;
+    let provider = OpenRouterProvider::from_store(credential_store.clone()).build()?;
+
     let server_tools = enabled_server_tools(&provider)?;
     let reasoning_effort = configured_reasoning_effort()?;
-    let model = provider.bind_with_options(
+    let model = bind_model(
+        &provider,
         &model_id,
         ModelOptions {
             server_tools,

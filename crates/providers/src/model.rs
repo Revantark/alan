@@ -24,6 +24,16 @@ pub struct ModelOptions {
     pub provider_order: Vec<String>,
 }
 
+impl From<&Model> for ModelOptions {
+    fn from(value: &Model) -> Self {
+        ModelOptions {
+            server_tools: value.server_tools.clone(),
+            reasoning_effort: value.reasoning_effort(),
+            provider_order: value.provider_order.clone(),
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct Model {
     info: ModelInfo,
@@ -41,13 +51,12 @@ impl Model {
         auth: Arc<dyn AuthResolver>,
         options: ModelOptions,
     ) -> Self {
-        let reasoning_effort = options.reasoning_effort.or(info.capabilities.reasoning);
         Self {
             info,
             api,
             auth,
             server_tools: options.server_tools,
-            reasoning_effort,
+            reasoning_effort: options.reasoning_effort,
             provider_order: options.provider_order,
         }
     }

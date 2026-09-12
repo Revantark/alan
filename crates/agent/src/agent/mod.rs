@@ -12,7 +12,7 @@ mod tests;
 use crate::session::{Session, SessionManager};
 use crate::{AgentError, AgentMessage};
 use llm::Usage;
-use providers::{Model, ModelInfo};
+use providers::{Model, ModelInfo, ModelOptions};
 use std::path::PathBuf;
 use std::sync::{
     Arc,
@@ -165,6 +165,11 @@ impl Agent {
 
     pub async fn messages(&self) -> Vec<AgentMessage> {
         self.context.lock().await.messages.clone()
+    }
+
+    pub async fn model_options(&self) -> ModelOptions {
+        let model = self.model.lock().await.clone();
+        ModelOptions::from(&model)
     }
 
     pub async fn usage(&self) -> Usage {
