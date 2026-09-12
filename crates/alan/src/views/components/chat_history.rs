@@ -73,6 +73,7 @@ pub struct ChatSnapshot {
     pub mode: Mode,
     pub usage: Usage,
     pub model_name: String,
+    pub max_context: Option<u64>,
 }
 
 /// The chat transcript area: owns the session controller, incremental wrap
@@ -226,6 +227,7 @@ impl ChatHistory {
             mode,
             usage,
             model_name,
+            max_context: controller.max_context(),
         });
     }
 
@@ -460,6 +462,12 @@ impl ChatHistory {
     pub(crate) fn apply_model_switch(&mut self, name: String) {
         if let Some(controller) = &mut self.controller {
             controller.apply_model_switch(name);
+        }
+    }
+
+    pub(crate) fn set_max_context(&mut self, max_context: Option<u64>) {
+        if let Some(controller) = &mut self.controller {
+            controller.set_max_context(max_context);
         }
     }
 

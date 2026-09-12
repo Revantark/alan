@@ -86,6 +86,36 @@ impl Component<AlanAction> for ChatView {
         );
         self.editor = Some(cx.insert(PromptEditor::new()));
         cx.focus_entity(self.editor.expect("editor entity"));
+
+        let provider = Arc::clone(&self.provider);
+        let chat_entity = self.chat.expect("chat installed before spawn");
+        let provider_for_lookup = Arc::clone(&provider);
+        let _ = cx.spawn(
+            async move {
+                provider
+                    .fetch_models()
+                    .await
+                    .map_err(|e| tui::TaskError(e.into()))?;
+                Ok(())
+            },
+            move |result, _view, cx| {
+                if result.is_err() {
+                    return;
+                }
+                let Some(model_id) = cx
+                    .read(chat_entity, |c| c.agent().map(|a| a.model_id()))
+                    .flatten()
+                else {
+                    return;
+                };
+                let max_context = provider_for_lookup
+                    .models()
+                    .into_iter()
+                    .find(|m| m.id == model_id)
+                    .and_then(|m| m.context_length);
+                let _ = cx.update(chat_entity, |c| c.set_max_context(max_context));
+            },
+        );
     }
 
     fn handle_action(
@@ -167,15 +197,19 @@ impl Component<AlanAction> for ChatView {
                                             .bind(&model_id)
                                             .map_err(|e| tui::TaskError(e.into()))?;
                                         let name = model.info().name.clone();
+                                        let max_context = model.info().context_length;
                                         agent
                                             .set_model(model)
                                             .await
                                             .map_err(|e| tui::TaskError(e.into()))?;
-                                        Ok(name)
+                                        Ok((name, max_context))
                                     },
                                     move |result, _view, cx| {
                                         let _ = cx.update(chat, |c| match result {
-                                            Ok(name) => c.apply_model_switch(name),
+                                            Ok((name, max_context)) => {
+                                                c.set_max_context(max_context);
+                                                c.apply_model_switch(name);
+                                            }
                                             Err(e) => c.apply_model_switch_failed(e.to_string()),
                                         });
                                     },

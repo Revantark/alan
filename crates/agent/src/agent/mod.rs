@@ -42,6 +42,7 @@ pub struct Agent {
     /// Working directory reported in the conversation's first message.
     pub(super) working_directory: Option<PathBuf>,
     pub(super) model_info: Mutex<ModelInfo>,
+    model_id: String,
 }
 
 impl Agent {
@@ -170,8 +171,17 @@ impl Agent {
         self.context.lock().await.usage.clone()
     }
 
+    pub async fn context_tokens(&self) -> u64 {
+        let u = self.context.lock().await.usage.clone();
+        u.input_tokens + u.output_tokens
+    }
+
     pub async fn info(&self) -> ModelInfo {
         self.model_info.lock().await.clone()
+    }
+
+    pub fn model_id(&self) -> String {
+        self.model_id.clone()
     }
 
     /// Replace the bound model. The next prompt uses the new model;

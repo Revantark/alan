@@ -149,6 +149,7 @@ impl AgentBuilder {
         context.hydrate(messages, usage);
 
         let info = self.model.info().clone();
+        let model_id = info.id.clone();
         Ok(Agent {
             model: Mutex::new(self.model),
             context: Mutex::new(context),
@@ -160,6 +161,7 @@ impl AgentBuilder {
             active_session: Mutex::new(active_session),
             working_directory: self.working_directory,
             model_info: Mutex::new(info),
+            model_id,
         })
     }
 }

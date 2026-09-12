@@ -268,6 +268,7 @@ fn parse_catalog(provider: &ProviderId, payload: &str) -> Result<Vec<ModelInfo>,
             api: ApiId::ChatCompletions,
             capabilities,
             pricing,
+            context_length: entry.context_length,
         });
     }
     Ok(models)
@@ -283,7 +284,6 @@ struct CatalogModel {
     id: String,
     #[serde(default)]
     name: Option<String>,
-    #[allow(dead_code)]
     #[serde(default)]
     context_length: Option<u64>,
     pricing: Option<CatalogPricing>,
@@ -311,6 +311,7 @@ fn default_model(id: &str) -> ModelInfo {
             reasoning: None,
         },
         pricing: Some(ModelPricing::default()),
+        context_length: None,
     }
 }
 
@@ -380,6 +381,28 @@ mod tests {
         let p = m.pricing.as_ref().unwrap();
         assert_eq!(p.input_cost_per_token, 0.0025);
         assert_eq!(p.output_cost_per_token, 0.01);
+    }
+
+    #[test]
+    fn carries_context_length_from_catalog() {
+        let json = r#"{
+            "data": [{
+                "id": "openai/gpt-4o",
+                "name": "GPT-4o",
+                "context_length": 128000
+            }]
+        }"#;
+        let models = parse_catalog(&ProviderId::new("openrouter"), json).unwrap();
+        assert_eq!(models[0].context_length, Some(128_000));
+    }
+
+    #[test]
+    fn context_length_is_none_when_absent() {
+        let json = r#"{
+            "data": [{"id": "x", "name": "X"}]
+        }"#;
+        let models = parse_catalog(&ProviderId::new("openrouter"), json).unwrap();
+        assert_eq!(models[0].context_length, None);
     }
 
     #[test]

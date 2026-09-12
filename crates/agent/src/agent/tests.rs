@@ -117,6 +117,7 @@ fn model_with_api(api: Arc<dyn LlmApi>) -> Model {
         api: ApiId::ChatCompletions,
         capabilities: ModelCapabilities::default(),
         pricing: None,
+        context_length: None,
     };
     OpenRouterProvider::builder("key")
         .with_models([info])
@@ -833,9 +834,10 @@ async fn aggregate_usage_from_multiple_rounds_is_persisted() {
             .expect("load session for usage check")
     };
 
-    // First round: 10 input + 5 output. Second round: 20 input + 3 output.
-    assert_eq!(session.usage.input_tokens, 30);
-    assert_eq!(session.usage.output_tokens, 8);
+    assert_eq!(session.usage.input_tokens, 20);
+    assert_eq!(session.usage.output_tokens, 3);
+    // `context_tokens` is the size of the most recent round, not the total.
+    assert_eq!(a.context_tokens().await, 23);
 }
 
 #[tokio::test]

@@ -24,6 +24,7 @@ pub struct Session {
     pub thinking_level: Option<ReasoningEffort>,
     pub messages: Vec<AgentMessage>,
     pub usage: Usage,
+
     pub created_at_ms: u64,
     pub updated_at_ms: u64,
     /// The session this one was derived from (e.g. after a `/summarize-new`).
@@ -78,7 +79,9 @@ impl Session {
         match record {
             SessionRecord::Session { .. } => {}
             SessionRecord::Message { message, .. } => self.messages.push(message),
-            SessionRecord::Usage { usage, .. } => self.usage = usage,
+            SessionRecord::Usage { usage, .. } => {
+                self.usage = usage;
+            }
         }
         self.updated_at_ms = self.updated_at_ms.max(timestamp_ms);
     }

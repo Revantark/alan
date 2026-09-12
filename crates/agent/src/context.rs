@@ -214,7 +214,6 @@ impl AgentContext {
     /// Runtime-only state (tools, system prompt, skills, tool indexes)
     /// remains untouched; a resumed agent must rebuild it from the current
     /// application configuration.
-    #[allow(dead_code)]
     pub fn hydrate(&mut self, messages: Vec<AgentMessage>, usage: Usage) {
         self.messages = messages;
         self.usage = usage;

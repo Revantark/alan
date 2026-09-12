@@ -27,6 +27,7 @@ pub(crate) struct StatusSnapshot {
     pub mode: Mode,
     pub usage: Usage,
     pub model_name: String,
+    pub max_context: Option<u64>,
 }
 
 impl StatusSnapshot {
@@ -38,6 +39,7 @@ impl StatusSnapshot {
             mode: snap.mode,
             usage: snap.usage.clone(),
             model_name: snap.model_name.clone(),
+            max_context: snap.max_context,
         }
     }
 }
@@ -90,7 +92,47 @@ fn badges(snap: &StatusSnapshot) -> Vec<Span<'static>> {
             Style::default().fg(theme::MUTED_FG),
         ));
     }
+    if let Some(context) = context_badge(snap) {
+        badges.push(context);
+    }
     badges
+}
+
+/// Token count formatted compactly: `12k`, `1.05M`, `850`.
+fn format_tokens(n: u64) -> String {
+    if n >= 1_000_000 {
+        let m = n as f64 / 1_000_000.0;
+        // Trim trailing zeros: `.to_string()` -> "1.05" not "1.050000"
+        return format!("{}M", (m * 100.0).round() / 100.0);
+    }
+    if n >= 1000 {
+        return format!("{}k", n / 1000);
+    }
+    n.to_string()
+}
+
+/// Context badge shows `context: 12k/1.05M`. Color is muted normally, yellow
+/// at >= 70% of the window, red at >= 85%. Omitted when the window is unknown.
+fn context_badge(snap: &StatusSnapshot) -> Option<Span<'static>> {
+    let max = snap.max_context?;
+    let context_tokens = snap.usage.input_tokens + snap.usage.output_tokens;
+    let mut ratio = context_tokens as f64 / max as f64;
+    if ratio > 1.0 {
+        ratio = 1.0;
+    }
+    let color = if ratio >= 0.85 {
+        Color::Red
+    } else if ratio >= 0.70 {
+        Color::Yellow
+    } else {
+        theme::MUTED_FG
+    };
+    let label = format!(
+        " · context: {}/{}",
+        format_tokens(context_tokens),
+        format_tokens(max)
+    );
+    Some(Span::styled(label, Style::default().fg(color)))
 }
 
 fn status_line(snap: &StatusSnapshot) -> Line<'static> {

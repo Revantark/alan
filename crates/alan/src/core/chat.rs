@@ -54,6 +54,9 @@ pub struct ChatController {
     revision: u64,
     usage: Usage,
     model_name: String,
+
+    /// Maximum context window from the model catalog. `None` means unknown.
+    max_context: Option<u64>,
 }
 
 impl ChatController {
@@ -66,6 +69,7 @@ impl ChatController {
             revision: 0,
             usage: Usage::default(),
             model_name: name,
+            max_context: Some(0),
         }
     }
 
@@ -79,6 +83,7 @@ impl ChatController {
         let info = self.agent.info().await;
         self.model_name = info.name;
         self.usage = usage;
+        self.max_context = info.context_length;
         self.entries.clear();
 
         for message in messages {
@@ -162,6 +167,18 @@ impl ChatController {
 
     pub fn model_name(&self) -> String {
         self.model_name.clone()
+    }
+
+    pub fn max_context(&self) -> Option<u64> {
+        self.max_context
+    }
+
+    pub fn set_max_context(&mut self, max_context: Option<u64>) {
+        if self.max_context == max_context {
+            return;
+        }
+        self.max_context = max_context;
+        self.revision = self.revision.wrapping_add(1);
     }
 
     pub fn toggle_mode(&mut self) {
@@ -411,6 +428,7 @@ mod tests {
                 api: providers::ApiId::ChatCompletions,
                 capabilities: providers::ModelCapabilities::default(),
                 pricing: None,
+                context_length: None,
             }])
             .with_api(std::sync::Arc::new(FakeApi))
             .build()

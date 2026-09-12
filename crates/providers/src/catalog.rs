@@ -47,4 +47,5 @@ pub struct ModelInfo {
     pub api: ApiId,
     pub capabilities: ModelCapabilities,
     pub pricing: Option<ModelPricing>,
+    pub context_length: Option<u64>,
 }
