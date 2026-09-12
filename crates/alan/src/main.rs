@@ -23,6 +23,7 @@ use crate::views::ChatHistory;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    let is_blank = std::env::args().any(|arg| arg == "--blank");
     let _guard = init().unwrap();
     let model_id = std::env::var("ALAN_MODEL").unwrap_or_else(|_| "openai/gpt-4o-mini".into());
     let credential_store = Arc::new(FileCredentialStore::new(auth_path()?));
@@ -53,10 +54,13 @@ async fn main() -> anyhow::Result<()> {
     let was_resumed = resumed_session.is_some();
     let current_dir = std::env::current_dir()?;
     let mut agent_builder = Agent::builder(model)
-        .with_default_system_prompt()
         .with_directory(current_dir)
         .with_tools(default_tools())
         .session_manager(session_manager);
+    if !is_blank {
+        agent_builder = agent_builder.with_default_system_prompt();
+    }
+
     if let Some(session) = resumed_session {
         agent_builder = agent_builder.resume_session(session);
     }
