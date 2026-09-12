@@ -8,6 +8,8 @@
 
 use std::sync::Arc;
 
+use providers::bind_model;
+
 use crate::root::AlanAction;
 use crate::views::components::{ModelPick, ModelsPicker};
 use crate::views::theme;
@@ -182,8 +184,8 @@ impl Component<AlanAction> for ChatView {
                         picker,
                         move |event, _view, _picker, cx| {
                             if let ModelPick::Chosen(index) = event {
-                                let Some(model_id) =
-                                    provider.models().get(*index).map(|m| m.id.clone())
+                                let Some(selected_model_info) =
+                                    (provider.models().get(*index)).cloned()
                                 else {
                                     return;
                                 };
@@ -193,11 +195,14 @@ impl Component<AlanAction> for ChatView {
                                 let provider = Arc::clone(&provider);
                                 let _ = cx.spawn(
                                     async move {
-                                        let model = provider
-                                            .bind(&model_id)
-                                            .map_err(|e| tui::TaskError(e.into()))?;
-                                        let name = model.info().name.clone();
-                                        let max_context = model.info().context_length;
+                                        let model = bind_model(
+                                            provider.as_ref(),
+                                            &selected_model_info.id,
+                                            agent.model_options().await,
+                                        )
+                                        .map_err(|e| tui::TaskError(e.into()))?;
+                                        let name = selected_model_info.name.clone();
+                                        let max_context = selected_model_info.context_length;
                                         agent
                                             .set_model(model)
                                             .await

@@ -3,7 +3,7 @@ use crate::AgentTool;
 use crate::session::{SessionManager, SessionRecord};
 use async_trait::async_trait;
 use llm::{ContentBlock, LlmApi, LlmError, LlmEvent, LlmResponse, StopReason};
-use providers::{ApiId, ModelCapabilities, ModelInfo, OpenRouterProvider, Provider, ProviderId};
+use providers::{ModelInfo, OpenRouterProvider, ProviderId};
 use std::sync::{
     Arc,
     atomic::{AtomicUsize, Ordering},
@@ -114,18 +114,15 @@ fn model_with_api(api: Arc<dyn LlmApi>) -> Model {
         provider: ProviderId::new("openrouter"),
         id: "test".into(),
         name: "Test".into(),
-        api: ApiId::ChatCompletions,
-        capabilities: ModelCapabilities::default(),
         pricing: None,
         context_length: None,
     };
-    OpenRouterProvider::builder("key")
+    let provider = OpenRouterProvider::builder("key")
         .with_models([info])
         .with_api(api)
         .build()
-        .unwrap()
-        .bind("test")
-        .unwrap()
+        .unwrap();
+    providers::bind_model(&provider, "test", providers::ModelOptions::default()).unwrap()
 }
 
 fn model() -> Model {
