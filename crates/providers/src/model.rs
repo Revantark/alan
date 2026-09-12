@@ -26,11 +26,11 @@ pub struct ModelOptions {
 
 impl From<&Model> for ModelOptions {
     fn from(value: &Model) -> Self {
-        return ModelOptions {
+        ModelOptions {
             server_tools: value.server_tools.clone(),
             reasoning_effort: value.reasoning_effort(),
             provider_order: value.provider_order.clone(),
-        };
+        }
     }
 }
 
