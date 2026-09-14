@@ -247,7 +247,7 @@ mod tests {
     fn header_without_parent_is_backwards_compatible() {
         let line = "\
 {\"type\":\"session\",\"version\":1,\"id\":\"018f\",\"pwd\":\"/tmp/project\",\
-\"provider\":\"openrouter\",\"model\":\"test-model\",\"thinking_level\":null,\
+\"provider\":\"openrouter\",\"model\":\"test-model\",\"thinking_level\":\"none\",\
 \"created_at_ms\":1,\"updated_at_ms\":2}";
         let record = SessionRecord::parse(line).expect("parse");
         let SessionRecord::Session { parent, .. } = record else {
