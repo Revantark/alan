@@ -204,6 +204,9 @@ impl Component<AlanAction> for ChatView {
                                         .map_err(|e| tui::TaskError(e.into()))?;
                                         let name = selected_model_info.name.clone();
                                         let max_context = selected_model_info.context_length;
+                                        // Snapshot the effort before `set_model` takes
+                                        // ownership of the model.
+                                        let reasoning_effort = model.reasoning_effort();
                                         agent
                                             .set_model(model)
                                             .await
@@ -211,12 +214,13 @@ impl Component<AlanAction> for ChatView {
                                         persist_model(&selected_model_info.id)
                                             .await
                                             .map_err(|e| tui::TaskError(e.into()))?;
-                                        Ok((name, max_context))
+                                        Ok((name, max_context, reasoning_effort))
                                     },
                                     move |result, _view, cx| {
                                         let _ = cx.update(chat, |c| match result {
-                                            Ok((name, max_context)) => {
+                                            Ok((name, max_context, reasoning_effort)) => {
                                                 c.set_max_context(max_context);
+                                                c.set_reasoning_effort(reasoning_effort);
                                                 c.apply_model_switch(name);
                                             }
                                             Err(e) => c.apply_model_switch_failed(e.to_string()),

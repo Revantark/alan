@@ -3,7 +3,7 @@
 use super::action::ImageAttachment;
 
 use agent::{Agent, AgentEvent, AgentStream};
-use llm::Usage;
+use llm::{ReasoningEffort, Usage};
 use std::sync::Arc;
 
 /// What the prompt is doing, and so what Enter does to it.
@@ -57,10 +57,15 @@ pub struct ChatController {
 
     /// Maximum context window from the model catalog. `None` means unknown.
     max_context: Option<u64>,
+    /// Reasoning effort configured on the bound model. Sync cache mirroring
+    /// `model_name`/`max_context`, so the status line reads it without going
+    /// through the agent.
+    reasoning_effort: Option<ReasoningEffort>,
 }
 
 impl ChatController {
     pub fn new(agent: Agent, name: String) -> Self {
+        let reasoning_effort = agent.reasoning_effort();
         Self {
             agent: Arc::new(agent),
             entries: Vec::new(),
@@ -70,6 +75,7 @@ impl ChatController {
             usage: Usage::default(),
             model_name: name,
             max_context: Some(0),
+            reasoning_effort,
         }
     }
 
@@ -84,6 +90,7 @@ impl ChatController {
         self.model_name = info.name;
         self.usage = usage;
         self.max_context = info.context_length;
+        self.reasoning_effort = self.agent.reasoning_effort();
         self.entries.clear();
 
         for message in messages {
@@ -178,6 +185,23 @@ impl ChatController {
             return;
         }
         self.max_context = max_context;
+        self.revision = self.revision.wrapping_add(1);
+    }
+
+    /// Reasoning effort configured on the bound model. Sync: reads the cached
+    /// value, never the agent.
+    pub fn reasoning_effort(&self) -> Option<ReasoningEffort> {
+        self.reasoning_effort
+    }
+
+    /// Update the cached reasoning effort after a model switch. Bumps the
+    /// revision only when the value actually changes, so `refresh` rebuilds
+    /// the status snapshot exactly once.
+    pub fn set_reasoning_effort(&mut self, reasoning_effort: Option<ReasoningEffort>) {
+        if self.reasoning_effort == reasoning_effort {
+            return;
+        }
+        self.reasoning_effort = reasoning_effort;
         self.revision = self.revision.wrapping_add(1);
     }
 

@@ -11,7 +11,7 @@ use std::{
 };
 use tokio::sync::Mutex;
 
-use super::{Agent, Mode};
+use super::{Agent, Mode, reasoning_to_u8};
 
 const DEFAULT_SYSTEM_PROMPT: &str = r#"You are Alan, a reliable, pragmatic coding agent running in the user's project in a terminal.
 
@@ -150,6 +150,7 @@ impl AgentBuilder {
 
         let info = self.model.info().clone();
         let model_id = info.id.clone();
+        let reasoning = self.model.reasoning_effort();
         Ok(Agent {
             model: Mutex::new(self.model),
             context: Mutex::new(context),
@@ -161,6 +162,7 @@ impl AgentBuilder {
             active_session: Mutex::new(active_session),
             working_directory: self.working_directory,
             model_info: Mutex::new(info),
+            reasoning: AtomicU8::new(reasoning_to_u8(reasoning)),
             model_id,
         })
     }

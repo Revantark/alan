@@ -11,7 +11,7 @@ mod tests;
 
 use crate::session::{Session, SessionManager};
 use crate::{AgentError, AgentMessage};
-use llm::Usage;
+use llm::{ReasoningEffort, Usage};
 use providers::{Model, ModelInfo, ModelOptions};
 use std::path::PathBuf;
 use std::sync::{
@@ -26,6 +26,33 @@ pub use mode::Mode;
 pub use prompt_builder::PromptBuilder;
 
 pub(crate) const AGENT_EVENT_CAPACITY: usize = 128;
+
+/// Mapping between [`ReasoningEffort`] and the `u8` stored in
+/// [`Agent::reasoning`]. Mirrors [`Mode::as_u8`]/[`Mode::from_u8`] in
+/// `mode.rs`: 0 means `None`, otherwise the variant index + 1.
+pub(super) fn reasoning_to_u8(effort: Option<ReasoningEffort>) -> u8 {
+    match effort {
+        None | Some(ReasoningEffort::None) => 0,
+        Some(ReasoningEffort::Minimal) => 1,
+        Some(ReasoningEffort::Low) => 2,
+        Some(ReasoningEffort::Medium) => 3,
+        Some(ReasoningEffort::High) => 4,
+        Some(ReasoningEffort::XHigh) => 5,
+        Some(ReasoningEffort::Max) => 6,
+    }
+}
+
+fn reasoning_from_u8(value: u8) -> ReasoningEffort {
+    match value {
+        1 => ReasoningEffort::Minimal,
+        2 => ReasoningEffort::Low,
+        3 => ReasoningEffort::Medium,
+        4 => ReasoningEffort::High,
+        5 => ReasoningEffort::XHigh,
+        6 => ReasoningEffort::Max,
+        _ => ReasoningEffort::None,
+    }
+}
 
 pub struct Agent {
     pub(super) model: Mutex<Model>,
@@ -42,6 +69,12 @@ pub struct Agent {
     /// Working directory reported in the conversation's first message.
     pub(super) working_directory: Option<PathBuf>,
     pub(super) model_info: Mutex<ModelInfo>,
+    /// Reasoning effort configured on the bound model, cached as an atomic so
+    /// the status line can read it synchronously from the UI thread without
+    /// contending with the model mutex. 0 means `None`; otherwise the variant
+    /// index + 1 (see [`reasoning_to_u8`]). Updated in `set_model` and at
+    /// construction time.
+    reasoning: AtomicU8,
     model_id: String,
 }
 
@@ -185,6 +218,19 @@ impl Agent {
         self.model_info.lock().await.clone()
     }
 
+    /// Reasoning effort configured on the bound model.
+    ///
+    /// Sync: reads an atomic cache rather than the model mutex, so it is safe
+    /// to call from the UI thread while a run is streaming.
+    pub fn reasoning_effort(&self) -> Option<ReasoningEffort> {
+        let v = self.reasoning.load(Ordering::Acquire);
+        if v == 0 {
+            None
+        } else {
+            Some(reasoning_from_u8(v))
+        }
+    }
+
     pub fn model_id(&self) -> String {
         self.model_id.clone()
     }
@@ -203,6 +249,8 @@ impl Agent {
         let reasoning = model.reasoning_effort();
         *current = model;
         *self.model_info.lock().await = info.clone();
+        self.reasoning
+            .store(reasoning_to_u8(reasoning), Ordering::Release);
 
         let mut active = self.active_session.lock().await;
         if let (Some(manager), Some(session)) = (&self.session_manager, &mut *active) {

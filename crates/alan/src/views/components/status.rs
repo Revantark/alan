@@ -6,7 +6,7 @@
 use crate::core::Activity;
 use crate::views::theme;
 use agent::Mode;
-use llm::Usage;
+use llm::{ReasoningEffort, Usage};
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Style};
@@ -28,6 +28,7 @@ pub(crate) struct StatusSnapshot {
     pub usage: Usage,
     pub model_name: String,
     pub max_context: Option<u64>,
+    pub reasoning_effort: Option<ReasoningEffort>,
 }
 
 impl StatusSnapshot {
@@ -40,6 +41,7 @@ impl StatusSnapshot {
             usage: snap.usage.clone(),
             model_name: snap.model_name.clone(),
             max_context: snap.max_context,
+            reasoning_effort: snap.reasoning_effort,
         }
     }
 }
@@ -48,7 +50,6 @@ impl StatusSnapshot {
 struct StatusStyle {
     style: Style,
     label: &'static str,
-    hints: &'static str,
 }
 
 impl From<&Activity> for StatusStyle {
@@ -56,19 +57,16 @@ impl From<&Activity> for StatusStyle {
         match activity {
             Activity::Thinking => StatusStyle {
                 label: "  ● thinking",
-                hints: "  Ctrl-C stop",
                 style: Style::default().italic().fg(Color::Yellow),
             },
             Activity::Idle => StatusStyle {
                 label: "  ● idle",
-                hints: "  Enter send · Ctrl-C quit",
                 style: Style::default().fg(Color::Green),
             },
             // Loading is rendered separately (it carries a label and a live dot
             // count); this arm is never used via the `From` path.
             Activity::Loading(_) => StatusStyle {
                 label: "  ●",
-                hints: "",
                 style: Style::default().fg(Color::Cyan),
             },
         }
@@ -143,18 +141,18 @@ fn status_line(snap: &StatusSnapshot) -> Line<'static> {
         ));
     }
     let status = StatusStyle::from(&snap.activity);
-    let mut spans = vec![
-        Span::styled(status.label.to_owned(), status.style),
-        Span::styled(
-            status.hints.to_owned(),
-            Style::default().fg(theme::MUTED_FG),
-        ),
-    ];
+    let mut spans = vec![Span::styled(status.label.to_owned(), status.style)];
     spans.extend(badges(snap));
     spans.push(Span::styled(
         format!(" · {}", snap.model_name),
         Style::default().fg(theme::MUTED_FG),
     ));
+    if let Some(effort) = snap.reasoning_effort {
+        spans.push(Span::styled(
+            format!(" · {}", effort),
+            Style::default().fg(theme::MUTED_FG),
+        ));
+    }
 
     Line::from(spans)
 }
