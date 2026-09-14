@@ -14,6 +14,12 @@ pub enum ReasoningEffort {
     Max,
 }
 
+impl fmt::Display for ReasoningEffort {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.as_str())
+    }
+}
+
 impl ReasoningEffort {
     pub const fn as_str(&self) -> &'static str {
         match self {
@@ -28,9 +34,26 @@ impl ReasoningEffort {
     }
 }
 
-impl fmt::Display for ReasoningEffort {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.as_str())
+impl std::str::FromStr for ReasoningEffort {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "none" => Ok(Self::None),
+            "minimal" => Ok(Self::Minimal),
+            "low" => Ok(Self::Low),
+            "medium" => Ok(Self::Medium),
+            "high" => Ok(Self::High),
+            "xhigh" => Ok(Self::XHigh),
+            "max" => Ok(Self::Max),
+            _ => Err(format!("invalid reasoning effort: {s}")),
+        }
+    }
+}
+
+impl Default for ReasoningEffort {
+    fn default() -> Self {
+        ReasoningEffort::Low
     }
 }
 
@@ -101,7 +124,7 @@ pub struct LlmRequest<'a> {
     pub tools: &'a [ToolSpec],
     pub options: &'a RequestOptions,
     pub credential: Option<&'a Credential>,
-    pub reasoning_effort: Option<ReasoningEffort>,
+    pub reasoning_effort: ReasoningEffort,
     /// Ordered provider list forwarded to the API. `None` means the request
     /// carries no `provider` block at all.
     pub provider_order: Option<&'a [String]>,

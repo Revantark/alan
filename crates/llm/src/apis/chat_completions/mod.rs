@@ -160,7 +160,7 @@ mod tests {
             tools,
             options,
             credential: None,
-            reasoning_effort: None,
+            reasoning_effort: crate::ReasoningEffort::None,
             provider_order: None,
         }
     }

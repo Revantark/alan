@@ -18,7 +18,7 @@ pub enum ModelError {
 #[derive(Clone, Default)]
 pub struct ModelOptions {
     pub server_tools: Vec<ServerTool>,
-    pub reasoning_effort: Option<ReasoningEffort>,
+    pub reasoning_effort: ReasoningEffort,
     /// Ordered provider list forwarded to the API. Empty means the request
     /// carries no `provider` block at all.
     pub provider_order: Vec<String>,
@@ -40,7 +40,7 @@ pub struct Model {
     api: Arc<dyn LlmApi>,
     auth: Arc<dyn AuthResolver>,
     server_tools: Vec<ServerTool>,
-    reasoning_effort: Option<ReasoningEffort>,
+    reasoning_effort: ReasoningEffort,
     provider_order: Vec<String>,
 }
 
@@ -65,8 +65,15 @@ impl Model {
         &self.info
     }
 
-    pub fn reasoning_effort(&self) -> Option<ReasoningEffort> {
+    pub fn reasoning_effort(&self) -> ReasoningEffort {
         self.reasoning_effort
+    }
+
+    /// Update the reasoning effort on a bound model. The change takes effect
+    /// on the next prompt; in-flight runs already hold the model and are
+    /// unaffected.
+    pub fn set_reasoning_effort(&mut self, reasoning_effort: ReasoningEffort) {
+        self.reasoning_effort = reasoning_effort;
     }
 
     fn tools<'a>(&'a self, local: &'a [ToolSpec]) -> Vec<ToolSpec> {

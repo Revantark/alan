@@ -21,7 +21,7 @@ pub struct Session {
     pub pwd: PathBuf,
     pub provider: String,
     pub model: String,
-    pub thinking_level: Option<ReasoningEffort>,
+    pub thinking_level: ReasoningEffort,
     pub messages: Vec<AgentMessage>,
     pub usage: Usage,
 
@@ -39,7 +39,7 @@ impl Session {
         pwd: impl Into<PathBuf>,
         provider: impl Into<String>,
         model: impl Into<String>,
-        thinking_level: Option<ReasoningEffort>,
+        thinking_level: ReasoningEffort,
         parent: Option<String>,
     ) -> Self {
         let now = now_ms();
@@ -89,12 +89,7 @@ impl Session {
     /// Update the session's model identity. Only the in-memory copy
     /// changes; persisting is the caller's job (see
     /// [`SessionManager::update_header_model`]).
-    pub fn set_model(
-        &mut self,
-        provider: &str,
-        model: &str,
-        thinking_level: Option<ReasoningEffort>,
-    ) {
+    pub fn set_model(&mut self, provider: &str, model: &str, thinking_level: ReasoningEffort) {
         self.provider = provider.to_owned();
         self.model = model.to_owned();
         self.thinking_level = thinking_level;
@@ -118,7 +113,7 @@ pub enum SessionRecord {
         pwd: PathBuf,
         provider: String,
         model: String,
-        thinking_level: Option<ReasoningEffort>,
+        thinking_level: ReasoningEffort,
         created_at_ms: u64,
         updated_at_ms: u64,
         #[serde(default)]
@@ -210,7 +205,13 @@ mod tests {
 
     #[test]
     fn header_record_preserves_session_metadata() {
-        let mut session = Session::new("/tmp/project", "openrouter", "test-model", None, None);
+        let mut session = Session::new(
+            "/tmp/project",
+            "openrouter",
+            "test-model",
+            ReasoningEffort::None,
+            None,
+        );
         session.created_at_ms = 1_000;
         session.updated_at_ms = 2_000;
 
@@ -231,7 +232,7 @@ mod tests {
                 assert_eq!(pwd, PathBuf::from("/tmp/project"));
                 assert_eq!(provider, "openrouter");
                 assert_eq!(model, "test-model");
-                assert_eq!(thinking_level, None);
+                assert_eq!(thinking_level, ReasoningEffort::None);
                 assert_eq!(created_at_ms, 1_000);
                 assert_eq!(updated_at_ms, 2_000);
                 assert_eq!(parent, None);
@@ -262,7 +263,7 @@ mod tests {
             "/tmp/project",
             "openrouter",
             "test-model",
-            None,
+            ReasoningEffort::None,
             Some("018e".to_owned()),
         );
         let line = session.header_record().to_jsonl().expect("serialize");
@@ -275,7 +276,13 @@ mod tests {
 
     #[test]
     fn apply_record_appends_messages_and_replaces_usage_snapshot() {
-        let mut session = Session::new("/tmp/project", "openrouter", "test-model", None, None);
+        let mut session = Session::new(
+            "/tmp/project",
+            "openrouter",
+            "test-model",
+            ReasoningEffort::None,
+            None,
+        );
 
         session.record(SessionRecord::Message {
             message: AgentMessage::user("first"),
@@ -302,17 +309,17 @@ mod tests {
             "/tmp/project",
             "old-provider",
             "old-model",
-            None,
+            ReasoningEffort::None,
             Some("018e".to_owned()),
         );
         session.created_at_ms = 1_000;
         session.updated_at_ms = 1_000;
 
-        session.set_model("new-provider", "new-model", Some(ReasoningEffort::High));
+        session.set_model("new-provider", "new-model", ReasoningEffort::High);
 
         assert_eq!(session.provider, "new-provider");
         assert_eq!(session.model, "new-model");
-        assert_eq!(session.thinking_level, Some(ReasoningEffort::High));
+        assert_eq!(session.thinking_level, ReasoningEffort::High);
         assert!(session.updated_at_ms > 1_000);
     }
 }

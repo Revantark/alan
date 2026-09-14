@@ -129,7 +129,7 @@ fn model() -> Model {
     model_with_api(Arc::new(FakeApi))
 }
 
-fn model_with_reasoning(effort: Option<llm::ReasoningEffort>) -> Model {
+fn model_with_reasoning(effort: llm::ReasoningEffort) -> Model {
     let info = ModelInfo {
         provider: ProviderId::new("openrouter"),
         id: "test".into(),
@@ -868,7 +868,7 @@ async fn resumed_agent_includes_restored_messages_in_first_request() {
     let manager = Arc::new(SessionManager::new(&root));
 
     let session = manager
-        .create(&root, "openrouter", "test", None, None)
+        .create(&root, "openrouter", "test", ReasoningEffort::None, None)
         .await
         .expect("create session");
     manager
@@ -1069,7 +1069,7 @@ async fn session_images_roundtrip_through_reload() {
     let manager = Arc::new(SessionManager::new(&root));
 
     let session = manager
-        .create(&root, "openrouter", "test", None, None)
+        .create(&root, "openrouter", "test", ReasoningEffort::None, None)
         .await
         .expect("create session");
     let images = vec![llm::ImageUrl {
@@ -1291,46 +1291,6 @@ async fn set_model_updates_info() {
 }
 
 #[tokio::test]
-async fn reasoning_effort_defaults_to_none() {
-    let a = agent(model());
-    assert_eq!(a.reasoning_effort(), None);
-}
-
-#[tokio::test]
-async fn reasoning_effort_is_cached_at_construction() {
-    let a = agent(model_with_reasoning(Some(ReasoningEffort::High)));
-    assert_eq!(a.reasoning_effort(), Some(ReasoningEffort::High));
-}
-
-#[tokio::test]
-async fn set_model_updates_reasoning_effort() {
-    let a = agent(model_with_reasoning(Some(ReasoningEffort::Low)));
-    assert_eq!(a.reasoning_effort(), Some(ReasoningEffort::Low));
-    let new_model = model_with_reasoning(Some(ReasoningEffort::XHigh));
-    a.set_model(new_model).await.unwrap();
-    assert_eq!(a.reasoning_effort(), Some(ReasoningEffort::XHigh));
-}
-
-#[tokio::test]
-async fn set_model_can_clear_reasoning_effort() {
-    let a = agent(model_with_reasoning(Some(ReasoningEffort::Medium)));
-    a.set_model(model_with_reasoning(None)).await.unwrap();
-    assert_eq!(a.reasoning_effort(), None);
-}
-
-/// The whole point of the atomic cache: it must be readable synchronously,
-/// without awaiting the model mutex, while a run is streaming.
-#[tokio::test]
-async fn reasoning_effort_is_sync_during_run() {
-    let a = agent(model_with_reasoning(Some(ReasoningEffort::High)));
-    // Hold the model lock to simulate a streaming run.
-    let _guard = a.model.lock().await;
-    // This must compile and return without `.await` on the model mutex.
-    let effort = a.reasoning_effort();
-    assert_eq!(effort, Some(ReasoningEffort::High));
-}
-
-#[tokio::test]
 async fn set_model_switches_next_prompt() {
     let a = agent(model());
     let new_model = model_with_api(Arc::new(FakeApi));
@@ -1363,7 +1323,13 @@ async fn set_model_persists_switch_in_session() {
 
     // Create a session first so there's something to switch on.
     let session = manager
-        .create(&root, "openrouter", "test", None, Some("018e".to_owned()))
+        .create(
+            &root,
+            "openrouter",
+            "test",
+            ReasoningEffort::None,
+            Some("018e".to_owned()),
+        )
         .await
         .expect("create session");
     let session_id = session.id.clone();
@@ -1385,4 +1351,29 @@ async fn set_model_persists_switch_in_session() {
         .expect("load session");
     assert_eq!(loaded.model, "test");
     assert_eq!(loaded.provider, "openrouter");
+}
+
+#[tokio::test]
+async fn set_reasoning_effort_updates_the_cached_value() {
+    let a = agent(model_with_reasoning(ReasoningEffort::Low));
+    assert_eq!(a.reasoning_effort(), ReasoningEffort::Low);
+    a.set_reasoning_effort(ReasoningEffort::High).await.unwrap();
+    assert_eq!(a.reasoning_effort(), ReasoningEffort::High);
+}
+
+#[tokio::test]
+async fn set_reasoning_effort_can_disable_reasoning() {
+    let a = agent(model_with_reasoning(ReasoningEffort::Max));
+    a.set_reasoning_effort(ReasoningEffort::None).await.unwrap();
+    assert_eq!(a.reasoning_effort(), ReasoningEffort::None);
+}
+
+#[tokio::test]
+async fn set_reasoning_effort_fails_while_a_run_is_streaming() {
+    let a = agent(model_with_reasoning(ReasoningEffort::Low));
+    let _guard = a.model.lock().await;
+    let result = a.set_reasoning_effort(ReasoningEffort::High).await;
+    assert!(result.is_err());
+    // The cached value is untouched: the store happens after the lock.
+    assert_eq!(a.reasoning_effort(), ReasoningEffort::Low);
 }

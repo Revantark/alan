@@ -3,6 +3,9 @@
 //! `/help` and the prompt highlight are both derived from the variants, so
 //! they cannot disagree about which commands exist.
 
+use std::str::FromStr;
+
+use llm::ReasoningEffort;
 use strum::{EnumIter, EnumString, IntoEnumIterator, IntoStaticStr};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, EnumString, EnumIter, IntoStaticStr)]
@@ -15,6 +18,7 @@ pub enum SlashCommand {
     Plan,
     Review,
     Normal,
+    Effort,
     Help,
 }
 
@@ -65,8 +69,20 @@ impl SlashCommand {
             Self::Plan => "turn on plan mode (also Shift+Tab)",
             Self::Review => "turn on review mode (also Shift+Tab)",
             Self::Normal => "turn off plan and review mode",
+            Self::Effort => "set reasoning effort (e.g. /effort high)",
             Self::Help => "list the available commands",
         }
+    }
+
+    /// Parse a reasoning effort argument. `none` maps to `Some(None)`, a known
+    /// level maps to `Some(Some(level))`, and anything else returns `None`.
+    ///
+    /// `None` is a valid argument: it disables reasoning. Use this rather than
+    /// `ReasoningEffort::from_str` directly, since the enum serializes to
+    /// `none` and the parser must keep that distinct from the literal string.
+    pub fn parse_effort(args: &str) -> Option<ReasoningEffort> {
+        let arg = args.trim().to_ascii_lowercase();
+        ReasoningEffort::from_str(&arg).ok()
     }
 
     /// Markdown listing every command, rendered into the transcript by `/help`.
@@ -187,5 +203,73 @@ mod tests {
         );
         // Must not be confused with the unrelated `/new` command.
         assert_eq!(SlashCommand::parse("/new"), Some(SlashCommand::New));
+    }
+
+    #[test]
+    fn parses_effort_command() {
+        assert_eq!(SlashCommand::parse("/effort"), Some(SlashCommand::Effort));
+        assert_eq!(
+            SlashCommand::parse("/effort high"),
+            Some(SlashCommand::Effort)
+        );
+        assert_eq!(
+            SlashCommand::parse_with_args("/effort medium"),
+            Some((SlashCommand::Effort, "medium"))
+        );
+        assert_eq!(
+            SlashCommand::parse_with_args("/effort"),
+            Some((SlashCommand::Effort, ""))
+        );
+    }
+
+    #[test]
+    fn parse_effort_accepts_every_level_and_none() {
+        assert_eq!(
+            SlashCommand::parse_effort("none"),
+            Some(ReasoningEffort::None)
+        );
+        assert_eq!(
+            SlashCommand::parse_effort("minimal"),
+            Some(ReasoningEffort::Minimal)
+        );
+        assert_eq!(
+            SlashCommand::parse_effort("low"),
+            Some(ReasoningEffort::Low)
+        );
+        assert_eq!(
+            SlashCommand::parse_effort("medium"),
+            Some(ReasoningEffort::Medium)
+        );
+        assert_eq!(
+            SlashCommand::parse_effort("high"),
+            Some(ReasoningEffort::High)
+        );
+        assert_eq!(
+            SlashCommand::parse_effort("xhigh"),
+            Some(ReasoningEffort::XHigh)
+        );
+        assert_eq!(
+            SlashCommand::parse_effort("max"),
+            Some(ReasoningEffort::Max)
+        );
+    }
+
+    #[test]
+    fn parse_effort_is_case_insensitive_and_trims_whitespace() {
+        assert_eq!(
+            SlashCommand::parse_effort("  High  "),
+            Some(ReasoningEffort::High)
+        );
+        assert_eq!(
+            SlashCommand::parse_effort("NONE"),
+            Some(ReasoningEffort::None)
+        );
+    }
+
+    #[test]
+    fn parse_effort_rejects_unknown_values() {
+        assert_eq!(SlashCommand::parse_effort(""), None);
+        assert_eq!(SlashCommand::parse_effort("ultra"), None);
+        assert_eq!(SlashCommand::parse_effort("high low"), None);
     }
 }

@@ -30,15 +30,15 @@ pub(crate) const AGENT_EVENT_CAPACITY: usize = 128;
 /// Mapping between [`ReasoningEffort`] and the `u8` stored in
 /// [`Agent::reasoning`]. Mirrors [`Mode::as_u8`]/[`Mode::from_u8`] in
 /// `mode.rs`: 0 means `None`, otherwise the variant index + 1.
-pub(super) fn reasoning_to_u8(effort: Option<ReasoningEffort>) -> u8 {
+pub(super) fn reasoning_to_u8(effort: ReasoningEffort) -> u8 {
     match effort {
-        None | Some(ReasoningEffort::None) => 0,
-        Some(ReasoningEffort::Minimal) => 1,
-        Some(ReasoningEffort::Low) => 2,
-        Some(ReasoningEffort::Medium) => 3,
-        Some(ReasoningEffort::High) => 4,
-        Some(ReasoningEffort::XHigh) => 5,
-        Some(ReasoningEffort::Max) => 6,
+        ReasoningEffort::None => 0,
+        ReasoningEffort::Minimal => 1,
+        ReasoningEffort::Low => 2,
+        ReasoningEffort::Medium => 3,
+        ReasoningEffort::High => 4,
+        ReasoningEffort::XHigh => 5,
+        ReasoningEffort::Max => 6,
     }
 }
 
@@ -222,12 +222,12 @@ impl Agent {
     ///
     /// Sync: reads an atomic cache rather than the model mutex, so it is safe
     /// to call from the UI thread while a run is streaming.
-    pub fn reasoning_effort(&self) -> Option<ReasoningEffort> {
+    pub fn reasoning_effort(&self) -> ReasoningEffort {
         let v = self.reasoning.load(Ordering::Acquire);
         if v == 0 {
-            None
+            ReasoningEffort::None
         } else {
-            Some(reasoning_from_u8(v))
+            reasoning_from_u8(v)
         }
     }
 
@@ -255,6 +255,33 @@ impl Agent {
         let mut active = self.active_session.lock().await;
         if let (Some(manager), Some(session)) = (&self.session_manager, &mut *active) {
             session.set_model(&info.provider.0, &info.id, reasoning);
+            manager.update_header_model(session).await?;
+        }
+        Ok(())
+    }
+
+    /// Update the reasoning effort on the bound model. The change takes
+    /// effect on the next prompt; in-flight runs already hold the model and
+    /// are unaffected. Fails only if another prompt currently holds the model
+    /// lock (i.e. a run is streaming), in which case the effort is left
+    /// untouched.
+    pub async fn set_reasoning_effort(
+        &self,
+        reasoning_effort: ReasoningEffort,
+    ) -> Result<(), AgentError> {
+        let mut model = self.model.try_lock().map_err(|_| {
+            AgentError::Model(providers::ModelError::Llm(llm::LlmError::Configuration(
+                "agent is busy: cannot change reasoning effort mid-run".into(),
+            )))
+        })?;
+        model.set_reasoning_effort(reasoning_effort);
+        self.reasoning
+            .store(reasoning_to_u8(reasoning_effort), Ordering::Release);
+
+        let info = model.info().clone();
+        let mut active = self.active_session.lock().await;
+        if let (Some(manager), Some(session)) = (&self.session_manager, &mut *active) {
+            session.set_model(&info.provider.0, &info.id, reasoning_effort);
             manager.update_header_model(session).await?;
         }
         Ok(())

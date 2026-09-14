@@ -60,7 +60,7 @@ pub struct ChatController {
     /// Reasoning effort configured on the bound model. Sync cache mirroring
     /// `model_name`/`max_context`, so the status line reads it without going
     /// through the agent.
-    reasoning_effort: Option<ReasoningEffort>,
+    reasoning_effort: ReasoningEffort,
 }
 
 impl ChatController {
@@ -190,14 +190,14 @@ impl ChatController {
 
     /// Reasoning effort configured on the bound model. Sync: reads the cached
     /// value, never the agent.
-    pub fn reasoning_effort(&self) -> Option<ReasoningEffort> {
+    pub fn reasoning_effort(&self) -> ReasoningEffort {
         self.reasoning_effort
     }
 
     /// Update the cached reasoning effort after a model switch. Bumps the
     /// revision only when the value actually changes, so `refresh` rebuilds
     /// the status snapshot exactly once.
-    pub fn set_reasoning_effort(&mut self, reasoning_effort: Option<ReasoningEffort>) {
+    pub fn set_reasoning_effort(&mut self, reasoning_effort: ReasoningEffort) {
         if self.reasoning_effort == reasoning_effort {
             return;
         }

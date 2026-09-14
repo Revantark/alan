@@ -5,6 +5,7 @@
 //! agent event stream itself and handles submit / mode / quit / mouse / wheel /
 //! PageUp / PageDown input, which the root dispatches to it.
 
+use crate::core::settings::{self, Settings, SettingsStore};
 use crate::core::{Activity, ChatController, SlashCommand};
 use crate::root::{AlanAction, PromptSubmission};
 use crate::views::selection;
@@ -14,7 +15,7 @@ use agent::{AgentEvent, AgentStream, Mode};
 use crossterm::event::Event;
 use crossterm::event::{KeyCode, KeyEventKind, MouseButton, MouseEvent, MouseEventKind};
 use futures_util::Stream;
-use llm::Usage;
+use llm::{ReasoningEffort, Usage};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Style};
@@ -74,7 +75,7 @@ pub struct ChatSnapshot {
     pub usage: Usage,
     pub model_name: String,
     pub max_context: Option<u64>,
-    pub reasoning_effort: Option<llm::ReasoningEffort>,
+    pub reasoning_effort: llm::ReasoningEffort,
 }
 
 /// The chat transcript area: owns the session controller, incremental wrap
@@ -263,6 +264,10 @@ impl ChatHistory {
                 SlashCommand::Plan => controller.set_mode(agent::Mode::Plan),
                 SlashCommand::Review => controller.set_mode(agent::Mode::Review),
                 SlashCommand::Normal => controller.set_mode(agent::Mode::Normal),
+                SlashCommand::Effort => {
+                    self.apply_effort(&submission.text, cx);
+                    return;
+                }
                 SlashCommand::Help => controller.push_info(SlashCommand::help()),
                 SlashCommand::New => {
                     self.start_new_session(cx);
@@ -392,6 +397,75 @@ impl ChatHistory {
         );
     }
 
+    /// `/effort [none|minimal|low|medium|high|xhigh|max]`: set the reasoning
+    /// effort on the bound model and remember it for the next session. With no
+    /// argument, or an unknown one, show usage help instead of failing
+    /// silently.
+    fn apply_effort(&mut self, text: &str, cx: &mut Context<'_, Self, AlanAction>) {
+        let agent = match &self.controller {
+            Some(controller) if !controller.is_busy() => controller.agent(),
+            _ => {
+                if let Some(controller) = &mut self.controller {
+                    controller.push_info(
+                        "agent is busy: cannot change reasoning effort mid-run".to_owned(),
+                    );
+                }
+                return;
+            }
+        };
+
+        let effort = match SlashCommand::parse_with_args(text).map(|(_, args)| args) {
+            Some(args) => match SlashCommand::parse_effort(args) {
+                Some(effort) => effort,
+                None => {
+                    if let Some(controller) = &mut self.controller {
+                        controller.push_info(
+                            "usage: /effort <none|minimal|low|medium|high|xhigh|max>".to_owned(),
+                        );
+                    }
+                    return;
+                }
+            },
+            None => return,
+        };
+
+        let agent = agent.clone();
+        cx.spawn(
+            async move {
+                agent
+                    .set_reasoning_effort(effort)
+                    .await
+                    .map_err(|error| tui::TaskError(Box::new(error)))?;
+
+                persist_reasoning_effort(effort)
+                    .await
+                    .map_err(|error| tui::TaskError(error.into()))?;
+
+                Ok::<_, tui::TaskError>(format!("reasoning effort set to {effort}"))
+            },
+            move |result, chat, cx| {
+                let message = match result {
+                    Ok(msg) => msg,
+                    Err(error) => {
+                        // The agent rejected the change (e.g. it was busy),
+                        // so the display cache stays where it was.
+                        if let Some(controller) = &mut chat.controller {
+                            controller
+                                .push_info(format!("failed to set reasoning effort: {error}"));
+                        }
+                        cx.notify();
+                        return;
+                    }
+                };
+                if let Some(controller) = &mut chat.controller {
+                    controller.set_reasoning_effort(effort);
+                    controller.push_info(message);
+                }
+                cx.notify();
+            },
+        );
+    }
+
     /// Start the fixed-rate repaint ticker if a run is in flight and it is not
     /// already running. The ticker repaints the transcript at
     /// `STREAM_REPAINT_INTERVAL`; it is cancelled once the run finishes.
@@ -474,7 +548,7 @@ impl ChatHistory {
         }
     }
 
-    pub(crate) fn set_reasoning_effort(&mut self, reasoning_effort: Option<llm::ReasoningEffort>) {
+    pub(crate) fn set_reasoning_effort(&mut self, reasoning_effort: llm::ReasoningEffort) {
         if let Some(controller) = &mut self.controller {
             controller.set_reasoning_effort(reasoning_effort);
         }
@@ -902,6 +976,17 @@ fn agent_events(
     futures_util::stream::unfold(stream, |mut stream| async move {
         stream.recv().await.map(|event| (event, stream))
     })
+}
+
+/// Write the reasoning effort to `settings.json`. Mirrors `persist_model`
+/// in `chat_view.rs`: load, patch, save. Returns the error so the caller can
+/// report it in the transcript; the save is best-effort and never blocks the
+/// agent run.
+async fn persist_reasoning_effort(effort: ReasoningEffort) -> anyhow::Result<()> {
+    let store = SettingsStore::<Settings>::new(settings::default_settings_path()?);
+    let mut settings = store.load().await?.unwrap_or_default();
+    settings.reasoning = Some(effort);
+    store.save(&settings).await
 }
 
 #[cfg(test)]

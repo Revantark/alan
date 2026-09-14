@@ -28,7 +28,7 @@ pub(crate) struct StatusSnapshot {
     pub usage: Usage,
     pub model_name: String,
     pub max_context: Option<u64>,
-    pub reasoning_effort: Option<ReasoningEffort>,
+    pub reasoning_effort: ReasoningEffort,
 }
 
 impl StatusSnapshot {
@@ -147,12 +147,10 @@ fn status_line(snap: &StatusSnapshot) -> Line<'static> {
         format!(" · {}", snap.model_name),
         Style::default().fg(theme::MUTED_FG),
     ));
-    if let Some(effort) = snap.reasoning_effort {
-        spans.push(Span::styled(
-            format!(" · {}", effort),
-            Style::default().fg(theme::MUTED_FG),
-        ));
-    }
+    spans.push(Span::styled(
+        format!(" · {}", snap.reasoning_effort),
+        Style::default().fg(theme::MUTED_FG),
+    ));
 
     Line::from(spans)
 }

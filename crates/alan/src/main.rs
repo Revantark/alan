@@ -4,8 +4,8 @@ mod login_overlay;
 mod root;
 mod views;
 
-use crate::core::ChatController;
 use crate::core::settings::{DEFAULT_MODEL, PatchSettings, Settings, SettingsStore};
+use crate::core::{ChatController, SlashCommand};
 use llm::ServerTool;
 use std::time::Duration;
 
@@ -60,7 +60,7 @@ async fn main() -> anyhow::Result<()> {
         &settings.model.unwrap_or_else(|| DEFAULT_MODEL.into()),
         ModelOptions {
             server_tools,
-            reasoning_effort,
+            reasoning_effort: reasoning_effort.unwrap_or_default(),
             provider_order: settings.openrouter_provider_order.clone(),
         },
     )?;
@@ -127,7 +127,7 @@ fn build_env_patch_settings() -> anyhow::Result<PatchSettings> {
         patch.web_search = Some(parse_bool_env("ALAN_OPENROUTER_WEB_SEARCH")?);
     }
     if let Some(effort) = std::env::var_os("ALAN_REASONING_EFFORT") {
-        patch.reasoning = parse_reasoning_effort(&effort)?;
+        patch.reasoning = Some(parse_reasoning_effort(&effort)?);
     }
     if let Some(order) = std::env::var_os("ALAN_OR_MODEL_PROVIDER") {
         patch.openrouter_provider_order = Some(parse_provider_order(&order)?);
@@ -135,19 +135,13 @@ fn build_env_patch_settings() -> anyhow::Result<PatchSettings> {
     Ok(patch)
 }
 
-fn parse_reasoning_effort(value: &std::ffi::OsStr) -> anyhow::Result<Option<ReasoningEffort>> {
-    match value.to_string_lossy().trim().to_ascii_lowercase().as_str() {
-        "none" => Ok(None),
-        "minimal" => Ok(Some(ReasoningEffort::Minimal)),
-        "low" => Ok(Some(ReasoningEffort::Low)),
-        "medium" => Ok(Some(ReasoningEffort::Medium)),
-        "high" => Ok(Some(ReasoningEffort::High)),
-        "xhigh" => Ok(Some(ReasoningEffort::XHigh)),
-        "max" => Ok(Some(ReasoningEffort::Max)),
-        value => Err(anyhow::anyhow!(
-            "ALAN_REASONING_EFFORT must be one of none, minimal, low, medium, high, xhigh, max; got {value:?}"
-        )),
-    }
+fn parse_reasoning_effort(value: &std::ffi::OsStr) -> anyhow::Result<ReasoningEffort> {
+    SlashCommand::parse_effort(value.to_string_lossy().as_ref()).ok_or_else(|| {
+        anyhow::anyhow!(
+            "ALAN_REASONING_EFFORT must be one of none, minimal, low, medium, high, xhigh, max; got {:?}",
+            value.to_string_lossy()
+        )
+    })
 }
 
 fn parse_provider_order(value: &std::ffi::OsStr) -> anyhow::Result<Vec<String>> {

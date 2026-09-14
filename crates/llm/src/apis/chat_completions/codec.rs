@@ -14,8 +14,7 @@ struct Request<'a> {
     temperature: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     max_tokens: Option<u32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    reasoning: Option<WireReasoning>,
+    reasoning: WireReasoning,
     #[serde(skip_serializing_if = "Option::is_none")]
     session_id: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -75,8 +74,6 @@ struct WireDefinition {
 #[derive(Serialize)]
 struct WireReasoning {
     effort: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    exclude: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -168,10 +165,9 @@ pub(crate) struct StreamToolCall {
 pub(crate) fn serialize_request(request: &LlmRequest<'_>) -> Result<String, LlmError> {
     let messages = request.messages.iter().map(wire_message).collect();
     let tools = request.tools.iter().map(wire_tool).collect();
-    let reasoning = request.reasoning_effort.map(|effort| WireReasoning {
-        effort: effort.as_str().to_string(),
-        exclude: None,
-    });
+    let reasoning = WireReasoning {
+        effort: request.reasoning_effort.to_string(),
+    };
     let provider = request
         .provider_order
         .filter(|order| !order.is_empty())
@@ -392,7 +388,7 @@ mod tests {
             tools,
             options,
             credential: None,
-            reasoning_effort: None,
+            reasoning_effort: crate::ReasoningEffort::None,
             provider_order: None,
         }
     }
@@ -435,7 +431,7 @@ mod tests {
         )];
         let options = RequestOptions::default();
         let mut request = request("model-a", &messages, &[], &options);
-        request.reasoning_effort = Some(crate::ReasoningEffort::High);
+        request.reasoning_effort = crate::ReasoningEffort::High;
         let json: serde_json::Value =
             serde_json::from_str(&serialize_request(&request).unwrap()).unwrap();
         assert_eq!(json["reasoning"]["effort"], "high");
