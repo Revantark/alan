@@ -2,11 +2,12 @@ use crate::{Message, ToolSpec};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum ReasoningEffort {
     None,
     Minimal,
+    #[default]
     Low,
     Medium,
     High,
@@ -16,7 +17,7 @@ pub enum ReasoningEffort {
 
 impl fmt::Display for ReasoningEffort {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.as_str())
+        f.write_str(self.as_str())
     }
 }
 
@@ -48,12 +49,6 @@ impl std::str::FromStr for ReasoningEffort {
             "max" => Ok(Self::Max),
             _ => Err(format!("invalid reasoning effort: {s}")),
         }
-    }
-}
-
-impl Default for ReasoningEffort {
-    fn default() -> Self {
-        ReasoningEffort::Low
     }
 }
 
