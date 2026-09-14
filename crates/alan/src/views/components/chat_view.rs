@@ -10,6 +10,7 @@ use std::sync::Arc;
 
 use providers::bind_model;
 
+use crate::core::settings::{self, Settings, SettingsStore};
 use crate::root::AlanAction;
 use crate::views::components::{ModelPick, ModelsPicker};
 use crate::views::theme;
@@ -207,6 +208,9 @@ impl Component<AlanAction> for ChatView {
                                             .set_model(model)
                                             .await
                                             .map_err(|e| tui::TaskError(e.into()))?;
+                                        persist_model(&selected_model_info.id)
+                                            .await
+                                            .map_err(|e| tui::TaskError(e.into()))?;
                                         Ok((name, max_context))
                                     },
                                     move |result, _view, cx| {
@@ -363,4 +367,11 @@ fn render_attachments(
     let attachments =
         Paragraph::new(Text::from(lines)).style(Style::default().bg(theme::ATTACHMENT_BG));
     frame.render_widget(attachments, area);
+}
+
+async fn persist_model(model_id: &str) -> anyhow::Result<()> {
+    let store = SettingsStore::<Settings>::new(settings::default_settings_path()?);
+    let mut settings = store.load().await?.unwrap_or_default();
+    settings.model = Some(model_id.to_string());
+    store.save(&settings).await
 }

@@ -85,7 +85,7 @@ fn attach_working_directory(
     }
     if let AgentMessage::User { text, .. } = &mut user_msg {
         text.push_str(&format!(
-            "\nCurrent project dir which you are in : {}",
+            "\nCurrent project dir which you are in : {}\nAttach this with user mentioned files for absolute paths",
             dir.display()
         ));
     }

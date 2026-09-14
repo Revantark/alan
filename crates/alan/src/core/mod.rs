@@ -4,6 +4,8 @@ pub mod action;
 pub mod chat;
 pub mod command;
 pub mod completion;
+pub mod settings;
+pub mod store;
 
 pub use action::ImageAttachment;
 pub use chat::{Activity, ChatController, Entry};

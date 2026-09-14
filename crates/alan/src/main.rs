@@ -5,6 +5,7 @@ mod root;
 mod views;
 
 use crate::core::ChatController;
+use crate::core::settings::{DEFAULT_MODEL, PatchSettings, Settings, SettingsStore};
 use llm::ServerTool;
 use std::time::Duration;
 
@@ -24,20 +25,43 @@ use crate::views::ChatHistory;
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let is_blank = std::env::args().any(|arg| arg == "--blank");
+    // Saves the passed envs into settings
+    let is_save = std::env::args().any(|arg| arg == "--save");
+
     let _guard = init().unwrap();
-    let model_id = std::env::var("ALAN_MODEL").unwrap_or_else(|_| "openai/gpt-4o-mini".into());
+
+    let store = SettingsStore::<Settings>::new(settings_path()?);
+    let persisted = match store.load().await? {
+        Some(settings) => settings,
+        None => {
+            let settings = Settings::with_defaults();
+            store.save(&settings).await?;
+            settings
+        }
+    };
+
+    let mut settings = persisted;
+    settings.apply_patch(build_env_patch_settings()?);
+
+    if is_save {
+        store
+            .save(&settings)
+            .await
+            .expect("failed to save settings");
+    }
+
     let credential_store = Arc::new(FileCredentialStore::new(auth_path()?));
     let provider = OpenRouterProvider::from_store(credential_store.clone()).build()?;
 
-    let server_tools = enabled_server_tools(&provider)?;
-    let reasoning_effort = configured_reasoning_effort()?;
+    let server_tools = enabled_server_tools(&provider, &settings)?;
+    let reasoning_effort = settings.reasoning;
     let model = bind_model(
         &provider,
-        &model_id,
+        &settings.model.unwrap_or_else(|| DEFAULT_MODEL.into()),
         ModelOptions {
             server_tools,
             reasoning_effort,
-            provider_order: configured_provider_order()?,
+            provider_order: settings.openrouter_provider_order.clone(),
         },
     )?;
     let registry = Arc::new(ProviderRegistry::new([
@@ -87,15 +111,70 @@ async fn main() -> anyhow::Result<()> {
     result
 }
 
-fn enabled_server_tools(provider: &OpenRouterProvider) -> anyhow::Result<Vec<ServerTool>> {
+fn settings_path() -> anyhow::Result<PathBuf> {
+    Ok(alan_data_dir()?.join("settings.json"))
+}
+
+fn build_env_patch_settings() -> anyhow::Result<PatchSettings> {
+    let mut patch = PatchSettings::default();
+    if let Some(model) = std::env::var_os("ALAN_MODEL") {
+        patch.model = Some(model.to_string_lossy().into_owned());
+    }
+    if std::env::var_os("ALAN_OPENROUTER_WEB_FETCH").is_some() {
+        patch.web_fetch = Some(parse_bool_env("ALAN_OPENROUTER_WEB_FETCH")?);
+    }
+    if std::env::var_os("ALAN_OPENROUTER_WEB_SEARCH").is_some() {
+        patch.web_search = Some(parse_bool_env("ALAN_OPENROUTER_WEB_SEARCH")?);
+    }
+    if let Some(effort) = std::env::var_os("ALAN_REASONING_EFFORT") {
+        patch.reasoning = parse_reasoning_effort(&effort)?;
+    }
+    if let Some(order) = std::env::var_os("ALAN_OR_MODEL_PROVIDER") {
+        patch.openrouter_provider_order = Some(parse_provider_order(&order)?);
+    }
+    Ok(patch)
+}
+
+fn parse_reasoning_effort(value: &std::ffi::OsStr) -> anyhow::Result<Option<ReasoningEffort>> {
+    match value.to_string_lossy().trim().to_ascii_lowercase().as_str() {
+        "none" => Ok(None),
+        "minimal" => Ok(Some(ReasoningEffort::Minimal)),
+        "low" => Ok(Some(ReasoningEffort::Low)),
+        "medium" => Ok(Some(ReasoningEffort::Medium)),
+        "high" => Ok(Some(ReasoningEffort::High)),
+        "xhigh" => Ok(Some(ReasoningEffort::XHigh)),
+        "max" => Ok(Some(ReasoningEffort::Max)),
+        value => Err(anyhow::anyhow!(
+            "ALAN_REASONING_EFFORT must be one of none, minimal, low, medium, high, xhigh, max; got {value:?}"
+        )),
+    }
+}
+
+fn parse_provider_order(value: &std::ffi::OsStr) -> anyhow::Result<Vec<String>> {
+    let order = value
+        .to_string_lossy()
+        .split(',')
+        .map(|entry| entry.trim().to_string())
+        .filter(|entry| !entry.is_empty())
+        .collect::<Vec<_>>();
+    if order.is_empty() {
+        return Err(anyhow::anyhow!("ALAN_OR_MODEL_PROVIDER must not be empty"));
+    }
+    Ok(order)
+}
+
+fn enabled_server_tools(
+    provider: &OpenRouterProvider,
+    settings: &Settings,
+) -> anyhow::Result<Vec<ServerTool>> {
     let mut enabled = Vec::new();
     for tool in provider.server_tools() {
-        let variable = match tool.id.as_str() {
-            "openrouter:web_fetch" => "ALAN_OPENROUTER_WEB_FETCH",
-            "openrouter:web_search" => "ALAN_OPENROUTER_WEB_SEARCH",
+        let enabled_for_tool = match tool.id.as_str() {
+            "openrouter:web_fetch" => settings.web_fetch,
+            "openrouter:web_search" => settings.web_search,
             _ => continue,
         };
-        if parse_bool_env(variable)? {
+        if enabled_for_tool == Some(true) {
             enabled.push(ServerTool {
                 kind: tool.id.clone(),
             });
@@ -115,41 +194,6 @@ fn parse_bool_env(name: &str) -> anyhow::Result<bool> {
             "{name} must be a boolean (true/false), got {value:?}"
         )),
     }
-}
-
-fn configured_reasoning_effort() -> anyhow::Result<Option<ReasoningEffort>> {
-    let Some(value) = std::env::var_os("ALAN_REASONING_EFFORT") else {
-        return Ok(None);
-    };
-    match value.to_string_lossy().trim().to_ascii_lowercase().as_str() {
-        "none" => Ok(None),
-        "minimal" => Ok(Some(ReasoningEffort::Minimal)),
-        "low" => Ok(Some(ReasoningEffort::Low)),
-        "medium" => Ok(Some(ReasoningEffort::Medium)),
-        "high" => Ok(Some(ReasoningEffort::High)),
-        "xhigh" => Ok(Some(ReasoningEffort::XHigh)),
-        "max" => Ok(Some(ReasoningEffort::Max)),
-        value => Err(anyhow::anyhow!(
-            "ALAN_REASONING_EFFORT must be one of none, minimal, low, medium, high, xhigh, max; got {value:?}"
-        )),
-    }
-}
-
-fn configured_provider_order() -> anyhow::Result<Vec<String>> {
-    let Some(value) = std::env::var_os("ALAN_OR_MODEL_PROVIDER") else {
-        return Ok(Vec::new());
-    };
-    let order = value
-        .to_string_lossy()
-        .split(',')
-        .map(|entry| entry.trim())
-        .map(|entry| entry.to_string())
-        .filter(|entry| !entry.is_empty())
-        .collect::<Vec<_>>();
-    if order.is_empty() {
-        return Err(anyhow::anyhow!("ALAN_OR_MODEL_PROVIDER must not be empty"));
-    }
-    Ok(order)
 }
 
 fn auth_path() -> anyhow::Result<PathBuf> {
