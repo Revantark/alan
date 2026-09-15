@@ -220,15 +220,14 @@ fn assistant_steps(message: &Message) -> Vec<serde_json::Value> {
     if let Some(calls) = &message.tool_calls {
         steps.extend(calls.iter().map(function_call_step));
     }
-    if steps.is_empty() {
-        if let Some(contents) =
+    if steps.is_empty()
+        && let Some(contents) =
             (!message_contents(message).is_empty()).then_some(message_contents(message))
-        {
-            steps.push(serde_json::json!({
-                "type": "model_output",
-                "content": contents,
-            }));
-        }
+    {
+        steps.push(serde_json::json!({
+            "type": "model_output",
+            "content": contents,
+        }));
     }
     steps
 }
