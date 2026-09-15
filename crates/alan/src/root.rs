@@ -91,7 +91,6 @@ impl KeyMapper<AlanAction> for AlanKeyMapper {
 pub struct AlanRoot {
     providers: Arc<ProviderRegistry>,
     credentials: Arc<dyn CredentialStore>,
-    provider: Arc<dyn providers::Provider>,
     /// The chat component to install on `init`; taken when inserted.
     chat_source: Option<ChatHistory>,
     header: Option<Entity<Header>>,
@@ -107,15 +106,9 @@ impl AlanRoot {
         providers: Arc<ProviderRegistry>,
         credentials: Arc<dyn CredentialStore>,
     ) -> Self {
-        let provider = providers
-            .providers()
-            .first()
-            .cloned()
-            .expect("at least one provider");
         Self {
             providers,
             credentials,
-            provider,
             chat_source: Some(chat),
             header: None,
             view: None,
@@ -141,7 +134,7 @@ impl Component<AlanAction> for AlanRoot {
             self.chat_source
                 .take()
                 .expect("chat component installed once"),
-            Arc::clone(&self.provider),
+            Arc::clone(&self.providers),
         ));
         self.view = Some(view);
         self.login_subscription = Some(

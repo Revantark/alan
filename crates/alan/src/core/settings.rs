@@ -10,6 +10,7 @@
 //!   - ALAN_OPENROUTER_WEB_SEARCH
 //!   - ALAN_REASONING_EFFORT
 //!   - ALAN_OR_MODEL_PROVIDER
+//!   - ALAN_PROVIDER
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
@@ -29,6 +30,7 @@ pub struct Settings {
     pub web_search: Option<bool>,
     pub reasoning: Option<ReasoningEffort>,
     pub openrouter_provider_order: Vec<String>,
+    pub provider: Option<String>,
 }
 
 /// A patch type used to update only selected fields of Settings without replacing
@@ -40,6 +42,7 @@ pub struct PatchSettings {
     pub web_search: Option<bool>,
     pub reasoning: Option<ReasoningEffort>,
     pub openrouter_provider_order: Option<Vec<String>>,
+    pub provider: Option<String>,
 }
 
 /// SettingsStore provides load/save access to application settings stored in a
@@ -96,6 +99,7 @@ pub fn default_settings_path() -> anyhow::Result<PathBuf> {
 
 /// The fallback model used when no model is stored or provided via env.
 pub const DEFAULT_MODEL: &str = "openai/gpt-4o-mini";
+pub const DEFAULT_PROVIDER: &str = "openrouter";
 
 impl Settings {
     /// Settings used on first run (and to seed a missing settings.json):
@@ -104,6 +108,7 @@ impl Settings {
         Self {
             model: Some(DEFAULT_MODEL.into()),
             reasoning: Some(ReasoningEffort::Low),
+            provider: Some(DEFAULT_PROVIDER.into()),
             ..Self::default()
         }
     }
@@ -126,6 +131,9 @@ impl Settings {
         }
         if let Some(v) = patch.openrouter_provider_order {
             self.openrouter_provider_order = v;
+        }
+        if let Some(v) = patch.provider {
+            self.provider = Some(v);
         }
     }
 }

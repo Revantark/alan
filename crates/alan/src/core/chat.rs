@@ -4,6 +4,7 @@ use super::action::ImageAttachment;
 
 use agent::{Agent, AgentEvent, AgentStream};
 use llm::{ReasoningEffort, Usage};
+use providers::{AuthError, ModelError};
 use std::sync::Arc;
 
 /// What the prompt is doing, and so what Enter does to it.
@@ -330,7 +331,14 @@ impl ChatController {
                 self.busy = false;
                 // An aborted run (the stream was dropped) carries no message.
                 if !matches!(error, agent::AgentError::Aborted) {
-                    self.entries.push(Entry::Error(error.to_string()));
+                    let message = match error {
+                        agent::AgentError::Model(ModelError::Auth(AuthError::Missing)) => {
+                            "Please login to use the model".to_string()
+                        }
+                        _ => error.to_string(),
+                    };
+
+                    self.entries.push(Entry::Error(message));
                     changed = true;
                 }
             }

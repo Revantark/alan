@@ -12,7 +12,8 @@ use std::time::Duration;
 use agent::{Agent, SessionManager, default_tools};
 use llm::ReasoningEffort;
 use providers::{
-    FileCredentialStore, ModelOptions, OpenRouterProvider, Provider, ProviderRegistry, bind_model,
+    FileCredentialStore, ModelOptions, OpenRouterProvider, Provider, ProviderRegistry, ZaiProvider,
+    bind_model,
 };
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -51,12 +52,22 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let credential_store = Arc::new(FileCredentialStore::new(auth_path()?));
-    let provider = OpenRouterProvider::from_store(credential_store.clone()).build()?;
+    let selected_provider_id = settings.provider.as_deref().unwrap_or("openrouter");
+    let providers: Vec<Arc<dyn Provider>> = vec![
+        Arc::new(ZaiProvider::from_store(credential_store.clone()).build()?),
+        Arc::new(OpenRouterProvider::from_store(credential_store.clone()).build()?),
+    ];
 
-    let server_tools = enabled_server_tools(&provider, &settings)?;
+    let provider = providers
+        .iter()
+        .find(|p| p.id().0 == selected_provider_id)
+        .ok_or_else(|| anyhow::anyhow!("Provider not found: {selected_provider_id}"))?
+        .as_ref();
+
+    let server_tools = enabled_server_tools(provider, &settings)?;
     let reasoning_effort = settings.reasoning;
     let model = bind_model(
-        &provider,
+        provider,
         &settings.model.unwrap_or_else(|| DEFAULT_MODEL.into()),
         ModelOptions {
             server_tools,
@@ -64,9 +75,7 @@ async fn main() -> anyhow::Result<()> {
             provider_order: settings.openrouter_provider_order.clone(),
         },
     )?;
-    let registry = Arc::new(ProviderRegistry::new([
-        Arc::new(provider) as Arc<dyn Provider>
-    ]));
+    let registry = Arc::new(ProviderRegistry::new(providers));
     let session_manager = Arc::new(SessionManager::new(sessions_path()?));
     let resumed_session = if let Some(session_id) = configured_session_id()? {
         let cwd = std::env::current_dir()?;
@@ -132,6 +141,9 @@ fn build_env_patch_settings() -> anyhow::Result<PatchSettings> {
     if let Some(order) = std::env::var_os("ALAN_OR_MODEL_PROVIDER") {
         patch.openrouter_provider_order = Some(parse_provider_order(&order)?);
     }
+    if let Some(provider) = std::env::var_os("ALAN_PROVIDER") {
+        patch.provider = Some(provider.to_string_lossy().into_owned());
+    }
     Ok(patch)
 }
 
@@ -158,7 +170,7 @@ fn parse_provider_order(value: &std::ffi::OsStr) -> anyhow::Result<Vec<String>> 
 }
 
 fn enabled_server_tools(
-    provider: &OpenRouterProvider,
+    provider: &dyn Provider,
     settings: &Settings,
 ) -> anyhow::Result<Vec<ServerTool>> {
     let mut enabled = Vec::new();

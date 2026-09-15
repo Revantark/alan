@@ -8,7 +8,7 @@
 
 use std::sync::Arc;
 
-use providers::bind_model;
+use providers::{ModelInfo, ProviderId, ProviderRegistry, bind_model};
 
 use crate::core::settings::{self, Settings, SettingsStore};
 use crate::root::AlanAction;
@@ -45,20 +45,18 @@ pub struct ChatView {
     chat_source: Option<ChatHistory>,
     chat: Option<Entity<ChatHistory>>,
     editor: Option<Entity<PromptEditor>>,
-    provider: Arc<dyn providers::Provider>,
+    providers: Arc<ProviderRegistry>,
     model_subscription: Option<tui::Subscription>,
-    model_picker: Option<Entity<ModelsPicker>>,
 }
 
 impl ChatView {
-    pub fn new(chat: ChatHistory, provider: Arc<dyn providers::Provider>) -> Self {
+    pub fn new(chat: ChatHistory, providers: Arc<ProviderRegistry>) -> Self {
         Self {
             chat_source: Some(chat),
             chat: None,
             editor: None,
-            provider,
+            providers,
             model_subscription: None,
-            model_picker: None,
         }
     }
 
@@ -72,6 +70,87 @@ impl ChatView {
             return ActionStatus::Continue;
         };
         cx.dispatch(chat, action)
+    }
+
+    /// Open the `/models` picker, populate it with the cached catalog, refresh
+    /// it from the providers in the background, and subscribe to a selection.
+    fn open_models_picker(
+        &mut self,
+        chat: Entity<ChatHistory>,
+        cx: &mut Context<'_, Self, AlanAction>,
+    ) {
+        let providers = Arc::clone(&self.providers);
+        let picker = cx.open_overlay(ModelsPicker::new("Models", model_labels(&providers)));
+
+        let providers_for_fetch = Arc::clone(&providers);
+        let providers_for_items = Arc::clone(&providers);
+        let _ = cx.spawn(
+            async move {
+                fetch_all_models(&providers_for_fetch).await;
+                Ok(())
+            },
+            move |result, _view, cx| {
+                if result.is_ok() {
+                    let items = model_labels(&providers_for_items);
+                    let _ = cx.update(picker, |p| p.set_items(items));
+                }
+            },
+        );
+
+        let providers = Arc::clone(&self.providers);
+        self.model_subscription = Some(cx.subscribe::<ModelPick, ModelsPicker, _>(
+            picker,
+            move |event, _view, _picker, cx| {
+                let ModelPick::Chosen(index) = event else {
+                    return;
+                };
+                let Some(model_info) = all_models(&providers).into_iter().nth(*index) else {
+                    return;
+                };
+                let Some(agent) = cx.read(chat, |c| c.agent()).flatten() else {
+                    return;
+                };
+                let providers = Arc::clone(&providers);
+                let _ = cx.spawn(
+                    async move {
+                        let provider = providers
+                            .providers()
+                            .iter()
+                            .find(|p| p.id() == model_info.provider)
+                            .ok_or_else(|| {
+                                tui::TaskError("selected provider is unavailable".into())
+                            })?;
+                        let model = bind_model(
+                            provider.as_ref(),
+                            &model_info.id,
+                            agent.model_options().await,
+                        )
+                        .map_err(|e| tui::TaskError(e.into()))?;
+                        let name = model_info.name.clone();
+                        let max_context = model_info.context_length;
+                        let reasoning_effort = model.reasoning_effort();
+                        agent
+                            .set_model(model)
+                            .await
+                            .map_err(|e| tui::TaskError(e.into()))?;
+                        persist_model(&model_info.id, &model_info.provider)
+                            .await
+                            .map_err(|e| tui::TaskError(e.into()))?;
+                        Ok((name, max_context, reasoning_effort))
+                    },
+                    move |result, _view, cx| {
+                        let _ = cx.update(chat, |c| match result {
+                            Ok((name, max_context, reasoning_effort)) => {
+                                c.set_max_context(max_context);
+                                c.set_reasoning_effort(reasoning_effort);
+                                c.apply_model_switch(name);
+                            }
+                            Err(e) => c.apply_model_switch_failed(e.to_string()),
+                        });
+                    },
+                );
+            },
+        ));
     }
 }
 
@@ -90,15 +169,12 @@ impl Component<AlanAction> for ChatView {
         self.editor = Some(cx.insert(PromptEditor::new()));
         cx.focus_entity(self.editor.expect("editor entity"));
 
-        let provider = Arc::clone(&self.provider);
         let chat_entity = self.chat.expect("chat installed before spawn");
-        let provider_for_lookup = Arc::clone(&provider);
+        let providers_for_fetch = Arc::clone(&self.providers);
+        let providers_for_lookup = Arc::clone(&self.providers);
         let _ = cx.spawn(
             async move {
-                provider
-                    .fetch_models()
-                    .await
-                    .map_err(|e| tui::TaskError(e.into()))?;
+                fetch_all_models(&providers_for_fetch).await;
                 Ok(())
             },
             move |result, _view, cx| {
@@ -111,8 +187,8 @@ impl Component<AlanAction> for ChatView {
                 else {
                     return;
                 };
-                let max_context = provider_for_lookup
-                    .models()
+                // Find the model in any provider's catalog
+                let max_context = all_models(&providers_for_lookup)
                     .into_iter()
                     .find(|m| m.id == model_id)
                     .and_then(|m| m.context_length);
@@ -152,84 +228,7 @@ impl Component<AlanAction> for ChatView {
                     .update(chat, |c| c.take_models_request())
                     .unwrap_or(false)
                 {
-                    let provider = Arc::clone(&self.provider);
-                    let picker = cx.open_overlay(ModelsPicker::new("Models", Vec::new()));
-                    let initial_items = provider
-                        .models()
-                        .iter()
-                        .map(|m| format!("{} — {}", m.id, m.name))
-                        .collect();
-                    let _ = cx.update(picker, |p| p.set_items(initial_items));
-                    let fetch_provider = Arc::clone(&provider);
-                    let _ = cx.spawn(
-                        async move {
-                            fetch_provider
-                                .fetch_models()
-                                .await
-                                .map_err(|e| tui::TaskError(e.into()))?;
-                            Ok(())
-                        },
-                        move |result, _view, cx| {
-                            if result.is_ok() {
-                                let items = provider
-                                    .models()
-                                    .iter()
-                                    .map(|m| m.name.to_string())
-                                    .collect();
-                                let _ = cx.update(picker, |p| p.set_items(items));
-                            }
-                        },
-                    );
-                    let provider = Arc::clone(&self.provider);
-                    self.model_subscription = Some(cx.subscribe::<ModelPick, ModelsPicker, _>(
-                        picker,
-                        move |event, _view, _picker, cx| {
-                            if let ModelPick::Chosen(index) = event {
-                                let Some(selected_model_info) =
-                                    (provider.models().get(*index)).cloned()
-                                else {
-                                    return;
-                                };
-                                let Some(agent) = cx.read(chat, |c| c.agent()).flatten() else {
-                                    return;
-                                };
-                                let provider = Arc::clone(&provider);
-                                let _ = cx.spawn(
-                                    async move {
-                                        let model = bind_model(
-                                            provider.as_ref(),
-                                            &selected_model_info.id,
-                                            agent.model_options().await,
-                                        )
-                                        .map_err(|e| tui::TaskError(e.into()))?;
-                                        let name = selected_model_info.name.clone();
-                                        let max_context = selected_model_info.context_length;
-                                        // Snapshot the effort before `set_model` takes
-                                        // ownership of the model.
-                                        let reasoning_effort = model.reasoning_effort();
-                                        agent
-                                            .set_model(model)
-                                            .await
-                                            .map_err(|e| tui::TaskError(e.into()))?;
-                                        persist_model(&selected_model_info.id)
-                                            .await
-                                            .map_err(|e| tui::TaskError(e.into()))?;
-                                        Ok((name, max_context, reasoning_effort))
-                                    },
-                                    move |result, _view, cx| {
-                                        let _ = cx.update(chat, |c| match result {
-                                            Ok((name, max_context, reasoning_effort)) => {
-                                                c.set_max_context(max_context);
-                                                c.set_reasoning_effort(reasoning_effort);
-                                                c.apply_model_switch(name);
-                                            }
-                                            Err(e) => c.apply_model_switch_failed(e.to_string()),
-                                        });
-                                    },
-                                );
-                            }
-                        },
-                    ));
+                    self.open_models_picker(chat, cx);
                 }
                 status
             }
@@ -302,16 +301,6 @@ impl Component<AlanAction> for ChatView {
         .areas(area);
 
         cx.render_entity(chat, frame, chat_area);
-        if let Some(picker) = self.model_picker {
-            let picker_height = 7.min(chat_area.height);
-            let picker_area = Rect {
-                x: chat_area.x,
-                y: status_area.y.saturating_sub(picker_height),
-                width: chat_area.width,
-                height: picker_height,
-            };
-            cx.render_entity(picker, frame, picker_area);
-        }
         render_attachments(frame, attachment_area, editor, cx);
         // Paint the whole footer (status through bottom pad) with the editor
         // background, so the gap and bottom padding don't fall back to the
@@ -373,9 +362,42 @@ fn render_attachments(
     frame.render_widget(attachments, area);
 }
 
-async fn persist_model(model_id: &str) -> anyhow::Result<()> {
+/// Refresh every provider's model catalog, logging (but not failing on)
+/// individual provider errors.
+async fn fetch_all_models(providers: &ProviderRegistry) {
+    for provider in providers.providers() {
+        if let Err(e) = provider.fetch_models().await {
+            tracing::warn!(
+                "Failed to fetch models for provider {:?}: {}",
+                provider.id(),
+                e
+            );
+        }
+    }
+}
+
+/// Flatten every provider's catalog into a single list of models.
+fn all_models(providers: &ProviderRegistry) -> Vec<ModelInfo> {
+    providers
+        .providers()
+        .iter()
+        .flat_map(|p| p.models())
+        .collect()
+}
+
+/// Render each known model as a `"<provider> — <name>"` picker label.
+fn model_labels(providers: &ProviderRegistry) -> Vec<String> {
+    all_models(providers)
+        .into_iter()
+        .map(|m| format!("{} — {}", m.provider, m.name))
+        .collect()
+}
+
+async fn persist_model(model_id: &str, provider_id: &ProviderId) -> anyhow::Result<()> {
     let store = SettingsStore::<Settings>::new(settings::default_settings_path()?);
     let mut settings = store.load().await?.unwrap_or_default();
     settings.model = Some(model_id.to_string());
+    settings.provider = Some(provider_id.to_string());
+
     store.save(&settings).await
 }
