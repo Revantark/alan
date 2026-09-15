@@ -127,6 +127,9 @@ struct PartialToolCall {
     id: String,
     name: String,
     arguments: String,
+    /// Thought signature returned by thinking models (e.g. Gemini 3+
+    /// Interactions API). Must be replayed verbatim with the tool call.
+    signature: Option<String>,
 }
 
 impl LlmResponseBuilder {
@@ -152,6 +155,7 @@ impl LlmResponseBuilder {
                 id,
                 name,
                 arguments,
+                signature,
             } => {
                 let call = self.tool_calls.entry(*index).or_default();
                 if let Some(id) = id {
@@ -161,6 +165,9 @@ impl LlmResponseBuilder {
                     call.name.push_str(name);
                 }
                 call.arguments.push_str(arguments);
+                if let Some(signature) = signature {
+                    call.signature = Some(signature.clone());
+                }
             }
             LlmEvent::Usage { usage } => {
                 self.usage = Some(usage.clone());
@@ -199,6 +206,7 @@ impl LlmResponseBuilder {
                 id: call.id,
                 name: call.name,
                 arguments: call.arguments,
+                signature: call.signature,
             }));
         }
         Ok(LlmResponse {
@@ -233,6 +241,7 @@ mod tests {
                 id: Some("call-1".into()),
                 name: Some("bash".into()),
                 arguments: "{}".into(),
+                signature: None,
             })
             .unwrap();
         builder.apply(&done()).unwrap();
@@ -253,6 +262,7 @@ mod tests {
                     id: Some(id.into()),
                     name: Some("bash".into()),
                     arguments: "{}".into(),
+                    signature: None,
                 })
                 .unwrap();
         }

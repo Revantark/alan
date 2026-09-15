@@ -349,6 +349,7 @@ mod tests {
             id: "test-call".into(),
             name: "read".into(),
             arguments,
+            signature: None,
         }
     }
 
@@ -515,6 +516,7 @@ mod tests {
         ToolCall {
             id: "test-edit-call".into(),
             name: "edit".into(),
+            signature: None,
             arguments: serde_json::json!({
                 "path": path,
                 "old_text": old_text,

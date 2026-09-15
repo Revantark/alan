@@ -23,18 +23,30 @@ impl HttpClient {
         body: &str,
         credential: Option<&Credential>,
     ) -> Result<reqwest::Response, LlmError> {
+        self.send(url, body, |request| match credential {
+            Some(Credential::ApiKey(value)) => request.bearer_auth(value),
+            Some(Credential::Header(name, value)) => request.header(name, value),
+            Some(Credential::None) | None => request,
+        })
+        .await
+    }
+
+    async fn send<F>(
+        &self,
+        url: &str,
+        body: &str,
+        configure: F,
+    ) -> Result<reqwest::Response, LlmError>
+    where
+        F: Fn(reqwest::RequestBuilder) -> reqwest::RequestBuilder,
+    {
         let mut attempt = 0;
         loop {
-            let request = self
-                .client
-                .post(url)
-                .header("Content-Type", "application/json");
-            let request = match credential {
-                Some(Credential::ApiKey(value) | Credential::BearerToken(value)) => {
-                    request.bearer_auth(value)
-                }
-                Some(Credential::None) | None => request,
-            };
+            let request = configure(
+                self.client
+                    .post(url)
+                    .header("Content-Type", "application/json"),
+            );
 
             let response = request.body(body.to_owned()).send().await;
 

@@ -1,6 +1,6 @@
 mod codec;
-mod sse;
 
+use crate::apis::sse::SseDecoder;
 use crate::{HttpClient, LlmApi, LlmError, LlmEvent, LlmRequest, LlmStream, StopReason};
 use async_trait::async_trait;
 use futures_util::{StreamExt, stream};
@@ -50,7 +50,7 @@ impl LlmApi for ChatCompletionsApi {
 
 struct StreamState<S> {
     input: S,
-    decoder: sse::SseDecoder,
+    decoder: SseDecoder,
     pending: VecDeque<LlmEvent>,
     model: Option<String>,
     stop_reason: Option<StopReason>,
@@ -65,7 +65,7 @@ where
     fn new(input: S) -> Self {
         Self {
             input,
-            decoder: sse::SseDecoder::default(),
+            decoder: SseDecoder::default(),
             pending: VecDeque::new(),
             model: None,
             stop_reason: None,

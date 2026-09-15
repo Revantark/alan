@@ -17,6 +17,9 @@ pub enum LlmEvent {
         id: Option<String>,
         name: Option<String>,
         arguments: String,
+        /// Thought signature attached by thinking models; must be replayed
+        /// verbatim with the tool call in the next request.
+        signature: Option<String>,
     },
     /// Emitted as soon as a chunk carries token usage, before the stream
     /// completes. Useful for live cost/token display without waiting for

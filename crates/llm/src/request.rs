@@ -55,7 +55,7 @@ impl std::str::FromStr for ReasoningEffort {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Credential {
     ApiKey(String),
-    BearerToken(String),
+    Header(String, String),
     None,
 }
 

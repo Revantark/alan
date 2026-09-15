@@ -12,7 +12,7 @@ mod transport;
 pub mod apis;
 
 pub use api::LlmApi;
-pub use apis::ChatCompletionsApi;
+pub use apis::{ChatCompletionsApi, InteractionsApi};
 pub use error::LlmError;
 pub use event::{LlmEvent, LlmStream};
 pub use message::{ContentPart, ImageUrl, Message, Role};

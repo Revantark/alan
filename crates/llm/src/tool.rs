@@ -31,4 +31,8 @@ pub struct ToolCall {
     pub id: String,
     pub name: String,
     pub arguments: String,
+    /// Thought signature from thinking models (e.g. Gemini 3+ Interactions
+    /// API).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signature: Option<String>,
 }

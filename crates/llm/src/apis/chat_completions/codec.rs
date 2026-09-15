@@ -27,7 +27,8 @@ struct Request<'a> {
 
 #[derive(Serialize)]
 struct WireProvider {
-    order: Vec<String>,
+    only: Vec<String>,
+    allow_fallbacks: bool,
 }
 
 #[derive(Serialize)]
@@ -172,7 +173,8 @@ pub(crate) fn serialize_request(request: &LlmRequest<'_>) -> Result<String, LlmE
         .provider_order
         .filter(|order| !order.is_empty())
         .map(|order| WireProvider {
-            order: order.to_vec(),
+            only: order.to_vec(),
+            allow_fallbacks: order.is_empty(),
         });
 
     serde_json::to_string(&Request {
@@ -288,6 +290,7 @@ pub(crate) fn stream_events(chunk: StreamChunk) -> Vec<LlmEvent> {
                 id: call.id,
                 name: call.name,
                 arguments: call.arguments,
+                signature: None,
             }),
     );
     events
@@ -425,6 +428,7 @@ mod tests {
                 id: "call-1".into(),
                 name: "weather".into(),
                 arguments: "{}".into(),
+                signature: None,
             }],
             Some("think".into()),
             vec![serde_json::json!({"type": "reasoning.text", "text": "think"})],
@@ -489,7 +493,7 @@ mod tests {
         let json: serde_json::Value =
             serde_json::from_str(&serialize_request(&request).unwrap()).unwrap();
         assert_eq!(
-            json["provider"]["order"],
+            json["provider"]["only"],
             serde_json::json!(["deepseek", "fireworks"])
         );
     }

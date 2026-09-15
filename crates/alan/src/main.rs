@@ -12,8 +12,8 @@ use std::time::Duration;
 use agent::{Agent, SessionManager, default_tools};
 use llm::ReasoningEffort;
 use providers::{
-    FileCredentialStore, ModelOptions, OpenRouterProvider, Provider, ProviderRegistry, ZaiProvider,
-    bind_model,
+    FileCredentialStore, GoogleProvider, ModelOptions, OpenRouterProvider, Provider,
+    ProviderRegistry, ZaiProvider, bind_model,
 };
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -55,6 +55,7 @@ async fn main() -> anyhow::Result<()> {
     let selected_provider_id = settings.provider.as_deref().unwrap_or("openrouter");
     let providers: Vec<Arc<dyn Provider>> = vec![
         Arc::new(ZaiProvider::from_store(credential_store.clone()).build()?),
+        Arc::new(GoogleProvider::from_store(credential_store.clone()).build()?),
         Arc::new(OpenRouterProvider::from_store(credential_store.clone()).build()?),
     ];
 

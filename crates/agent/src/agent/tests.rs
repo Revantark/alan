@@ -468,6 +468,7 @@ impl LlmApi for ToolCallingApi {
                     id: Some("call-1".into()),
                     name: Some("bash".into()),
                     arguments: serde_json::json!({"command": "echo hi"}).to_string(),
+                    signature: None,
                 }),
                 Ok(LlmEvent::Done {
                     stop_reason: StopReason::ToolUse,
