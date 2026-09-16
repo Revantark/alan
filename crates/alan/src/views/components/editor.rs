@@ -215,29 +215,31 @@ impl PromptEditor {
             // at the bottom of the buffer (last line, last column).
             Event::Key(key) if key.code == KeyCode::Down && key.kind == KeyEventKind::Press => {
                 let (cursor_row, _) = self.editor.cursor();
-                let at_bottom = {
-                    let lines = self.editor.lines();
-                    cursor_row == lines.len().saturating_sub(1)
+                let lines = self.editor.lines();
+                let at_bottom = cursor_row == lines.len().saturating_sub(1);
+                let maybe_recall = if at_bottom {
+                    recall_down(&self.history, self.history_index)
+                } else {
+                    None
                 };
-                if at_bottom {
-                    if let Some(recall) = recall_down(&self.history, self.history_index) {
-                        self.history_index = recall.index;
-                        self.editor.clear();
-                        self.editor.move_cursor(CursorMove::Jump(0, 0));
-                        self.editor.insert_str(&recall.text);
-                        self.editor.move_cursor(CursorMove::End);
-                        refresh_completion(
-                            &mut self.completer,
-                            self.popup,
-                            cx,
-                            &mut self.dismissed,
-                            &mut self.last_trigger,
-                            &mut self.editor,
-                        );
-                        return ActionStatus::Handled;
-                    }
+                if let Some(recall) = maybe_recall {
+                    self.history_index = recall.index;
+                    self.editor.clear();
+                    self.editor.move_cursor(CursorMove::Jump(0, 0));
+                    self.editor.insert_str(&recall.text);
+                    self.editor.move_cursor(CursorMove::End);
+                    refresh_completion(
+                        &mut self.completer,
+                        self.popup,
+                        cx,
+                        &mut self.dismissed,
+                        &mut self.last_trigger,
+                        &mut self.editor,
+                    );
+                    ActionStatus::Handled
+                } else {
+                    self.handle_input_and_refresh(event, cx)
                 }
-                self.handle_input_and_refresh(event, cx)
             }
             event => self.handle_input_and_refresh(event, cx),
         };

@@ -237,7 +237,7 @@ impl ChatHistory {
     }
 
     pub fn entries(&self) -> &[Entry] {
-        &self.controller.entries()
+        self.controller.entries()
     }
 
     /// Route a submission: slash commands act on the controller (login is
