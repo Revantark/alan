@@ -41,8 +41,9 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
+    let persisted_model = persisted.model.clone();
     let mut settings = persisted;
-    settings.apply_patch(build_env_patch_settings()?);
+    settings.apply_patch(build_env_patch_settings(persisted_model)?);
 
     if is_save {
         store
@@ -67,13 +68,17 @@ async fn main() -> anyhow::Result<()> {
 
     let server_tools = enabled_server_tools(provider, &settings)?;
     let reasoning_effort = settings.reasoning;
+    let model_id = settings
+        .model
+        .clone()
+        .unwrap_or_else(|| DEFAULT_MODEL.into());
     let model = bind_model(
         provider,
-        &settings.model.unwrap_or_else(|| DEFAULT_MODEL.into()),
+        &model_id,
         ModelOptions {
             server_tools,
             reasoning_effort: reasoning_effort.unwrap_or_default(),
-            provider_order: settings.openrouter_provider_order.clone(),
+            provider_order: settings.provider_order(&model_id),
         },
     )?;
     let registry = Arc::new(ProviderRegistry::new(providers));
@@ -125,7 +130,7 @@ fn settings_path() -> anyhow::Result<PathBuf> {
     Ok(alan_data_dir()?.join("settings.json"))
 }
 
-fn build_env_patch_settings() -> anyhow::Result<PatchSettings> {
+fn build_env_patch_settings(persisted_model: Option<String>) -> anyhow::Result<PatchSettings> {
     let mut patch = PatchSettings::default();
     if let Some(model) = std::env::var_os("ALAN_MODEL") {
         patch.model = Some(model.to_string_lossy().into_owned());
@@ -140,7 +145,16 @@ fn build_env_patch_settings() -> anyhow::Result<PatchSettings> {
         patch.reasoning = Some(parse_reasoning_effort(&effort)?);
     }
     if let Some(order) = std::env::var_os("ALAN_OR_MODEL_PROVIDER") {
-        patch.openrouter_provider_order = Some(parse_provider_order(&order)?);
+        // Provider order is scoped per model: the env override applies to the
+        // model it selects (ALAN_MODEL), or the persisted one otherwise.
+        let model = patch
+            .model
+            .clone()
+            .or(persisted_model)
+            .unwrap_or_else(|| DEFAULT_MODEL.into());
+        let mut orders = std::collections::BTreeMap::new();
+        orders.insert(model, parse_provider_order(&order)?);
+        patch.provider_orders = Some(orders);
     }
     if let Some(provider) = std::env::var_os("ALAN_PROVIDER") {
         patch.provider = Some(provider.to_string_lossy().into_owned());

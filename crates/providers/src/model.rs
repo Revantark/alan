@@ -76,6 +76,10 @@ impl Model {
         self.reasoning_effort = reasoning_effort;
     }
 
+    pub fn set_provider_order(&mut self, order: Vec<String>) {
+        self.provider_order = order;
+    }
+
     fn tools<'a>(&'a self, local: &'a [ToolSpec]) -> Vec<ToolSpec> {
         local
             .iter()

@@ -107,7 +107,7 @@ impl ChatView {
                 let Some(model_info) = all_models(&providers).into_iter().nth(*index) else {
                     return;
                 };
-                let Some(agent) = cx.read(chat, |c| c.agent()).flatten() else {
+                let Some(agent) = cx.read(chat, |c| c.agent()) else {
                     return;
                 };
                 let providers = Arc::clone(&providers);
@@ -120,12 +120,14 @@ impl ChatView {
                             .ok_or_else(|| {
                                 tui::TaskError("selected provider is unavailable".into())
                             })?;
-                        let model = bind_model(
-                            provider.as_ref(),
-                            &model_info.id,
-                            agent.model_options().await,
-                        )
-                        .map_err(|e| tui::TaskError(e.into()))?;
+                        let settings = settings::get_settings()
+                            .await
+                            .map_err(|e| tui::TaskError(e.into()))?;
+                        let provider_order = settings.provider_order(&model_info.id);
+                        let mut options = agent.model_options().await;
+                        options.provider_order = provider_order;
+                        let model = bind_model(provider.as_ref(), &model_info.id, options)
+                            .map_err(|e| tui::TaskError(e.into()))?;
                         let name = model_info.name.clone();
                         let max_context = model_info.context_length;
                         let reasoning_effort = model.reasoning_effort();
@@ -181,18 +183,14 @@ impl Component<AlanAction> for ChatView {
                 if result.is_err() {
                     return;
                 }
-                let Some(model_id) = cx
-                    .read(chat_entity, |c| c.agent().map(|a| a.model_id()))
-                    .flatten()
-                else {
-                    return;
-                };
-                // Find the model in any provider's catalog
-                let max_context = all_models(&providers_for_lookup)
-                    .into_iter()
-                    .find(|m| m.id == model_id)
-                    .and_then(|m| m.context_length);
-                let _ = cx.update(chat_entity, |c| c.set_max_context(max_context));
+                if let Some(model_id) = cx.read(chat_entity, |c| c.model_name()) {
+                    // Find the model in any provider's catalog
+                    let max_context = all_models(&providers_for_lookup)
+                        .into_iter()
+                        .find(|m| m.id == model_id)
+                        .and_then(|m| m.context_length);
+                    let _ = cx.update(chat_entity, |c| c.set_max_context(max_context));
+                }
             },
         );
     }

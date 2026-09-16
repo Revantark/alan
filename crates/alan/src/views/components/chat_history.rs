@@ -11,7 +11,7 @@ use crate::root::{AlanAction, PromptSubmission};
 use crate::views::selection;
 use crate::views::selection::{Selection, TextPosition};
 use crate::views::theme;
-use agent::{AgentEvent, AgentStream, Mode};
+use agent::{Agent, AgentEvent, AgentStream, Mode};
 use crossterm::event::Event;
 use crossterm::event::{KeyCode, KeyEventKind, MouseButton, MouseEvent, MouseEventKind};
 use futures_util::Stream;
@@ -22,6 +22,7 @@ use ratatui::style::{Color, Style};
 use ratatui::text::Text;
 use ratatui::widgets::{Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState};
 use std::cell::RefCell;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tui::component::{ActionStatus, Component, RenderContext};
 use tui::context::Context;
@@ -88,7 +89,7 @@ pub struct ChatSnapshot {
 pub struct ChatHistory {
     /// The UI-agnostic chat session model. `None` only in tests that exercise
     /// transcript layout/scroll in isolation.
-    controller: Option<ChatController>,
+    controller: ChatController,
     view: RefCell<View>,
     /// Subscription to the in-flight agent stream. Dropping it cancels the run.
     prompt: Option<Subscription>,
@@ -110,12 +111,6 @@ pub struct ChatHistory {
     /// Consecutive ticker ticks with an empty queue; used to end the idle
     /// grace period.
     momentum_idle: u16,
-}
-
-impl Default for ChatHistory {
-    fn default() -> Self {
-        Self::from_controller(None)
-    }
 }
 
 #[derive(Debug)]
@@ -170,10 +165,10 @@ impl Default for View {
 impl ChatHistory {
     /// Build a chat component that owns its session controller.
     pub fn new(controller: ChatController) -> Self {
-        Self::from_controller(Some(controller))
+        Self::from_controller(controller)
     }
 
-    fn from_controller(controller: Option<ChatController>) -> Self {
+    fn from_controller(controller: ChatController) -> Self {
         Self {
             controller,
             view: RefCell::new(View::default()),
@@ -196,9 +191,7 @@ impl ChatHistory {
     /// Refresh the cached snapshot from the controller when the transcript
     /// revision, mode, or activity changed. A cheap no-op otherwise.
     fn refresh(&self) {
-        let Some(controller) = &self.controller else {
-            return;
-        };
+        let controller = &self.controller;
         let activity = if controller.is_busy() {
             Activity::Thinking
         } else if let Some(label) = controller.loading() {
@@ -251,9 +244,7 @@ impl ChatHistory {
         submission: PromptSubmission,
         cx: &mut Context<'_, Self, AlanAction>,
     ) {
-        let Some(controller) = &mut self.controller else {
-            return;
-        };
+        let controller = &mut self.controller;
 
         // Not trimmed: a leading space means this is a prompt.
         if let Some(command) = SlashCommand::parse(&submission.text) {
@@ -264,19 +255,12 @@ impl ChatHistory {
                 SlashCommand::Plan => controller.set_mode(agent::Mode::Plan),
                 SlashCommand::Review => controller.set_mode(agent::Mode::Review),
                 SlashCommand::Normal => controller.set_mode(agent::Mode::Normal),
-                SlashCommand::Effort => {
-                    self.apply_effort(&submission.text, cx);
-                    return;
-                }
+                SlashCommand::Effort => self.apply_effort(&submission.text, cx),
+
                 SlashCommand::Help => controller.push_info(SlashCommand::help()),
-                SlashCommand::New => {
-                    self.start_new_session(cx);
-                    return;
-                }
-                SlashCommand::SummarizeNew => {
-                    self.start_summarize_new(cx, &submission.text);
-                    return;
-                }
+                SlashCommand::New => self.start_new_session(cx),
+                SlashCommand::SummarizeNew => self.start_summarize_new(cx, &submission.text),
+                SlashCommand::ModelProviders => self.apply_model_provider(cx, &submission.text),
             }
             return;
         }
@@ -290,14 +274,11 @@ impl ChatHistory {
             cx.subscribe_stream(agent_events(stream), |event, chat, cx| {
                 match event {
                     SubscriptionEvent::Item(result) => {
-                        if let Some(controller) = &mut chat.controller {
-                            controller.apply_event(result);
-                        }
+                        chat.controller.apply_event(result);
                     }
                     SubscriptionEvent::Closed => {
-                        if let Some(controller) = &mut chat.controller {
-                            controller.disconnect_stream();
-                        }
+                        chat.controller.disconnect_stream();
+
                         chat.prompt = None;
                     }
                 }
@@ -305,7 +286,7 @@ impl ChatHistory {
                 // (finished, error, or disconnect); while it is still streaming
                 // the fixed-rate ticker owns repaints so a fast token stream
                 // cannot starve scroll input.
-                if chat.controller.as_ref().is_none_or(|c| !c.is_busy()) {
+                if !chat.controller.is_busy() {
                     chat.stream_repaint = None;
                     cx.notify();
                 }
@@ -316,10 +297,10 @@ impl ChatHistory {
 
     /// `/new`: reset to a fresh, empty session.
     fn start_new_session(&mut self, cx: &mut Context<'_, Self, AlanAction>) {
-        let agent = match &self.controller {
-            Some(controller) if !controller.is_busy() => controller.agent(),
-            _ => return,
-        };
+        if self.controller.is_busy() {
+            return;
+        }
+        let agent = self.controller.agent();
         cx.spawn(
             async move {
                 agent
@@ -328,17 +309,73 @@ impl ChatHistory {
                     .map_err(|error| tui::TaskError(Box::new(error)))
             },
             move |result, chat, cx| {
-                if let Some(controller) = &mut chat.controller {
-                    match result {
-                        Ok(()) => {
-                            controller.clear_transcript();
-                            controller.push_info("Started a new session.");
-                        }
-                        Err(error) => {
-                            controller.push_info(format!("failed to start new session: {error}"))
-                        }
+                match result {
+                    Ok(()) => {
+                        chat.controller.clear_transcript();
+                        chat.controller.push_info("Started a new session.");
                     }
+                    Err(error) => chat
+                        .controller
+                        .push_info(format!("failed to start new session: {error}")),
                 }
+
+                cx.notify();
+            },
+        );
+    }
+
+    fn apply_model_provider(&mut self, cx: &mut Context<'_, ChatHistory, AlanAction>, text: &str) {
+        if self.controller.is_busy() {
+            return;
+        }
+        let agent = self.controller.agent();
+
+        let provider_order = match SlashCommand::parse_with_args(text).map(|(_, args)| args) {
+            Some(args) if args.trim().eq_ignore_ascii_case("none") => Ok(Vec::new()),
+            Some(args) => parse_provider_order(args),
+            None => return,
+        };
+        let provider_order = match provider_order {
+            Ok(order) => order,
+            Err(error) => {
+                self.controller.push_info(format!(
+                    "usage: /providers <provider1,provider2,...>: {error}"
+                ));
+
+                return;
+            }
+        };
+
+        cx.spawn(
+            async move {
+                let model_id = agent.info().await.id;
+                agent
+                    .set_provider_order(provider_order.clone())
+                    .await
+                    .map_err(|error| tui::TaskError(Box::new(error)))?;
+
+                persist_provider_order(&model_id, &provider_order)
+                    .await
+                    .map_err(|error| tui::TaskError(error.into()))?;
+
+                Ok::<_, tui::TaskError>(if provider_order.is_empty() {
+                    "provider order cleared (using default)".to_owned()
+                } else {
+                    format!("provider order set to {}", provider_order.join(", "))
+                })
+            },
+            move |result, chat, cx| {
+                let message = match result {
+                    Ok(msg) => msg,
+                    Err(error) => {
+                        chat.controller
+                            .push_info(format!("failed to set provider order: {error}"));
+                        cx.notify();
+                        return;
+                    }
+                };
+                chat.controller.push_info(message);
+
                 cx.notify();
             },
         );
@@ -346,10 +383,10 @@ impl ChatHistory {
 
     /// `/summarize-new [focus]`: summarize, then restart seeded with it.
     fn start_summarize_new(&mut self, cx: &mut Context<'_, Self, AlanAction>, text: &str) {
-        let agent = match &self.controller {
-            Some(controller) if !controller.is_busy() => controller.agent(),
-            _ => return,
-        };
+        if self.controller.is_busy() {
+            return;
+        }
+        let agent = self.controller.agent();
         let focus = SlashCommand::parse_with_args(text)
             .map(|(_, args)| args.trim().to_owned())
             .filter(|args| !args.is_empty());
@@ -357,9 +394,8 @@ impl ChatHistory {
         // Set the loading state before spawning so the status line shows the
         // label immediately; the dot ticker animates it until completion.
         self.view.borrow_mut().loading_dots = 0;
-        if let Some(controller) = &mut self.controller {
-            controller.set_loading(Some("summarizing".to_owned()));
-        }
+        self.controller.set_loading(Some("summarizing".to_owned()));
+
         self.ensure_loading_repaint(cx);
 
         cx.spawn(
@@ -382,14 +418,13 @@ impl ChatHistory {
                 // of outcome; the completion closure runs exactly once.
                 chat.loading_repaint = None;
                 chat.view.borrow_mut().loading_dots = 0;
-                if let Some(controller) = &mut chat.controller {
-                    controller.set_loading(None);
-                    controller.clear_transcript();
-                    match result {
-                        Ok(()) => controller.push_info("Summarized into a new session."),
-                        Err(error) => {
-                            controller.push_info(format!("failed to summarize session: {error}"))
-                        }
+                let controller = &mut chat.controller;
+                controller.set_loading(None);
+                controller.clear_transcript();
+                match result {
+                    Ok(()) => controller.push_info("Summarized into a new session."),
+                    Err(error) => {
+                        controller.push_info(format!("failed to summarize session: {error}"))
                     }
                 }
                 cx.notify();
@@ -402,27 +437,18 @@ impl ChatHistory {
     /// argument, or an unknown one, show usage help instead of failing
     /// silently.
     fn apply_effort(&mut self, text: &str, cx: &mut Context<'_, Self, AlanAction>) {
-        let agent = match &self.controller {
-            Some(controller) if !controller.is_busy() => controller.agent(),
-            _ => {
-                if let Some(controller) = &mut self.controller {
-                    controller.push_info(
-                        "agent is busy: cannot change reasoning effort mid-run".to_owned(),
-                    );
-                }
-                return;
-            }
-        };
+        if self.controller.is_busy() {
+            return;
+        }
+        let agent = self.controller.agent();
 
         let effort = match SlashCommand::parse_with_args(text).map(|(_, args)| args) {
             Some(args) => match SlashCommand::parse_effort(args) {
                 Some(effort) => effort,
                 None => {
-                    if let Some(controller) = &mut self.controller {
-                        controller.push_info(
-                            "usage: /effort <none|minimal|low|medium|high|xhigh|max>".to_owned(),
-                        );
-                    }
+                    self.controller.push_info(
+                        "usage: /effort <none|minimal|low|medium|high|xhigh|max>".to_owned(),
+                    );
                     return;
                 }
             },
@@ -447,20 +473,16 @@ impl ChatHistory {
                 let message = match result {
                     Ok(msg) => msg,
                     Err(error) => {
-                        // The agent rejected the change (e.g. it was busy),
-                        // so the display cache stays where it was.
-                        if let Some(controller) = &mut chat.controller {
-                            controller
-                                .push_info(format!("failed to set reasoning effort: {error}"));
-                        }
+                        chat.controller
+                            .push_info(format!("failed to set reasoning effort: {error}"));
+
                         cx.notify();
                         return;
                     }
                 };
-                if let Some(controller) = &mut chat.controller {
-                    controller.set_reasoning_effort(effort);
-                    controller.push_info(message);
-                }
+                chat.controller.set_reasoning_effort(effort);
+                chat.controller.push_info(message);
+
                 cx.notify();
             },
         );
@@ -470,7 +492,7 @@ impl ChatHistory {
     /// already running. The ticker repaints the transcript at
     /// `STREAM_REPAINT_INTERVAL`; it is cancelled once the run finishes.
     fn ensure_stream_repaint(&mut self, cx: &mut Context<'_, Self, AlanAction>) {
-        if self.stream_repaint.is_some() || !self.controller.as_ref().is_some_and(|c| c.is_busy()) {
+        if self.stream_repaint.is_some() || !self.controller.is_busy() {
             return;
         }
         self.stream_repaint = Some(cx.subscribe_stream(
@@ -487,7 +509,7 @@ impl ChatHistory {
 
     /// Whether an agent run is currently in flight.
     fn is_streaming(&self) -> bool {
-        self.controller.as_ref().is_some_and(|c| c.is_busy())
+        self.controller.is_busy()
     }
 
     /// Start the loading-dot ticker if a blocking operation is in flight and
@@ -510,9 +532,7 @@ impl ChatHistory {
 
     /// Whether a blocking operation is currently in flight.
     pub fn is_loading(&self) -> bool {
-        self.controller
-            .as_ref()
-            .is_some_and(|c| c.loading().is_some())
+        self.controller.loading().is_some()
     }
 
     /// Whether wheel notches are queued and need a flush this tick.
@@ -532,32 +552,28 @@ impl ChatHistory {
         std::mem::take(&mut self.models_requested)
     }
 
-    pub(crate) fn agent(&self) -> Option<std::sync::Arc<agent::Agent>> {
-        self.controller.as_ref().map(|c| c.agent())
+    pub(crate) fn agent(&self) -> Arc<Agent> {
+        self.controller.agent()
+    }
+
+    pub(crate) fn model_name(&self) -> String {
+        self.controller.model_name()
     }
 
     pub(crate) fn apply_model_switch(&mut self, name: String) {
-        if let Some(controller) = &mut self.controller {
-            controller.apply_model_switch(name);
-        }
+        self.controller.apply_model_switch(name);
     }
 
     pub(crate) fn set_max_context(&mut self, max_context: Option<u64>) {
-        if let Some(controller) = &mut self.controller {
-            controller.set_max_context(max_context);
-        }
+        self.controller.set_max_context(max_context);
     }
 
     pub(crate) fn set_reasoning_effort(&mut self, reasoning_effort: llm::ReasoningEffort) {
-        if let Some(controller) = &mut self.controller {
-            controller.set_reasoning_effort(reasoning_effort);
-        }
+        self.controller.set_reasoning_effort(reasoning_effort);
     }
 
     pub(crate) fn apply_model_switch_failed(&mut self, error: String) {
-        if let Some(controller) = &mut self.controller {
-            controller.apply_model_switch_failed(error);
-        }
+        self.controller.apply_model_switch_failed(error);
     }
 
     /// Apply one capped step of queued wheel notches, returning whether the
@@ -624,11 +640,6 @@ impl ChatHistory {
 
     fn scroll_by(&mut self, delta: isize) -> bool {
         self.view.borrow_mut().scroll_by(delta)
-    }
-
-    #[cfg(test)]
-    fn flush_wheel(&mut self) -> bool {
-        self.view.borrow_mut().flush_wheel()
     }
 }
 
@@ -811,21 +822,18 @@ impl Component<AlanAction> for ChatHistory {
                 ActionStatus::Handled
             }
             AlanAction::ToggleMode => {
-                if let Some(controller) = &mut self.controller {
-                    controller.toggle_mode();
-                    cx.notify();
-                }
+                self.controller.toggle_mode();
+                cx.notify();
+
                 ActionStatus::Handled
             }
             // Ctrl-C: cancel the in-flight run by dropping its subscription,
             // otherwise quit.
             AlanAction::Quit => {
-                if self.controller.as_ref().is_some_and(|c| c.is_busy()) {
+                if self.controller.is_busy() {
                     self.prompt = None;
                     self.stream_repaint = None;
-                    if let Some(controller) = &mut self.controller {
-                        controller.finish_stream();
-                    }
+                    self.controller.finish_stream();
                     cx.notify();
                 } else {
                     cx.quit();
@@ -884,9 +892,7 @@ impl Component<AlanAction> for ChatHistory {
 
     fn render(&self, frame: &mut Frame, area: Rect, _cx: &RenderContext<'_, AlanAction>) {
         self.refresh();
-        let Some(controller) = &self.controller else {
-            return;
-        };
+        let controller = &self.controller;
         let mut view = self.view.borrow_mut();
         let Some(snap) = view.snap.clone() else {
             return;
@@ -932,8 +938,6 @@ impl Component<AlanAction> for ChatHistory {
     }
 }
 
-impl ChatHistory {}
-
 /// Emit an item immediately, then one per `MOMENTUM_TICK_INTERVAL`. The
 /// immediate first item removes the startup dead zone so the first notch moves
 /// on the next frame; the stream is owned by the momentum subscription, so it
@@ -978,6 +982,20 @@ fn agent_events(
     })
 }
 
+/// Parse a comma-separated provider list into a non-empty `Vec<String>`,
+/// mirroring `parse_provider_order` in `main.rs`.
+fn parse_provider_order(value: &str) -> anyhow::Result<Vec<String>> {
+    let order = value
+        .split(',')
+        .map(|entry| entry.trim().to_string())
+        .filter(|entry| !entry.is_empty())
+        .collect::<Vec<_>>();
+    if order.is_empty() {
+        return Err(anyhow::anyhow!("provider order must not be empty"));
+    }
+    Ok(order)
+}
+
 /// Write the reasoning effort to `settings.json`. Mirrors `persist_model`
 /// in `chat_view.rs`: load, patch, save. Returns the error so the caller can
 /// report it in the transcript; the save is best-effort and never blocks the
@@ -989,128 +1007,15 @@ async fn persist_reasoning_effort(effort: ReasoningEffort) -> anyhow::Result<()>
     store.save(&settings).await
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    // --- Migrated from `UiState` (scroll / follow / wheel), adapted to the
-    // `RefCell<View>` storage. ---
-
-    fn view<'a>(state: &'a ChatHistory) -> std::cell::Ref<'a, View> {
-        state.view.borrow()
+async fn persist_provider_order(model: &str, provider_order: &[String]) -> anyhow::Result<()> {
+    let store = SettingsStore::<Settings>::new(settings::default_settings_path()?);
+    let mut settings = store.load().await?.unwrap_or_default();
+    if provider_order.is_empty() {
+        settings.provider_orders.remove(model);
+    } else {
+        settings
+            .provider_orders
+            .insert(model.to_owned(), provider_order.to_vec());
     }
-
-    fn view_mut<'a>(state: &'a mut ChatHistory) -> std::cell::RefMut<'a, View> {
-        state.view.borrow_mut()
-    }
-
-    #[test]
-    fn follows_bottom_until_user_scrolls_up() {
-        let mut state = ChatHistory::default();
-        assert_eq!(view_mut(&mut state).sync_scroll(100, 20), 80);
-
-        view_mut(&mut state).scroll_by(-5);
-        assert_eq!(view(&state).scroll_target, 75);
-        assert_eq!(view(&state).scroll_offset, 75);
-        assert!(!view(&state).follow_output);
-        state.tick();
-        assert_eq!(view(&state).scroll_offset, 75);
-
-        assert_eq!(view_mut(&mut state).sync_scroll(120, 20), 75);
-        assert!(!view(&state).follow_output);
-    }
-
-    #[test]
-    fn scrolling_to_bottom_restores_follow_mode() {
-        let mut state = ChatHistory::default();
-        view_mut(&mut state).sync_scroll(100, 20);
-        view_mut(&mut state).scroll_by(-10);
-        view_mut(&mut state).scroll_by(10);
-
-        assert_eq!(view(&state).scroll_target, 80);
-        assert!(view(&state).follow_output);
-        state.tick();
-        assert!(view(&state).follow_output);
-        assert_eq!(view_mut(&mut state).sync_scroll(120, 20), 100);
-    }
-
-    #[test]
-    fn content_shrink_clamps_manual_scroll() {
-        let mut state = ChatHistory::default();
-        view_mut(&mut state).sync_scroll(100, 20);
-        view_mut(&mut state).scroll_by(-10);
-
-        assert_eq!(view_mut(&mut state).sync_scroll(30, 20), 10);
-        assert_eq!(view(&state).scroll_target, 10);
-        assert!(view(&state).follow_output);
-    }
-
-    #[test]
-    fn scrolling_updates_rendered_offset_immediately() {
-        let mut state = ChatHistory::default();
-        view_mut(&mut state).sync_scroll(100, 20);
-        view_mut(&mut state).scroll_by(-10);
-
-        assert_eq!(view(&state).scroll_offset, 70);
-        assert_eq!(view(&state).scroll_target, 70);
-        assert!(!view(&state).follow_output);
-    }
-
-    #[test]
-    fn scroll_at_bottom_is_a_no_op() {
-        let mut state = ChatHistory::default();
-        view_mut(&mut state).sync_scroll(100, 20);
-        // At the bottom already: scrolling down moves nothing.
-        assert!(!view_mut(&mut state).scroll_by(10));
-        assert_eq!(view(&state).scroll_offset, 80);
-    }
-
-    #[test]
-    fn stick_to_bottom_resumes_follow_after_scroll_up() {
-        let mut state = ChatHistory::default();
-        view_mut(&mut state).sync_scroll(100, 20);
-
-        view_mut(&mut state).scroll_by(-20);
-        assert!(!view(&state).follow_output);
-
-        view_mut(&mut state).stick_to_bottom();
-        assert!(view(&state).follow_output);
-        assert_eq!(view(&state).scroll_offset, 80);
-
-        // New content keeps following from here.
-        assert_eq!(view_mut(&mut state).sync_scroll(140, 20), 120);
-        assert!(view(&state).follow_output);
-    }
-
-    #[test]
-    fn wheel_notches_coalesce_and_cap_per_flush() {
-        let mut state = ChatHistory::default();
-        view_mut(&mut state).sync_scroll(200, 20);
-        view_mut(&mut state).scroll_by(-100);
-        assert_eq!(view(&state).scroll_offset, 80);
-
-        // A 100-notch swipe queues without moving the viewport: no redraw per
-        // event.
-        for _ in 0..100 {
-            state.push_wheel(WHEEL_LINES_PER_NOTCH);
-        }
-        assert_eq!(view(&state).pending_wheel, MAX_PENDING_WHEEL);
-
-        // One flush moves at most a viewport-capped step.
-        assert!(state.flush_wheel());
-        assert!(view(&state).scroll_offset > 80);
-        assert!(view(&state).scroll_offset <= 80 + 12);
-    }
-
-    #[test]
-    fn clear_selection_clears_active_selection() {
-        let mut state = ChatHistory::default();
-        let mut sel = Selection::new(TextPosition::new(0, 0));
-        sel.cursor = TextPosition::new(0, 3);
-        view_mut(&mut state).selection = Some(sel);
-        assert!(state.has_active_selection());
-
-        state.clear_selection();
-        assert!(!state.has_active_selection());
-    }
+    store.save(&settings).await
 }

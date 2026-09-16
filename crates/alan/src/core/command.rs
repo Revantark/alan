@@ -16,6 +16,8 @@ pub enum SlashCommand {
     New,
     SummarizeNew,
     Plan,
+    // Specific to openrouter
+    ModelProviders,
     Review,
     Normal,
     Effort,
@@ -71,6 +73,7 @@ impl SlashCommand {
             Self::Normal => "turn off plan and review mode",
             Self::Effort => "set reasoning effort (e.g. /effort high)",
             Self::Help => "list the available commands",
+            Self::ModelProviders => "pick a provider from openrouter for the selected model",
         }
     }
 

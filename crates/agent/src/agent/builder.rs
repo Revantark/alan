@@ -149,7 +149,6 @@ impl AgentBuilder {
         context.hydrate(messages, usage);
 
         let info = self.model.info().clone();
-        let model_id = info.id.clone();
         let reasoning = self.model.reasoning_effort();
         Ok(Agent {
             model: Mutex::new(self.model),
@@ -163,7 +162,6 @@ impl AgentBuilder {
             working_directory: self.working_directory,
             model_info: Mutex::new(info),
             reasoning: AtomicU8::new(reasoning_to_u8(reasoning)),
-            model_id,
         })
     }
 }

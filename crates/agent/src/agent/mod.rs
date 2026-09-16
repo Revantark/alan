@@ -75,7 +75,6 @@ pub struct Agent {
     /// index + 1 (see [`reasoning_to_u8`]). Updated in `set_model` and at
     /// construction time.
     reasoning: AtomicU8,
-    model_id: String,
 }
 
 impl Agent {
@@ -231,10 +230,6 @@ impl Agent {
         }
     }
 
-    pub fn model_id(&self) -> String {
-        self.model_id.clone()
-    }
-
     /// Replace the bound model. The next prompt uses the new model;
     /// the reported model info is updated to match. Fails only if
     /// another prompt currently holds the model lock (i.e. a run is
@@ -284,6 +279,16 @@ impl Agent {
             session.set_model(&info.provider.0, &info.id, reasoning_effort);
             manager.update_header_model(session).await?;
         }
+        Ok(())
+    }
+
+    pub async fn set_provider_order(&self, provider_order: Vec<String>) -> Result<(), AgentError> {
+        let mut model = self.model.try_lock().map_err(|_| {
+            AgentError::Model(providers::ModelError::Llm(llm::LlmError::Configuration(
+                "agent is busy: cannot change provider order mid-run".into(),
+            )))
+        })?;
+        model.set_provider_order(provider_order);
         Ok(())
     }
 }

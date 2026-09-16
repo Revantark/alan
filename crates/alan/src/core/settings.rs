@@ -17,6 +17,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::core::store::JsonStore;
 use llm::ReasoningEffort;
+use std::collections::BTreeMap;
 use std::marker::PhantomData;
 use std::path::PathBuf;
 
@@ -29,7 +30,10 @@ pub struct Settings {
     pub web_fetch: Option<bool>,
     pub web_search: Option<bool>,
     pub reasoning: Option<ReasoningEffort>,
-    pub openrouter_provider_order: Vec<String>,
+    /// Provider order scoped per model id. Absent entry means default
+    /// (OpenRouter routing decides).
+    #[serde(default)]
+    pub provider_orders: BTreeMap<String, Vec<String>>,
     pub provider: Option<String>,
 }
 
@@ -41,7 +45,8 @@ pub struct PatchSettings {
     pub web_fetch: Option<bool>,
     pub web_search: Option<bool>,
     pub reasoning: Option<ReasoningEffort>,
-    pub openrouter_provider_order: Option<Vec<String>>,
+    /// Per-model provider order overrides, merged per key on apply.
+    pub provider_orders: Option<BTreeMap<String, Vec<String>>>,
     pub provider: Option<String>,
 }
 
@@ -114,6 +119,13 @@ impl Settings {
     }
 }
 
+impl Settings {
+    /// The provider order configured for `model`, empty when unset.
+    pub fn provider_order(&self, model: &str) -> Vec<String> {
+        self.provider_orders.get(model).cloned().unwrap_or_default()
+    }
+}
+
 /// Apply a PatchSettings to mutate only specified fields.
 impl Settings {
     pub fn apply_patch(&mut self, patch: PatchSettings) {
@@ -129,11 +141,18 @@ impl Settings {
         if let Some(v) = patch.reasoning {
             self.reasoning = Some(v);
         }
-        if let Some(v) = patch.openrouter_provider_order {
-            self.openrouter_provider_order = v;
+        if let Some(v) = patch.provider_orders {
+            for (model, order) in v {
+                self.provider_orders.insert(model, order);
+            }
         }
         if let Some(v) = patch.provider {
             self.provider = Some(v);
         }
     }
+}
+
+pub async fn get_settings() -> anyhow::Result<Settings> {
+    let store = SettingsStore::<Settings>::new(default_settings_path()?);
+    Ok(store.load().await?.unwrap_or_default())
 }
