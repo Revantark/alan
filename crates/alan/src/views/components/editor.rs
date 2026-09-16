@@ -8,11 +8,12 @@
 use crate::core::completion::token;
 use crate::core::{Completer, CompletionRequest, ImageAttachment, PathsContext, SlashCommand};
 use base64::Engine;
-use crossterm::event::{Event, KeyCode, KeyModifiers};
+use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::Style;
 use ratatui::widgets::{Paragraph, Widget};
+use std::collections::VecDeque;
 use strum::IntoEnumIterator;
 use tui::context::Context;
 use tui::entity::Entity;
@@ -40,6 +41,12 @@ pub struct PromptEditor {
     dismissed: Option<CompletionRequest>,
     /// The completer with its backends.
     completer: Completer,
+    /// User-typed prompts, oldest first, for Up/Down recall. Seeded from the
+    /// restored session in `ChatView::init`, appended on every submit.
+    history: VecDeque<String>,
+    /// Index into `history` of the entry currently shown in the editor.
+    /// `None` means the live draft (what the user is typing) is shown.
+    history_index: Option<usize>,
 }
 
 impl PromptEditor {
@@ -65,7 +72,14 @@ impl PromptEditor {
                         status: crate::core::CompletionStatus::Loading,
                     }),
                 ),
+            history: VecDeque::new(),
+            history_index: None,
         }
+    }
+
+    pub fn seed_history(&mut self, prompts: Vec<String>) {
+        self.history = prompts.into();
+        self.history_index = None;
     }
 
     /// Rows the prompt needs at `width`, accounting for soft wrapping. Mutable
@@ -115,6 +129,17 @@ impl PromptEditor {
             }
             Event::Key(key) if key.code == KeyCode::Enter => {
                 let text = self.editor.lines().join("\n");
+                let trimmed = text.trim().to_owned();
+                // Slash commands are actions, not prompts: they are not
+                // recorded for Up/Down recall.
+                if is_plain_prompt(&trimmed) && self.history.back() != Some(&trimmed) {
+                    self.history.push_back(trimmed);
+                    if self.history.len() > 200 {
+                        self.history.pop_front();
+                    }
+                }
+                // Submitting exits the recall cycle back to the live draft.
+                self.history_index = None;
                 cx.dispatch_parent(&AlanAction::Submit(PromptSubmission {
                     images: std::mem::take(&mut self.attachments),
                     text,
@@ -161,26 +186,88 @@ impl PromptEditor {
                 self.editor.insert_str(text);
                 ActionStatus::Handled
             }
-            event => {
-                let o = self.editor.cursor();
-                let modified = self.editor.input(event);
-                let t = self.editor.cursor();
-                if !modified && o == t {
-                    return ActionStatus::Continue;
+            Event::Key(key) if key.code == KeyCode::Up && key.kind == KeyEventKind::Press => {
+                let buffer = self.editor.lines().join("\n");
+                let cursor_row = self.editor.cursor().0;
+                if let Some(recall) =
+                    recall_up(&self.history, self.history_index, &buffer, cursor_row)
+                {
+                    self.history_index = recall.index;
+                    self.editor.clear();
+                    self.editor.move_cursor(CursorMove::Jump(0, 0));
+                    self.editor.insert_str(&recall.text);
+                    self.editor.move_cursor(CursorMove::End);
+                    refresh_completion(
+                        &mut self.completer,
+                        self.popup,
+                        cx,
+                        &mut self.dismissed,
+                        &mut self.last_trigger,
+                        &mut self.editor,
+                    );
+                    ActionStatus::Handled
+                } else {
+                    self.handle_input_and_refresh(event, cx)
                 }
-                refresh_completion(
-                    &mut self.completer,
-                    self.popup,
-                    cx,
-                    &mut self.dismissed,
-                    &mut self.last_trigger,
-                    &mut self.editor,
-                );
-                ActionStatus::Handled
             }
+            // Down-arrow recall: cycle newer, restoring the live draft when
+            // walking past the newest entry. Only fires when the cursor is
+            // at the bottom of the buffer (last line, last column).
+            Event::Key(key) if key.code == KeyCode::Down && key.kind == KeyEventKind::Press => {
+                let (cursor_row, _) = self.editor.cursor();
+                let at_bottom = {
+                    let lines = self.editor.lines();
+                    cursor_row == lines.len().saturating_sub(1)
+                };
+                if at_bottom {
+                    if let Some(recall) = recall_down(&self.history, self.history_index) {
+                        self.history_index = recall.index;
+                        self.editor.clear();
+                        self.editor.move_cursor(CursorMove::Jump(0, 0));
+                        self.editor.insert_str(&recall.text);
+                        self.editor.move_cursor(CursorMove::End);
+                        refresh_completion(
+                            &mut self.completer,
+                            self.popup,
+                            cx,
+                            &mut self.dismissed,
+                            &mut self.last_trigger,
+                            &mut self.editor,
+                        );
+                        return ActionStatus::Handled;
+                    }
+                }
+                self.handle_input_and_refresh(event, cx)
+            }
+            event => self.handle_input_and_refresh(event, cx),
         };
         self.sync_command_highlight();
         status
+    }
+
+    /// Apply the event to the editor. If nothing actually changed, let the
+    /// event propagate (`Continue`); otherwise refresh the completion popup.
+    fn handle_input_and_refresh(
+        &mut self,
+        event: Event,
+        cx: &mut Context<'_, Self, AlanAction>,
+    ) -> ActionStatus {
+        let o = self.editor.cursor();
+        let modified = self.editor.input(event);
+        let t = self.editor.cursor();
+        if !modified && o == t {
+            ActionStatus::Continue
+        } else {
+            refresh_completion(
+                &mut self.completer,
+                self.popup,
+                cx,
+                &mut self.dismissed,
+                &mut self.last_trigger,
+                &mut self.editor,
+            );
+            ActionStatus::Handled
+        }
     }
 
     fn sync_command_highlight(&mut self) {
@@ -289,6 +376,73 @@ impl PromptEditor {
         self.editor.delete_str(chars);
         self.editor.insert_str(text);
     }
+}
+
+/// Result of a successful Up/Down recall step: the new cycle index and the
+/// text to load into the editor.
+struct Recall {
+    index: Option<usize>,
+    text: String,
+}
+
+/// Decide whether Up should trigger recall and, if so, what to load.
+///
+/// `history` is oldest→newest, `index` is the entry currently shown (`None`
+/// means the live draft is shown), `buffer` is the current editor contents,
+/// and `cursor_row` is the cursor row. Returns `None` to fall through to
+/// normal cursor movement.
+fn recall_up(
+    history: &VecDeque<String>,
+    index: Option<usize>,
+    buffer: &str,
+    cursor_row: usize,
+) -> Option<Recall> {
+    let matches_current = index
+        .and_then(|i| history.get(i))
+        .is_some_and(|entry| entry == buffer);
+    let fire = match index {
+        None => buffer.trim().is_empty() && cursor_row == 0 && !history.is_empty(),
+        Some(i) => i > 0 && matches_current && cursor_row == 0,
+    };
+    if !fire {
+        return None;
+    }
+    let next = match index {
+        None => history.len() - 1, // first Up: load the newest entry
+        Some(i) => i - 1,
+    };
+    Some(Recall {
+        index: Some(next),
+        text: history[next].clone(),
+    })
+}
+
+/// Decide whether Down should trigger recall and, if so, what to load.
+///
+/// Walking past the newest entry exits the cycle (`index = None`) and loads
+/// an empty buffer. Returns `None` to fall through to normal cursor movement.
+fn recall_down(history: &VecDeque<String>, index: Option<usize>) -> Option<Recall> {
+    match index {
+        Some(i) if i + 1 < history.len() => Some(Recall {
+            index: Some(i + 1),
+            text: history[i + 1].clone(),
+        }),
+        Some(_) => Some(Recall {
+            index: None,
+            text: String::new(),
+        }),
+        None => None,
+    }
+}
+
+/// Whether `text` is a plain prompt worth recording for Up/Down recall.
+///
+/// Slash commands are actions, not prompts, so they are excluded. This is
+/// the same predicate used at ingestion time (the editor's Enter branch and
+/// the seed from the restored session), so the recall deque stays clean and
+/// the cycle index arithmetic never has to skip entries.
+pub(crate) fn is_plain_prompt(text: &str) -> bool {
+    !text.is_empty() && SlashCommand::parse(text).is_none()
 }
 
 impl Default for PromptEditor {
@@ -539,4 +693,98 @@ fn is_multiline_enter(key: crossterm::event::KeyEvent) -> bool {
             && (key.modifiers.contains(KeyModifiers::SHIFT)
                 || key.modifiers.contains(KeyModifiers::CONTROL)
                 || key.modifiers.contains(KeyModifiers::ALT)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn slash_commands_are_excluded_from_history() {
+        assert!(!is_plain_prompt("/help"));
+        assert!(!is_plain_prompt("/models"));
+        assert!(!is_plain_prompt("/effort high"));
+        assert!(!is_plain_prompt("/summarize-new"));
+        // `SlashCommand::parse` does not trim, so leading whitespace means the
+        // line is not a command and is recorded as a plain prompt.
+        assert!(is_plain_prompt("  /login"));
+        assert!(is_plain_prompt("  /models"));
+        assert!(!is_plain_prompt("/models  "));
+        assert!(is_plain_prompt("hello world"));
+        assert!(is_plain_prompt("/notacommand"));
+        assert!(!is_plain_prompt(""));
+    }
+
+    fn hist(items: &[&str]) -> VecDeque<String> {
+        items.iter().map(|s| s.to_string()).collect()
+    }
+
+    // History ["hello", "hi"] (hi is newest). Two Ups -> "hello", two Downs ->
+    // empty. This is the exact scenario the user reported.
+    #[test]
+    fn up_down_cycle_to_empty() {
+        let history = hist(&["hello", "hi"]);
+
+        // Empty buffer, cursor on row 0, first Up -> load newest.
+        let r = recall_up(&history, None, "", 0).unwrap();
+        assert_eq!(r.index, Some(1));
+        assert_eq!(r.text, "hi");
+
+        // Buffer matches the shown entry ("hi"), second Up -> older.
+        let r = recall_up(&history, Some(1), "hi", 0).unwrap();
+        assert_eq!(r.index, Some(0));
+        assert_eq!(r.text, "hello");
+
+        // Down from "hello" -> newer.
+        let r = recall_down(&history, Some(0)).unwrap();
+        assert_eq!(r.index, Some(1));
+        assert_eq!(r.text, "hi");
+
+        // Down from the newest -> exit the cycle and load an empty buffer.
+        let r = recall_down(&history, Some(1)).unwrap();
+        assert_eq!(r.index, None);
+        assert_eq!(r.text, "");
+    }
+
+    #[test]
+    fn up_does_not_fire_on_nonempty_buffer() {
+        // Per spec, Up only fires when the editor is empty. A non-empty draft
+        // is left untouched and Up falls through to cursor movement.
+        let history = hist(&["hello", "hi"]);
+        assert!(recall_up(&history, None, "draft", 0).is_none());
+    }
+
+    #[test]
+    fn up_does_not_fire_when_buffer_edited() {
+        let history = hist(&["hello", "hi"]);
+        // Buffer differs from the shown entry ("hi") -> no recall, falls
+        // through to cursor movement.
+        assert!(recall_up(&history, Some(1), "hi edited", 0).is_none());
+    }
+
+    #[test]
+    fn up_does_not_fire_when_cursor_not_on_first_row() {
+        let history = hist(&["hello", "hi"]);
+        // Empty buffer but cursor on row 1 (e.g. a stray newline) -> no recall.
+        assert!(recall_up(&history, None, "", 1).is_none());
+    }
+
+    #[test]
+    fn up_does_not_fire_on_empty_history() {
+        let history = hist(&[]);
+        assert!(recall_up(&history, None, "", 0).is_none());
+    }
+
+    #[test]
+    fn up_does_not_fire_at_oldest_entry() {
+        let history = hist(&["hello", "hi"]);
+        // At index 0 (oldest) -> no older entry to walk to.
+        assert!(recall_up(&history, Some(0), "hello", 0).is_none());
+    }
+
+    #[test]
+    fn down_is_noop_when_not_recalling() {
+        let history = hist(&["hello", "hi"]);
+        assert!(recall_down(&history, None).is_none());
+    }
 }

@@ -25,7 +25,7 @@ use tui::context::Context;
 use tui::entity::Entity;
 
 use super::chat_history::ChatHistory;
-use super::editor::PromptEditor;
+use super::editor::{PromptEditor, is_plain_prompt};
 use super::status::{STATUS_HEIGHT, StatusSnapshot, render_status};
 
 /// Blank rows between the status line and the prompt cursor.
@@ -161,15 +161,27 @@ impl Component<AlanAction> for ChatView {
     where
         Self: Sized,
     {
-        self.chat = Some(
-            cx.insert(
-                self.chat_source
-                    .take()
-                    .expect("chat component installed once"),
-            ),
-        );
-        self.editor = Some(cx.insert(PromptEditor::new()));
-        cx.focus_entity(self.editor.expect("editor entity"));
+        let chat = self
+            .chat_source
+            .take()
+            .expect("chat component installed once");
+        let mut editor = PromptEditor::new();
+        let prompts: Vec<String> = chat
+            .entries()
+            .iter()
+            .filter_map(|e| match e {
+                // Defensive: `Entry::Prompt` is normally plain prompts only,
+                // but filter anyway so the recall deque stays clean if the
+                // contract changes.
+                crate::core::Entry::Prompt(text) if is_plain_prompt(text) => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
+        editor.seed_history(prompts);
+        self.chat = Some(cx.insert(chat));
+        self.editor = Some(cx.insert(editor));
+        let editor_entity = self.editor.expect("editor entity");
+        cx.focus_entity(editor_entity);
 
         let chat_entity = self.chat.expect("chat installed before spawn");
         let providers_for_fetch = Arc::clone(&self.providers);

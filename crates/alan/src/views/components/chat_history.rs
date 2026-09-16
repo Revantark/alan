@@ -6,7 +6,7 @@
 //! PageUp / PageDown input, which the root dispatches to it.
 
 use crate::core::settings::{self, Settings, SettingsStore};
-use crate::core::{Activity, ChatController, SlashCommand};
+use crate::core::{Activity, ChatController, Entry, SlashCommand};
 use crate::root::{AlanAction, PromptSubmission};
 use crate::views::selection;
 use crate::views::selection::{Selection, TextPosition};
@@ -234,6 +234,10 @@ impl ChatHistory {
     pub fn snapshot(&self) -> Option<ChatSnapshot> {
         self.refresh();
         self.view.borrow().snap.clone()
+    }
+
+    pub fn entries(&self) -> &[Entry] {
+        &self.controller.entries()
     }
 
     /// Route a submission: slash commands act on the controller (login is
