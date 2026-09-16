@@ -80,7 +80,7 @@ impl ChatView {
         cx: &mut Context<'_, Self, AlanAction>,
     ) {
         let providers = Arc::clone(&self.providers);
-        let picker = cx.open_overlay(ModelsPicker::new("Models", model_labels(&providers)));
+        let picker = cx.open_overlay(ModelsPicker::new("Select Model", model_labels(&providers)));
 
         let providers_for_fetch = Arc::clone(&providers);
         let providers_for_items = Arc::clone(&providers);

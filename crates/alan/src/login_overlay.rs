@@ -4,10 +4,11 @@ use crate::views::theme;
 use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers};
 use providers::{AuthMethod, AuthResult, CredentialStore, ProviderId, ProviderRegistry};
 use ratatui::Frame;
-use ratatui::layout::{Constraint, Layout, Margin, Rect};
-use ratatui::style::Style;
-use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::Paragraph;
+use ratatui::layout::Rect;
+use ratatui::layout::Alignment;
+use ratatui::style::{Color, Modifier, Style};
+use ratatui::text::{Line, Span};
+use ratatui::widgets::{Block, BorderType, Clear, Paragraph, Wrap};
 use std::sync::Arc;
 use tui::context::Context;
 use tui::{ActionStatus, Component, RenderContext};
@@ -226,6 +227,14 @@ impl Component<AlanAction> for LoginOverlay {
                         self.move_selection(1);
                         cx.notify();
                     }
+                    KeyCode::Char('p') if key.modifiers == KeyModifiers::CONTROL => {
+                        self.move_selection(-1);
+                        cx.notify();
+                    }
+                    KeyCode::Char('n') if key.modifiers == KeyModifiers::CONTROL => {
+                        self.move_selection(1);
+                        cx.notify();
+                    }
                     KeyCode::Enter => self.on_enter(cx),
                     KeyCode::Esc => self.dismiss(cx),
                     KeyCode::Backspace => {
@@ -254,108 +263,231 @@ impl Component<AlanAction> for LoginOverlay {
     }
 
     fn render(&self, frame: &mut Frame, area: Rect, _cx: &RenderContext<'_, AlanAction>) {
-        let area = centered_rect(70, 60, area);
-        frame.render_widget(ratatui::widgets::Clear, area);
-        frame.render_widget(
-            Paragraph::new("").style(Style::default().bg(theme::EDITOR_BG)),
-            area,
-        );
-
-        let [content_area, shortcuts_area] =
-            Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(area.inner(
-                Margin {
-                    horizontal: 2,
-                    vertical: 1,
-                },
-            ));
-
-        match &self.state {
-            LoginState::Selecting {
-                providers,
-                selected,
-            } => {
-                let items = providers
-                    .iter()
-                    .enumerate()
-                    .map(|(index, provider)| {
-                        let marker = if index == *selected { "› " } else { "  " };
-                        Line::from(vec![
-                            Span::styled(marker, Style::default().fg(theme::PROMPT_FG)),
-                            Span::styled(
-                                provider.name.clone(),
-                                Style::default().fg(theme::EDITOR_FG),
-                            ),
-                        ])
-                    })
-                    .collect::<Vec<_>>();
-                frame.render_widget(Paragraph::new(Text::from(items)), content_area);
-                draw_shortcuts(
-                    frame,
-                    shortcuts_area,
-                    "↑↓ select · Enter confirm · Esc cancel",
-                );
-            }
-            LoginState::Prompting { input, .. } => {
-                let value = "•".repeat(input.chars().count());
-                let prompt_line = Line::from("Enter API key");
-                let input_line = Line::from(vec![
-                    Span::styled("› ", Style::default().fg(theme::PROMPT_FG)),
-                    Span::styled(value.clone(), Style::default().fg(theme::EDITOR_FG)),
-                ]);
-                let content = Text::from(vec![prompt_line, Line::default(), input_line]);
-                frame.render_widget(Paragraph::new(content), content_area);
-                draw_shortcuts(frame, shortcuts_area, "Enter submit · Esc cancel");
-
-                let input_width = Line::from(value.as_str()).width() as u16;
-                let cursor_x = content_area
-                    .x
-                    .saturating_add(2)
-                    .saturating_add(input_width)
-                    .min(content_area.right().saturating_sub(1));
-                frame.set_cursor_position((cursor_x, content_area.y + 2));
-            }
-            LoginState::Validating { message, .. } => {
-                frame.render_widget(Paragraph::new(message.as_str()), content_area);
-                draw_shortcuts(frame, shortcuts_area, "Esc cancel");
-            }
-            LoginState::Success => {
-                frame.render_widget(Paragraph::new(String::from("Logged in")), content_area);
-                draw_shortcuts(frame, shortcuts_area, "Esc close");
-            }
-            LoginState::Error(message) => {
-                frame.render_widget(
-                    Paragraph::new(message.as_str())
-                        .style(Style::default().fg(ratatui::style::Color::Red)),
-                    content_area,
-                );
-                draw_shortcuts(frame, shortcuts_area, "Esc close");
-            }
-        }
+        render_login(frame, area, &self.state);
     }
 }
 
-fn draw_shortcuts(frame: &mut Frame, area: Rect, text: &str) {
+fn render_login(frame: &mut Frame, area: Rect, state: &LoginState) {
+    let width = area.width.saturating_sub(4).min(88);
+    let height = area.height.saturating_sub(2).min(18);
+    if width < 12 || height < 6 {
+        return;
+    }
+    let popup = Rect::new(
+        area.x + (area.width - width) / 2,
+        area.y + (area.height - height) / 2,
+        width,
+        height,
+    );
+    let accent = Style::default().fg(theme::PROMPT_FG);
+    let muted = Style::default().fg(theme::TOOL_FG);
+    let (heading, footer) = match state {
+        LoginState::Selecting { .. } => (
+            "Choose a provider".to_owned(),
+            if width >= 60 {
+                " ↑↓ / C-n C-p move   Enter select   Esc close "
+            } else if width >= 38 {
+                " ↑↓ move · Enter select · Esc close "
+            } else {
+                " Enter / Esc "
+            },
+        ),
+        LoginState::Prompting { provider_id, .. } => (
+            format!("{} / API key", provider_id.0),
+            if width >= 38 {
+                " Enter sign in · Esc cancel "
+            } else {
+                " Enter / Esc "
+            },
+        ),
+        LoginState::Validating { .. } => ("Signing in…".to_owned(), " Esc close "),
+        LoginState::Success => ("Signed in".to_owned(), " Enter / Esc close "),
+        LoginState::Error(_) => ("Sign-in failed".to_owned(), " Enter / Esc close "),
+    };
+    let title = vec![Span::styled(" Login ", accent.add_modifier(Modifier::BOLD))];
+    let block = Block::bordered()
+        .border_type(BorderType::Rounded)
+        .border_style(accent)
+        .style(Style::default().bg(Color::Reset).fg(theme::USER_FG))
+        .title(Line::from(title))
+        .title_alignment(Alignment::Center)
+        .title_bottom(Line::from(footer).style(muted));
+    let inner = block.inner(popup);
+    frame.render_widget(Clear, popup);
+    frame.render_widget(block, popup);
     frame.render_widget(
-        Paragraph::new(Line::from(Span::styled(
-            text,
-            Style::default().fg(theme::MUTED_FG),
-        ))),
+        Paragraph::new(Line::from(vec![
+            Span::styled(" ❯ ", accent),
+            Span::raw(heading),
+        ])),
+        Rect::new(inner.x, inner.y, inner.width, 1),
+    );
+    frame.render_widget(
+        Paragraph::new("─".repeat(inner.width as usize)).style(muted),
+        Rect::new(inner.x, inner.y + 1, inner.width, 1),
+    );
+    let content = Rect::new(
+        inner.x,
+        inner.y + 2,
+        inner.width,
+        inner.height.saturating_sub(2),
+    );
+    match state {
+        LoginState::Selecting {
+            providers,
+            selected,
+        } => {
+            let rows = content.height as usize;
+            let start = selected
+                .saturating_sub(rows / 2)
+                .min(providers.len().saturating_sub(rows));
+            let lines: Vec<Line> = providers
+                .iter()
+                .skip(start)
+                .take(rows)
+                .enumerate()
+                .map(|(offset, provider)| {
+                    let active = start + offset == *selected;
+                    let style = if active {
+                        Style::default()
+                            .bg(theme::SELECTION_BG)
+                            .fg(theme::SELECTION_FG)
+                            .add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().fg(theme::EDITOR_FG)
+                    };
+
+                    let prefix = if active { ">  " } else { "   " };
+                    let current_len = (prefix.chars().count() + provider.name.chars().count()) as u16;
+                    let padding_len = width.saturating_sub(current_len) as usize;
+                    let padding = " ".repeat(padding_len);
+                    Line::from(vec![
+                        Span::styled(prefix, accent),
+                        Span::raw(provider.name.as_str()),
+                        Span::styled(padding, style),
+                    ])
+                    .style(style)
+                })
+                .collect();
+            if providers.is_empty() {
+                frame.render_widget(
+                    Paragraph::new("  No providers available").style(muted),
+                    content,
+                );
+            } else {
+                frame.render_widget(Paragraph::new(lines), content);
+            }
+        }
+        LoginState::Prompting { input, .. } => {
+            let visible = input
+                .chars()
+                .count()
+                .min(content.width.saturating_sub(4) as usize);
+            let value = if input.is_empty() {
+                Span::styled("Paste or type your API key", muted)
+            } else {
+                Span::raw("•".repeat(visible))
+            };
+            frame.render_widget(
+                Paragraph::new(Line::from(vec![Span::styled(" ❯ ", accent), value])),
+                content,
+            );
+            frame.set_cursor_position((content.x + 3 + visible as u16, content.y));
+        }
+        LoginState::Validating { message } => render_message(frame, content, message, muted),
+        LoginState::Success => render_message(
+            frame,
+            content,
+            "Logged in successfully",
+            Style::default().fg(theme::TOOL_DONE_FG),
+        ),
+        LoginState::Error(message) => render_message(
+            frame,
+            content,
+            message,
+            Style::default().fg(theme::TOOL_ERROR_FG),
+        ),
+    }
+}
+
+fn render_message(frame: &mut Frame, area: Rect, message: &str, style: Style) {
+    let area = Rect::new(
+        area.x + 1,
+        area.y,
+        area.width.saturating_sub(2),
+        area.height,
+    );
+    frame.render_widget(
+        Paragraph::new(message)
+            .style(style)
+            .wrap(Wrap { trim: false }),
         area,
     );
 }
 
-fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
-    let horizontal: [Rect; 3] = Layout::horizontal([
-        Constraint::Percentage((100 - percent_x) / 2),
-        Constraint::Percentage(percent_x),
-        Constraint::Percentage((100 - percent_x) / 2),
-    ])
-    .areas(area);
-    let vertical: [Rect; 3] = Layout::vertical([
-        Constraint::Percentage((100 - percent_y) / 2),
-        Constraint::Percentage(percent_y),
-        Constraint::Percentage((100 - percent_y) / 2),
-    ])
-    .areas(horizontal[1]);
-    vertical[1]
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ratatui::{Terminal, backend::TestBackend};
+
+    #[test]
+    fn provider_selection_scrolls_into_view() {
+        let state = LoginState::Selecting {
+            providers: (0..30)
+                .map(|i| LoginProvider {
+                    id: ProviderId(format!("provider-{i:02}")),
+                    name: format!("provider-{i:02}"),
+                })
+                .collect(),
+            selected: 29,
+        };
+        for (width, height) in [(100, 30), (45, 12), (20, 8), (8, 3)] {
+            let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+            terminal
+                .draw(|frame| render_login(frame, frame.area(), &state))
+                .unwrap();
+            let buffer = terminal.backend().buffer();
+            let screen: String = buffer.content.iter().map(|cell| cell.symbol()).collect();
+            if width >= 20 {
+                assert!(screen.contains("provider-29"));
+                assert!(
+                    buffer
+                        .content
+                        .iter()
+                        .any(|cell| cell.bg == theme::SELECTION_BG)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn login_states_render_with_terminal_background() {
+        let states = [
+            LoginState::Prompting {
+                provider_id: ProviderId("example".into()),
+                auth_method: AuthMethod::ApiKey,
+                input: "secret-key".repeat(80),
+            },
+            LoginState::Selecting {
+                providers: Vec::new(),
+                selected: 0,
+            },
+            LoginState::Validating {
+                message: "Validating credentials…".into(),
+            },
+            LoginState::Success,
+            LoginState::Error("Could not authenticate. Check your API key.".into()),
+        ];
+        for state in states {
+            let mut terminal = Terminal::new(TestBackend::new(45, 12)).unwrap();
+            terminal
+                .draw(|frame| render_login(frame, frame.area(), &state))
+                .unwrap();
+            let buffer = terminal.backend().buffer();
+            assert!(buffer.content.iter().all(|cell| cell.bg == Color::Reset));
+            let screen: String = buffer.content.iter().map(|cell| cell.symbol()).collect();
+            assert!(screen.contains("Login"));
+            assert!(!screen.contains("secret-key"));
+        }
+    }
 }
