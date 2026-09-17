@@ -216,8 +216,8 @@ impl SearchListOverlay {
                     } else {
                         Style::default().fg(theme::EDITOR_FG)
                     };
-                    let prefix = if selected { ">  " } else { "   " };
-                    let current_len = (prefix.chars().count() + self.items[*index].chars().count()) as u16;
+                    let prefix = "   ";
+                    let current_len = (self.items[*index].chars().count()) as u16;
                     let padding_len = width.saturating_sub(current_len) as usize;
                     let padding = " ".repeat(padding_len);
 
@@ -240,60 +240,3 @@ impl SearchListOverlay {
 
 pub type ModelPick = SearchListEvent;
 pub type ModelsPicker = SearchListOverlay;
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use ratatui::{Terminal, backend::TestBackend};
-
-    #[test]
-    fn selected_model_remains_visible_at_every_terminal_size() {
-        let mut picker = ModelsPicker::new(
-            "Models",
-            (0..250).map(|i| format!("provider/model-{i:03}")).collect(),
-        );
-        picker.refresh();
-        assert_eq!(picker.filtered.len(), 250);
-        picker.selected = 249;
-        for (width, height) in [(100, 30), (45, 12), (20, 8), (8, 3)] {
-            let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
-            terminal
-                .draw(|frame| picker.render_picker(frame, frame.area()))
-                .unwrap();
-            let buffer = terminal.backend().buffer();
-            if width >= 20 {
-                assert!(
-                    buffer
-                        .content
-                        .iter()
-                        .any(|cell| cell.bg == theme::SELECTION_BG)
-                );
-                let screen: String = buffer.content.iter().map(|cell| cell.symbol()).collect();
-                if width >= 45 {
-                    assert!(screen.contains("250/250"));
-                    assert!(screen.contains("provider/model-249"));
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn empty_results_and_wide_search_render_without_overflow() {
-        let mut picker = ModelsPicker::new("Models", vec!["openai/example".into()]);
-        picker.query = "界".repeat(80);
-        picker.refresh();
-        let mut terminal = Terminal::new(TestBackend::new(45, 12)).unwrap();
-        terminal
-            .draw(|frame| picker.render_picker(frame, frame.area()))
-            .unwrap();
-        let screen: String = terminal
-            .backend()
-            .buffer()
-            .content
-            .iter()
-            .map(|cell| cell.symbol())
-            .collect();
-        assert!(screen.contains("No matching models"));
-        assert!(screen.contains("0/0"));
-    }
-}

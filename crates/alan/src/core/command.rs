@@ -16,6 +16,8 @@ pub enum SlashCommand {
     New,
     SummarizeNew,
     Plan,
+    // Fork this session from a checkpoint.
+    Fork,
     // Specific to openrouter
     ModelProviders,
     Review,
@@ -72,6 +74,7 @@ impl SlashCommand {
             Self::Review => "turn on review mode (also Shift+Tab)",
             Self::Normal => "turn off plan and review mode",
             Self::Effort => "set reasoning effort (e.g. /effort high)",
+            Self::Fork => "fork this session from a checkpoint",
             Self::Help => "list the available commands",
             Self::ModelProviders => "pick a provider from openrouter for the selected model",
         }
@@ -134,6 +137,12 @@ mod tests {
         assert_eq!(SlashCommand::parse("/logn"), None);
         assert_eq!(SlashCommand::parse(""), None);
         assert_eq!(SlashCommand::parse("/"), None);
+    }
+
+    #[test]
+    fn parses_fork_command_with_and_without_argument() {
+        assert_eq!(SlashCommand::parse("/fork"), Some(SlashCommand::Fork));
+        assert_eq!(SlashCommand::parse("/fork now"), Some(SlashCommand::Fork));
     }
 
     /// Otherwise everything after the break is silently discarded. A bare `\r`

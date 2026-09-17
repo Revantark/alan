@@ -12,9 +12,10 @@ use providers::{ModelInfo, ProviderId, ProviderRegistry, bind_model};
 
 use crate::core::settings::{self, Settings, SettingsStore};
 use crate::root::AlanAction;
-use crate::views::components::{ModelPick, ModelsPicker};
+use crate::views::components::{ForkEvent, ForkOverlay, ModelPick, ModelsPicker};
 use crate::views::theme;
 use crossterm::event::{Event, KeyCode, KeyEventKind};
+use llm::Usage;
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::Style;
@@ -39,6 +40,21 @@ const EDITOR_BOTTOM_PAD: u16 = 1;
 #[derive(Debug, Clone, Copy)]
 pub struct LoginRequested;
 
+/// Plain prompts from transcript entries, oldest first, for the editor's
+/// Up/Down recall history.
+fn recall_prompts(entries: &[crate::core::Entry]) -> Vec<String> {
+    entries
+        .iter()
+        .filter_map(|e| match e {
+            // Defensive: `Entry::Prompt` is normally plain prompts only,
+            // but filter anyway so the recall deque stays clean if the
+            // contract changes.
+            crate::core::Entry::Prompt(text) if is_plain_prompt(text) => Some(text.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
 /// The chat column: transcript, attachments, status, and prompt editor.
 pub struct ChatView {
     /// The transcript component to install on `init`; taken when inserted.
@@ -47,6 +63,11 @@ pub struct ChatView {
     editor: Option<Entity<PromptEditor>>,
     providers: Arc<ProviderRegistry>,
     model_subscription: Option<tui::Subscription>,
+    /// True while a fork is in flight, so a second `/fork` (or a re-opened
+    /// overlay result) cannot race the in-flight `fork_session`. Set when the
+    /// overlay opens; cleared by a Cancelled event, the spawn completion
+    /// closure, or a missing agent.
+    fork_in_flight: bool,
 }
 
 impl ChatView {
@@ -57,6 +78,7 @@ impl ChatView {
             editor: None,
             providers,
             model_subscription: None,
+            fork_in_flight: false,
         }
     }
 
@@ -154,6 +176,70 @@ impl ChatView {
             },
         ));
     }
+
+    /// Open the `/fork` overlay. The session snapshot is loaded asynchronously
+    /// before the overlay is constructed so `ForkOverlay::init` has no async
+    /// work to do; a missing agent renders as an empty checkpoint list.
+    fn open_fork_overlay(
+        &mut self,
+        chat: Entity<ChatHistory>,
+        cx: &mut Context<'_, Self, AlanAction>,
+    ) {
+        let Some(agent) = cx.read(chat, |c| c.agent()) else {
+            return;
+        };
+        self.fork_in_flight = true;
+        let picker = cx.open_overlay(ForkOverlay::new(Arc::clone(&agent)));
+        cx.subscribe_once::<ForkEvent, ForkOverlay, _>(picker, move |_event, view, _picker, cx| {
+            let ForkEvent::Chosen { end_index } = *_event else {
+                // Closing the picker without choosing must release the
+                // latch, otherwise every later `/fork` is rejected.
+                view.fork_in_flight = false;
+                return;
+            };
+            let Some(agent) = cx.read(chat, |c| c.agent()) else {
+                view.fork_in_flight = false;
+                return;
+            };
+            let _ = cx.spawn(
+                async move {
+                    agent
+                        .fork_session(end_index)
+                        .await
+                        .map_err(|e| tui::TaskError(Box::new(e)))?;
+                    let messages = agent.messages().await;
+                    Ok::<_, tui::TaskError>(messages)
+                },
+                move |result, view, cx| {
+                    view.fork_in_flight = false;
+                    match result {
+                        Ok(messages) => {
+                            let _ = cx.update(chat, |c| {
+                                c.apply_restored(
+                                    messages,
+                                    Usage::default(),
+                                    c.model_name(),
+                                    c.max_context(),
+                                )
+                            });
+                            let _ = cx.update(chat, |c| c.push_info("forked session".to_owned()));
+                            if let Some(editor) = view.editor {
+                                let prompts = cx
+                                    .read(chat, |c| recall_prompts(c.entries()))
+                                    .unwrap_or_default();
+                                cx.update(editor, |e| e.seed_history(prompts));
+                            }
+                        }
+                        Err(error) => {
+                            let _ = cx
+                                .update(chat, |c| c.push_info(format!("failed to fork: {error}")));
+                        }
+                    }
+                    cx.notify();
+                },
+            );
+        });
+    }
 }
 
 impl Component<AlanAction> for ChatView {
@@ -166,17 +252,7 @@ impl Component<AlanAction> for ChatView {
             .take()
             .expect("chat component installed once");
         let mut editor = PromptEditor::new();
-        let prompts: Vec<String> = chat
-            .entries()
-            .iter()
-            .filter_map(|e| match e {
-                // Defensive: `Entry::Prompt` is normally plain prompts only,
-                // but filter anyway so the recall deque stays clean if the
-                // contract changes.
-                crate::core::Entry::Prompt(text) if is_plain_prompt(text) => Some(text.clone()),
-                _ => None,
-            })
-            .collect();
+        let prompts: Vec<String> = recall_prompts(chat.entries());
         editor.seed_history(prompts);
         self.chat = Some(cx.insert(chat));
         self.editor = Some(cx.insert(editor));
@@ -239,6 +315,13 @@ impl Component<AlanAction> for ChatView {
                     .unwrap_or(false)
                 {
                     self.open_models_picker(chat, cx);
+                }
+                // `/fork` opens the fork overlay. Ignored while a fork is
+                // already in flight so a second `/fork` cannot race it.
+                if cx.update(chat, |c| c.take_fork_request()).unwrap_or(false)
+                    && !self.fork_in_flight
+                {
+                    self.open_fork_overlay(chat, cx);
                 }
                 status
             }

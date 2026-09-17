@@ -105,6 +105,8 @@ pub struct ChatHistory {
     /// without deadlocking on the parent's locked slot.
     login_requested: bool,
     models_requested: bool,
+    /// Set when a `/fork` submission needs the parent to open the fork overlay.
+    fork_requested: bool,
     /// Self-scheduled momentum ticker, alive only while wheel notches are
     /// draining (plus a short idle grace). Dropping it cancels the ticker.
     momentum: Option<Subscription>,
@@ -177,6 +179,7 @@ impl ChatHistory {
             loading_repaint: None,
             login_requested: false,
             models_requested: false,
+            fork_requested: false,
             momentum: None,
             momentum_idle: 0,
         }
@@ -256,6 +259,7 @@ impl ChatHistory {
                 // The root owns the login overlay; flag it to open on return.
                 SlashCommand::Login => self.login_requested = true,
                 SlashCommand::Models => self.models_requested = true,
+                SlashCommand::Fork => self.request_fork(&submission.text),
                 SlashCommand::Plan => controller.set_mode(agent::Mode::Plan),
                 SlashCommand::Review => controller.set_mode(agent::Mode::Review),
                 SlashCommand::Normal => controller.set_mode(agent::Mode::Normal),
@@ -326,6 +330,25 @@ impl ChatHistory {
                 cx.notify();
             },
         );
+    }
+
+    /// `/fork`: open the fork overlay. Busy streams are rejected outright; the
+    /// overlay itself is owned by the parent (see `take_fork_request`).
+    fn request_fork(&mut self, text: &str) {
+        if self.controller.is_busy() {
+            self.controller
+                .push_info("cannot fork while a response is streaming".to_owned());
+            return;
+        }
+        // `/fork` takes no arguments; anything after the command is a usage
+        // error rather than a silently ignored prompt.
+        if let Some((_, args)) = SlashCommand::parse_with_args(text)
+            && !args.trim().is_empty()
+        {
+            self.controller.push_info("usage: /fork".to_owned());
+            return;
+        }
+        self.fork_requested = true;
     }
 
     fn apply_model_provider(&mut self, cx: &mut Context<'_, ChatHistory, AlanAction>, text: &str) {
@@ -556,6 +579,12 @@ impl ChatHistory {
         std::mem::take(&mut self.models_requested)
     }
 
+    /// Take the pending `/fork` request, if any. Read by the parent after it
+    /// dispatches a submission so it can open the fork overlay.
+    pub(crate) fn take_fork_request(&mut self) -> bool {
+        std::mem::take(&mut self.fork_requested)
+    }
+
     pub(crate) fn agent(&self) -> Arc<Agent> {
         self.controller.agent()
     }
@@ -578,6 +607,27 @@ impl ChatHistory {
 
     pub(crate) fn apply_model_switch_failed(&mut self, error: String) {
         self.controller.apply_model_switch_failed(error);
+    }
+
+    /// Rebuild the visible transcript from a message snapshot. Used by the
+    /// fork completion path, which cannot `await` inside an update closure.
+    pub(crate) fn apply_restored(
+        &mut self,
+        messages: Vec<agent::AgentMessage>,
+        usage: llm::Usage,
+        model_name: String,
+        max_context: Option<u64>,
+    ) {
+        self.controller
+            .apply_restored(messages, usage, model_name, max_context);
+    }
+
+    pub(crate) fn push_info(&mut self, text: impl Into<String>) {
+        self.controller.push_info(text);
+    }
+
+    pub(crate) fn max_context(&self) -> Option<u64> {
+        self.controller.max_context()
     }
 
     /// Apply one capped step of queued wheel notches, returning whether the

@@ -2,7 +2,7 @@
 
 use super::action::ImageAttachment;
 
-use agent::{Agent, AgentEvent, AgentStream};
+use agent::{Agent, AgentEvent, AgentMessage, AgentStream};
 use llm::{ReasoningEffort, Usage};
 use providers::{AuthError, ModelError};
 use std::sync::Arc;
@@ -88,9 +88,22 @@ impl ChatController {
         let messages = self.agent.messages().await;
         let usage = self.agent.usage().await;
         let info = self.agent.info().await;
-        self.model_name = info.name;
+        self.apply_restored(messages, usage, info.name, info.context_length);
+    }
+
+    /// Sync half of [`restore_session_history`]: rebuild the visible
+    /// transcript and cached metadata from a snapshot already in hand. Used by
+    /// the fork completion path, which cannot `await` inside an update closure.
+    pub fn apply_restored(
+        &mut self,
+        messages: Vec<AgentMessage>,
+        usage: Usage,
+        model_name: String,
+        max_context: Option<u64>,
+    ) {
+        self.model_name = model_name;
         self.usage = usage;
-        self.max_context = info.context_length;
+        self.max_context = max_context;
         self.reasoning_effort = self.agent.reasoning_effort();
         self.entries.clear();
 

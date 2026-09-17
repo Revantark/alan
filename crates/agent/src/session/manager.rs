@@ -150,6 +150,52 @@ impl SessionManager {
         Ok(session)
     }
 
+    /// Create a new session whose messages are `messages[..up_to]`. The new
+    /// session's `parent` is `source.id` and its usage starts empty; model
+    /// identity and working directory are inherited from the source.
+    ///
+    /// `messages` is supplied by the caller rather than read from
+    /// `source.messages`, because the persisted session record's message vec
+    /// is empty for freshly started sessions — the live conversation lives in
+    /// the agent's context. `up_to` must be a valid index into `messages`
+    /// (including `messages.len()`).
+    ///
+    /// This is the persistence half of a fork: the caller is responsible for
+    /// swapping the agent's in-memory state to match the returned session.
+    pub async fn fork(
+        &self,
+        source: &Session,
+        messages: &[AgentMessage],
+        up_to: usize,
+    ) -> Result<Session, SessionError> {
+        if up_to > messages.len() {
+            return Err(SessionError::MalformedRecord {
+                path: PathBuf::from(&source.id),
+                reason: format!(
+                    "fork index {up_to} exceeds source message count {}",
+                    messages.len()
+                ),
+            });
+        }
+        let mut session = self
+            .create(
+                source.pwd.clone(),
+                source.provider.clone(),
+                source.model.clone(),
+                source.thinking_level,
+                Some(source.id.clone()),
+            )
+            .await?;
+        for message in &messages[..up_to] {
+            self.append_message(&session.id, &session.pwd, message)
+                .await?;
+        }
+        // `create` returns a session with an empty messages vec; populate it
+        // from the prefix so the caller gets a complete snapshot.
+        session.messages = messages[..up_to].to_vec();
+        Ok(session)
+    }
+
     /// Persist an updated model identity by rewriting the session
     /// header record. The session's messages and usage records are
     /// untouched.
@@ -278,6 +324,7 @@ fn parse_header(
 mod tests {
     use super::*;
     use crate::context::AgentMessage;
+    use llm::LlmResponse;
 
     fn temp_root(name: &str) -> PathBuf {
         let dir =
@@ -296,6 +343,70 @@ mod tests {
             output_tokens: output,
             ..Usage::default()
         }
+    }
+
+    async fn make_session(
+        manager: &SessionManager,
+        pwd: &Path,
+        provider: &str,
+        model: &str,
+    ) -> Session {
+        manager
+            .create(
+                pwd.to_path_buf(),
+                provider.to_owned(),
+                model.to_owned(),
+                ReasoningEffort::None,
+                None,
+            )
+            .await
+            .expect("create session")
+    }
+
+    async fn append_user(manager: &SessionManager, session: &Session, text: &str) {
+        manager
+            .append_message(
+                &session.id,
+                &session.pwd,
+                &AgentMessage::User {
+                    text: text.to_owned(),
+                    images: Vec::new(),
+                },
+            )
+            .await
+            .expect("append user message")
+    }
+
+    async fn append_assistant(manager: &SessionManager, session: &Session) {
+        manager
+            .append_message(
+                &session.id,
+                &session.pwd,
+                &AgentMessage::Assistant(LlmResponse {
+                    content: Vec::new(),
+                    stop_reason: llm::StopReason::Stop,
+                    usage: None,
+                    model: None,
+                    reasoning: None,
+                    reasoning_details: Vec::new(),
+                }),
+            )
+            .await
+            .expect("append assistant message");
+    }
+
+    /// Convenience: build a session with a couple of user turns so fork tests
+    /// have a non-trivial history to slice. Reloaded so the returned session
+    /// carries the full message list (`create` returns an empty one).
+    async fn seeded_session(manager: &SessionManager, pwd: &Path) -> Session {
+        let session = make_session(manager, pwd, "o", "m").await;
+        append_user(manager, &session, "first").await;
+        append_assistant(manager, &session).await;
+        append_user(manager, &session, "second").await;
+        manager
+            .get_session(&session.id, &session.pwd)
+            .await
+            .expect("reload seeded session")
     }
 
     fn session_file(root: &Path, pwd: &str, id: &str) -> PathBuf {
@@ -714,6 +825,145 @@ mod tests {
             .await
             .expect("load");
         assert_eq!(loaded.parent, Some("018e".to_owned()));
+        cleanup(&root);
+    }
+
+    /// Forking with `up_to == 0` creates an empty child session that still
+    /// records the parent and inherits the source's model identity.
+    #[tokio::test]
+    async fn fork_empty_prefix_records_parent() {
+        let root = temp_root("fork-empty");
+        let manager = SessionManager::new(&root);
+        let source = make_session(&manager, Path::new("/tmp/p"), "o", "m").await;
+        append_user(&manager, &source, "hello").await;
+
+        let forked = manager
+            .fork(&source, &source.messages, 0)
+            .await
+            .expect("fork");
+        assert_eq!(forked.parent, Some(source.id.clone()));
+        assert_eq!(forked.provider, "o");
+        assert_eq!(forked.model, "m");
+        assert!(forked.messages.is_empty());
+
+        let loaded = manager
+            .get_session(&forked.id, Path::new("/tmp/p"))
+            .await
+            .expect("load forked");
+        assert_eq!(loaded.parent, Some(source.id.clone()));
+        assert!(loaded.messages.is_empty());
+        cleanup(&root);
+    }
+
+    /// Forking with `up_to == len` copies the entire history into the child.
+    #[tokio::test]
+    async fn fork_full_prefix_copies_history() {
+        let root = temp_root("fork-full");
+        let manager = SessionManager::new(&root);
+        let source = seeded_session(&manager, Path::new("/tmp/p")).await;
+
+        let forked = manager
+            .fork(&source, &source.messages, source.messages.len())
+            .await
+            .expect("fork");
+        assert_eq!(forked.parent, Some(source.id.clone()));
+        assert_eq!(forked.messages.len(), source.messages.len());
+
+        let loaded = manager
+            .get_session(&forked.id, Path::new("/tmp/p"))
+            .await
+            .expect("load forked");
+        assert_eq!(loaded.messages.len(), source.messages.len());
+        assert_eq!(loaded.usage, Usage::default());
+        cleanup(&root);
+    }
+
+    /// A fork at an interior index copies only the prefix; the child is
+    /// independent of the source going forward.
+    #[tokio::test]
+    async fn fork_interior_prefix_is_independent() {
+        let root = temp_root("fork-interior");
+        let manager = SessionManager::new(&root);
+        let source = seeded_session(&manager, Path::new("/tmp/p")).await;
+
+        let forked = manager
+            .fork(&source, &source.messages, 2)
+            .await
+            .expect("fork");
+        assert_eq!(forked.messages.len(), 2);
+        assert_eq!(forked.messages[0], source.messages[0]);
+        assert_eq!(forked.messages[1], source.messages[1]);
+
+        // The child's file must not contain the third message.
+        let loaded = manager
+            .get_session(&forked.id, Path::new("/tmp/p"))
+            .await
+            .expect("load forked");
+        assert_eq!(loaded.messages.len(), 2);
+
+        // Appending to the child must not touch the source.
+        append_user(&manager, &loaded, "child-only").await;
+        let reloaded_source = manager
+            .get_session(&source.id, Path::new("/tmp/p"))
+            .await
+            .expect("reload source");
+        assert_eq!(reloaded_source.messages.len(), 3);
+        cleanup(&root);
+    }
+
+    /// The message slice is read from the caller's context, not from the
+    /// persisted session record: for a freshly started session the record's
+    /// message vec is empty and never populated, so forking must not read it.
+    #[tokio::test]
+    async fn fork_uses_supplied_messages_not_record() {
+        let root = temp_root("fork-live");
+        let manager = SessionManager::new(&root);
+        let source = make_session(&manager, Path::new("/tmp/p"), "o", "m").await;
+        append_user(&manager, &source, "first").await;
+        append_user(&manager, &source, "second").await;
+
+        // The record's message vec is empty, exactly like a fresh session.
+        assert!(source.messages.is_empty());
+
+        // The live context supplies the real history.
+        let live = vec![
+            AgentMessage::User {
+                text: "first".to_owned(),
+                images: Vec::new(),
+            },
+            AgentMessage::User {
+                text: "second".to_owned(),
+                images: Vec::new(),
+            },
+        ];
+
+        let forked = manager.fork(&source, &live, 2).await.expect("fork");
+        assert_eq!(forked.messages.len(), 2);
+
+        let loaded = manager
+            .get_session(&forked.id, Path::new("/tmp/p"))
+            .await
+            .expect("load forked");
+        assert_eq!(loaded.messages.len(), 2);
+        cleanup(&root);
+    }
+
+    /// An out-of-range index is a hard error rather than a silent truncation.
+    #[tokio::test]
+    async fn fork_out_of_range_is_error() {
+        let root = temp_root("fork-range");
+        let manager = SessionManager::new(&root);
+        let source = make_session(&manager, Path::new("/tmp/p"), "o", "m").await;
+        append_user(&manager, &source, "first").await;
+
+        let err = manager
+            .fork(&source, &source.messages, source.messages.len() + 1)
+            .await
+            .expect_err("should error");
+        assert!(
+            err.to_string().contains("exceeds source message count"),
+            "unexpected error: {err}"
+        );
         cleanup(&root);
     }
 

@@ -54,6 +54,15 @@ fn reasoning_from_u8(value: u8) -> ReasoningEffort {
     }
 }
 
+/// Build a [`SessionError`] for the "no session" case, since `SessionError`
+/// has no dedicated variant for it.
+fn no_session_error(reason: &str) -> AgentError {
+    AgentError::Session(crate::session::SessionError::MalformedRecord {
+        path: PathBuf::from("<agent>"),
+        reason: reason.to_owned(),
+    })
+}
+
 pub struct Agent {
     pub(super) model: Mutex<Model>,
     pub(super) context: Mutex<crate::context::AgentContext>,
@@ -176,6 +185,34 @@ impl Agent {
             .await
             .as_ref()
             .map(|session| session.id.clone())
+    }
+
+    /// Fork the active session at a message index: create a new session file
+    /// whose messages are `active.messages[..up_to]`, swap the agent's
+    /// in-memory conversation and session identity to that fork, and return
+    /// the new session. `parent` is set to the source session's id.
+    pub async fn fork_session(&self, up_to: usize) -> Result<Session, AgentError> {
+        let manager = self
+            .session_manager
+            .as_ref()
+            .ok_or_else(|| no_session_error("no session manager configured"))?;
+        let source = self.active_session.lock().await.clone();
+        let Some(source) = source else {
+            return Err(no_session_error("no active session to fork"));
+        };
+
+        let messages = self.context.lock().await.messages.clone();
+        let forked = manager.fork(&source, &messages, up_to).await?;
+
+        // Swap the agent's identity and in-memory conversation to the fork.
+        *self.session_id.lock().await = forked.id.clone();
+        let mut context = self.context.lock().await;
+        context.messages = messages[..up_to].to_vec();
+        context.usage = Usage::default();
+        drop(context);
+        *self.active_session.lock().await = Some(forked.clone());
+
+        Ok(forked)
     }
 
     pub fn set_mode(&self, mode: Mode) {

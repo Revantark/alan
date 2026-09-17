@@ -4,8 +4,8 @@ use crate::views::theme;
 use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers};
 use providers::{AuthMethod, AuthResult, CredentialStore, ProviderId, ProviderRegistry};
 use ratatui::Frame;
-use ratatui::layout::Rect;
 use ratatui::layout::Alignment;
+use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Clear, Paragraph, Wrap};
@@ -357,8 +357,9 @@ fn render_login(frame: &mut Frame, area: Rect, state: &LoginState) {
                         Style::default().fg(theme::EDITOR_FG)
                     };
 
-                    let prefix = if active { ">  " } else { "   " };
-                    let current_len = (prefix.chars().count() + provider.name.chars().count()) as u16;
+                    let prefix = "   ";
+                    let current_len =
+                        (prefix.chars().count() + provider.name.chars().count()) as u16;
                     let padding_len = width.saturating_sub(current_len) as usize;
                     let padding = " ".repeat(padding_len);
                     Line::from(vec![
