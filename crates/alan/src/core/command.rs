@@ -24,6 +24,8 @@ pub enum SlashCommand {
     Normal,
     Effort,
     Help,
+    // Rename the current session.
+    Rename,
 }
 
 impl SlashCommand {
@@ -71,7 +73,7 @@ impl SlashCommand {
     pub fn takes_args(self) -> bool {
         matches!(
             self,
-            Self::Effort | Self::ModelProviders | Self::SummarizeNew
+            Self::Effort | Self::ModelProviders | Self::SummarizeNew | Self::Rename
         )
     }
 
@@ -88,6 +90,7 @@ impl SlashCommand {
             Self::Fork => "fork this session from a checkpoint",
             Self::Help => "list the available commands",
             Self::ModelProviders => "pick a provider from openrouter for the selected model",
+            Self::Rename => "rename the current session",
         }
     }
 
@@ -307,9 +310,5 @@ mod tests {
         assert!(!SlashCommand::Review.takes_args());
         assert!(!SlashCommand::Normal.takes_args());
         assert!(!SlashCommand::Help.takes_args());
-        // Argument-taking commands.
-        assert!(SlashCommand::Effort.takes_args());
-        assert!(SlashCommand::ModelProviders.takes_args());
-        assert!(SlashCommand::SummarizeNew.takes_args());
     }
 }

@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-pub const SESSION_SCHEMA_VERSION: u16 = 1;
+pub const SESSION_SCHEMA_VERSION: u16 = 2;
 
 pub(crate) fn now_ms() -> u64 {
     SystemTime::now()
@@ -32,6 +32,9 @@ pub struct Session {
     /// lines without this field deserialize to `None`.
     #[serde(default)]
     pub parent: Option<String>,
+    /// Human-readable session name. `None` for sessions without a name.
+    #[serde(default)]
+    pub name: Option<String>,
 }
 
 impl Session {
@@ -41,6 +44,7 @@ impl Session {
         model: impl Into<String>,
         thinking_level: ReasoningEffort,
         parent: Option<String>,
+        name: Option<String>,
     ) -> Self {
         let now = now_ms();
         Self {
@@ -55,6 +59,7 @@ impl Session {
             created_at_ms: now,
             updated_at_ms: now,
             parent,
+            name,
         }
     }
 
@@ -70,7 +75,15 @@ impl Session {
             created_at_ms: self.created_at_ms,
             updated_at_ms: self.updated_at_ms,
             parent: self.parent.clone(),
+            name: self.name.clone(),
         }
+    }
+
+    /// Update the session's name. Only the in-memory copy changes;
+    /// persisting is the caller's job (see [`SessionManager::rename_session`]).
+    pub fn set_name(&mut self, name: String) {
+        self.name = Some(name);
+        self.updated_at_ms = now_ms();
     }
 
     /// Apply one replayed record to this in-memory session.
@@ -118,6 +131,8 @@ pub enum SessionRecord {
         updated_at_ms: u64,
         #[serde(default)]
         parent: Option<String>,
+        #[serde(default)]
+        name: Option<String>,
     },
     Message {
         message: AgentMessage,
@@ -211,6 +226,7 @@ mod tests {
             "test-model",
             ReasoningEffort::None,
             None,
+            None,
         );
         session.created_at_ms = 1_000;
         session.updated_at_ms = 2_000;
@@ -226,6 +242,7 @@ mod tests {
                 created_at_ms,
                 updated_at_ms,
                 parent,
+                name,
             } => {
                 assert_eq!(schema_version, SESSION_SCHEMA_VERSION);
                 assert_eq!(id, session.id);
@@ -236,6 +253,7 @@ mod tests {
                 assert_eq!(created_at_ms, 1_000);
                 assert_eq!(updated_at_ms, 2_000);
                 assert_eq!(parent, None);
+                assert_eq!(name, None);
             }
             other => panic!("expected header record, got {other:?}"),
         }
@@ -250,10 +268,11 @@ mod tests {
 \"provider\":\"openrouter\",\"model\":\"test-model\",\"thinking_level\":\"none\",\
 \"created_at_ms\":1,\"updated_at_ms\":2}";
         let record = SessionRecord::parse(line).expect("parse");
-        let SessionRecord::Session { parent, .. } = record else {
+        let SessionRecord::Session { parent, name, .. } = record else {
             panic!("expected session header, got {record:?}");
         };
         assert_eq!(parent, None);
+        assert_eq!(name, None);
     }
 
     /// A header with a parent round-trips through JSONL.
@@ -265,13 +284,15 @@ mod tests {
             "test-model",
             ReasoningEffort::None,
             Some("018e".to_owned()),
+            None,
         );
         let line = session.header_record().to_jsonl().expect("serialize");
         let record = SessionRecord::parse(line.trim_end()).expect("parse");
-        let SessionRecord::Session { parent, .. } = record else {
+        let SessionRecord::Session { parent, name, .. } = record else {
             panic!("expected session header, got {record:?}");
         };
         assert_eq!(parent, Some("018e".to_owned()));
+        assert_eq!(name, None);
     }
 
     #[test]
@@ -281,6 +302,7 @@ mod tests {
             "openrouter",
             "test-model",
             ReasoningEffort::None,
+            None,
             None,
         );
 
@@ -311,6 +333,7 @@ mod tests {
             "old-model",
             ReasoningEffort::None,
             Some("018e".to_owned()),
+            None,
         );
         session.created_at_ms = 1_000;
         session.updated_at_ms = 1_000;
@@ -320,6 +343,25 @@ mod tests {
         assert_eq!(session.provider, "new-provider");
         assert_eq!(session.model, "new-model");
         assert_eq!(session.thinking_level, ReasoningEffort::High);
+        assert!(session.updated_at_ms > 1_000);
+    }
+
+    #[test]
+    fn set_name_updates_name_and_timestamp() {
+        let mut session = Session::new(
+            "/tmp/project",
+            "openrouter",
+            "test-model",
+            ReasoningEffort::None,
+            None,
+            None,
+        );
+        session.created_at_ms = 1_000;
+        session.updated_at_ms = 1_000;
+
+        session.set_name("my session".to_owned());
+
+        assert_eq!(session.name, Some("my session".to_owned()));
         assert!(session.updated_at_ms > 1_000);
     }
 }

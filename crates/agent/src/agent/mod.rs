@@ -303,6 +303,17 @@ impl Agent {
         Ok(())
     }
 
+    /// Rename the active session. Only the in-memory copy changes;
+    /// persisting is the caller's job (see [`SessionManager::rename_session`]).
+    pub async fn rename_session(&self, name: &str) -> Result<(), AgentError> {
+        let mut active = self.active_session.lock().await;
+        if let (Some(manager), Some(session)) = (&self.session_manager, &mut *active) {
+            session.set_name(name.to_owned());
+            manager.rename_session(session).await?;
+        }
+        Ok(())
+    }
+
     /// Update the reasoning effort on the bound model. The change takes
     /// effect on the next prompt; in-flight runs already hold the model and
     /// are unaffected. Fails only if another prompt currently holds the model

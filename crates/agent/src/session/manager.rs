@@ -44,7 +44,7 @@ impl SessionManager {
     ) -> Result<Session, SessionError> {
         let pwd = normalize(pwd.into())?;
         let key = pwd_key(&pwd);
-        let session = Session::new(pwd, provider, model, thinking_level, parent);
+        let session = Session::new(pwd, provider, model, thinking_level, parent, None);
         validate_session_id(&session.id)?;
         let path = self.file_path(&key, &session.id);
         // `file_path` always builds `root/key/name.jsonl`, so parent is
@@ -214,6 +214,23 @@ impl SessionManager {
         Ok(())
     }
 
+    /// Rename the session by rewriting the session header record
+    /// with the new name.
+    pub async fn rename_session(&self, session: &Session) -> Result<(), SessionError> {
+        let key = pwd_key(&session.pwd);
+        let path = self.file_path(&key, &session.id);
+        let header =
+            session
+                .header_record()
+                .to_jsonl()
+                .map_err(|source| SessionError::Serialize {
+                    path: path.clone(),
+                    source,
+                })?;
+        JsonlStore::rewrite_first_line(&path, &header).await?;
+        Ok(())
+    }
+
     async fn append_record(
         &self,
         session_id: &str,
@@ -273,6 +290,7 @@ fn parse_header(
         created_at_ms,
         updated_at_ms,
         parent,
+        name,
     } = record
     else {
         return Err(SessionError::InvalidHeader {
@@ -317,6 +335,7 @@ fn parse_header(
         created_at_ms,
         updated_at_ms: updated_at_ms.max(created_at_ms),
         parent,
+        name,
     })
 }
 
@@ -649,7 +668,7 @@ mod tests {
 
         // Simulate a second create racing onto the same id: the exclusive
         // file creation must refuse rather than truncate the existing file.
-        let mut collision = Session::new(pwd, "o", "m", ReasoningEffort::None, None);
+        let mut collision = Session::new(pwd, "o", "m", ReasoningEffort::None, None, None);
         collision.id = session.id.clone();
         collision.created_at_ms = 123_456;
         collision.updated_at_ms = 123_456;
@@ -682,7 +701,7 @@ mod tests {
         let content = std::fs::read_to_string(&path).unwrap();
         std::fs::write(
             &path,
-            content.replace(r#""version":1,"#, r#""version":99,"#),
+            content.replace(r#""version":2,"#, r#""version":99,"#),
         )
         .unwrap();
         let err = manager
@@ -725,7 +744,7 @@ mod tests {
     async fn append_to_missing_session_fails() {
         let root = temp_root("missing-append");
         let manager = SessionManager::new(&root);
-        let session = Session::new("/tmp/p", "o", "m", ReasoningEffort::None, None);
+        let session = Session::new("/tmp/p", "o", "m", ReasoningEffort::None, None, None);
 
         let err = manager
             .append_message(&session.id, &session.pwd, &AgentMessage::user("hi"))

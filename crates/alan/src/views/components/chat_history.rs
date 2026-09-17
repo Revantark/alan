@@ -269,6 +269,7 @@ impl ChatHistory {
                 SlashCommand::New => self.start_new_session(cx),
                 SlashCommand::SummarizeNew => self.start_summarize_new(cx, &submission.text),
                 SlashCommand::ModelProviders => self.apply_model_provider(cx, &submission.text),
+                SlashCommand::Rename => self.rename_session(cx, &submission.text),
             }
             return;
         }
@@ -508,6 +509,47 @@ impl ChatHistory {
                     }
                 };
                 chat.controller.set_reasoning_effort(effort);
+                chat.controller.push_info(message);
+
+                cx.notify();
+            },
+        );
+    }
+
+    /// `/rename <name>`: rename the current session.
+    fn rename_session(&mut self, cx: &mut Context<'_, Self, AlanAction>, text: &str) {
+        let args = SlashCommand::parse_with_args(text)
+            .map(|(_, args)| args.trim().to_owned())
+            .filter(|args| !args.is_empty());
+        let name = match args {
+            Some(name) => name,
+            None => {
+                self.controller
+                    .push_info("usage: /rename <name>".to_owned());
+                return;
+            }
+        };
+        let agent = self.controller.agent();
+        cx.spawn(
+            async move {
+                agent
+                    .rename_session(&name)
+                    .await
+                    .map_err(|error| tui::TaskError(Box::new(error)))?;
+
+                Ok::<_, tui::TaskError>(format!("Session renamed to {name}"))
+            },
+            move |result, chat, cx| {
+                let message = match result {
+                    Ok(msg) => msg,
+                    Err(error) => {
+                        chat.controller
+                            .push_info(format!("failed to rename session: {error}"));
+
+                        cx.notify();
+                        return;
+                    }
+                };
                 chat.controller.push_info(message);
 
                 cx.notify();
