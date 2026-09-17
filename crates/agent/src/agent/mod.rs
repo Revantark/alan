@@ -68,6 +68,7 @@ pub struct Agent {
     pub(super) context: Mutex<crate::context::AgentContext>,
     pub(super) mode: AtomicU8,
     pub(super) review_intro_pending: AtomicBool,
+    pub(super) plan_intro_pending: AtomicBool,
     pub(super) max_tool_rounds: usize,
     /// Stable identifier used for LLM prompt caching.
     /// When no session manager is configured this is a random UUID;
@@ -219,6 +220,8 @@ impl Agent {
         self.mode.store(mode.as_u8(), Ordering::Release);
         self.review_intro_pending
             .store(mode == Mode::Review, std::sync::atomic::Ordering::Release);
+        self.plan_intro_pending
+            .store(mode == Mode::Plan, std::sync::atomic::Ordering::Release);
     }
 
     pub fn mode(&self) -> Mode {
@@ -229,6 +232,14 @@ impl Agent {
     /// first prompt after review mode was entered.
     pub(super) fn take_review_intro(&self) -> bool {
         self.review_intro_pending
+            .swap(false, std::sync::atomic::Ordering::AcqRel)
+    }
+
+    /// Take the pending plan-intro flag. Returns true only for the first
+    /// prompt after plan mode was entered, so the full plan instruction is
+    /// sent once and later messages get only a short reminder.
+    pub(super) fn take_plan_intro(&self) -> bool {
+        self.plan_intro_pending
             .swap(false, std::sync::atomic::Ordering::AcqRel)
     }
 

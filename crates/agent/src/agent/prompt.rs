@@ -48,7 +48,8 @@ pub(super) fn spawn_prompt_task(
     tokio::spawn(async move {
         let mode = agent.mode();
         let review_intro = mode == Mode::Review && agent.take_review_intro();
-        let user_msg = build_user_message(content, images, mode, review_intro);
+        let plan_intro = mode == Mode::Plan && agent.take_plan_intro();
+        let user_msg = build_user_message(content, images, mode, review_intro, plan_intro);
         let mut partial = String::new();
         let mut cx = PromptCx {
             events: Some(&tx),
@@ -205,12 +206,10 @@ pub(super) async fn stream_round(
     model: &Model,
     context: &mut AgentContext,
     cx: &mut PromptCx<'_>,
-    mode: Mode,
 ) -> Result<(LlmResponse, Option<Usage>), AgentError> {
     let tools: Vec<_> = context
         .tools
         .iter()
-        .filter(|tool| mode == Mode::Normal || tool.read_only || tool.definition.name == "bash")
         .map(|tool| ToolSpec::Function(tool.definition.clone()))
         .collect();
 
@@ -318,15 +317,16 @@ fn build_messages(context: &AgentContext) -> Vec<Message> {
     messages
 }
 
-/// Build a user message, applying the plan-mode suffix, the review-mode
-/// guidelines, and optional images.
+/// Build a user message, applying the plan-mode intro/reminder, the
+/// review-mode guidelines, and optional images.
 pub(super) fn build_user_message(
     content: String,
     images: Vec<llm::ImageUrl>,
     mode: Mode,
     review_intro: bool,
+    plan_intro: bool,
 ) -> AgentMessage {
-    let text = prompt_content(content, mode, review_intro);
+    let text = prompt_content(content, mode, review_intro, plan_intro);
     if images.is_empty() {
         AgentMessage::user(text)
     } else {
@@ -334,10 +334,15 @@ pub(super) fn build_user_message(
     }
 }
 
-fn prompt_content(content: impl Into<String>, mode: Mode, review_intro: bool) -> String {
+fn prompt_content(
+    content: impl Into<String>,
+    mode: Mode,
+    review_intro: bool,
+    plan_intro: bool,
+) -> String {
     let content = content.into();
     let mut text = match mode {
-        Mode::Plan => format!("{content}\n\n{}", plan_suffix()),
+        Mode::Plan => format!("{content}\n\n{}", plan_text(plan_intro)),
         _ => content,
     };
     if review_intro {
@@ -346,9 +351,46 @@ fn prompt_content(content: impl Into<String>, mode: Mode, review_intro: bool) ->
     text
 }
 
-fn plan_suffix() -> &'static str {
-    "Plan mode is on, do not edit any files."
+/// Plan-mode text. The first plan message in a session carries the full
+/// two-phase instruction (investigate + ask first, then the plan template);
+/// later messages only get a short reminder so the conversation stays cheap.
+fn plan_text(intro: bool) -> &'static str {
+    if intro { PLAN_INTRO } else { PLAN_REMINDER }
 }
+
+const PLAN_INTRO: &str = "\
+Plan mode is on — do not edit any files.
+
+First, investigate with read-only tools and bash to understand the request. \
+Then remove every uncertainty:
+- If you can close a gap by exploring, do it — never assume.
+- If only the user can decide, ask a specific question.
+Do NOT present a plan yet. Only after the user has resolved every open \
+question should you present the plan below.
+
+When it is time, the plan must contain:
+- Gaps: what was vague, and how each was resolved by investigation (or \
+promoted to a question above).
+- Goal: one crisp sentence, no hedging.
+- Non-goals: explicitly out of scope.
+- Scope: files involved, with absolute paths.
+- Open questions: only what the user must decide; never assume.
+- Options: at least two approaches, including one fundamentally different \
+path; reject all but the recommended, with why.
+- Recommendation: the chosen option plus ordered, concrete execution steps.
+- Verification (mandatory): the exact tests/commands proving the core idea \
+works. Implementation is not done until these pass; never claim success \
+without them. UI is the only exception, which the user verifies manually.
+- Impact: blast radius, backward-compat / public-API risk.
+- Risks: what could go wrong, and follow-ups.
+- Effort/Risk: S/M/L, low/med/high.
+
+Note: Each point should have line break in between them and idea is to go from \
+vague idea to implementable detailed idea";
+
+const PLAN_REMINDER: &str = "\
+Plan mode is still on — do not edit any files. Continue resolving open \
+questions, or present the plan once all are settled.";
 
 /// Guidelines attached to the first user message after review mode is
 /// entered. Appended after the plan suffix when both are active.

@@ -113,6 +113,28 @@ impl PromptEditor {
         editor
     }
 
+    /// Submit the current editor text as a prompt, recording it in
+    /// history if it is a plain prompt and not a duplicate, then
+    /// dispatching [`AlanAction::Submit`] to the parent.
+    fn submit_text(&mut self, text: String, cx: &mut Context<'_, Self, AlanAction>) {
+        let trimmed = text.trim().to_owned();
+        // Slash commands are actions, not prompts: they are not
+        // recorded for Up/Down recall.
+        if is_plain_prompt(&trimmed) && self.history.back() != Some(&trimmed) {
+            self.history.push_back(trimmed);
+            if self.history.len() > 200 {
+                self.history.pop_front();
+            }
+        }
+        // Submitting exits the recall cycle back to the live draft.
+        self.history_index = None;
+        cx.dispatch_parent(&AlanAction::Submit(PromptSubmission {
+            images: std::mem::take(&mut self.attachments),
+            text,
+        }));
+        self.editor.clear();
+    }
+
     fn handle_event(
         &mut self,
         event: Event,
@@ -129,22 +151,7 @@ impl PromptEditor {
             }
             Event::Key(key) if key.code == KeyCode::Enter => {
                 let text = self.editor.lines().join("\n");
-                let trimmed = text.trim().to_owned();
-                // Slash commands are actions, not prompts: they are not
-                // recorded for Up/Down recall.
-                if is_plain_prompt(&trimmed) && self.history.back() != Some(&trimmed) {
-                    self.history.push_back(trimmed);
-                    if self.history.len() > 200 {
-                        self.history.pop_front();
-                    }
-                }
-                // Submitting exits the recall cycle back to the live draft.
-                self.history_index = None;
-                cx.dispatch_parent(&AlanAction::Submit(PromptSubmission {
-                    images: std::mem::take(&mut self.attachments),
-                    text,
-                }));
-                self.editor.clear();
+                self.submit_text(text, cx);
                 ActionStatus::Handled
             }
             Event::Key(key)
@@ -632,6 +639,18 @@ impl Component<AlanAction> for PromptEditor {
                             let Some(item) = result.items.get(*index) else {
                                 return;
                             };
+                            let command_text = format!("/{}", item.replacement);
+                            if let Some((command, _args)) =
+                                SlashCommand::parse_with_args(&command_text)
+                                && !command.takes_args()
+                            {
+                                editor.dismissed = None;
+                                cx.update(popup, |popup| popup.set(false, None, Vec::new()));
+                                cx.focus_entity(cx.entity());
+                                editor.submit_text(command_text, cx);
+                                cx.notify();
+                                return;
+                            }
                             editor.insert_completion(&item.replacement, result.range);
                             editor.dismissed = None;
                         }

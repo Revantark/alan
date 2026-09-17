@@ -25,8 +25,7 @@ pub(super) async fn run_with(
         cx.check_cancelled()?;
 
         let session_id = agent.session_id.lock().await.clone();
-        let (response, round_usage) =
-            prompt::stream_round(session_id, model, context, cx, mode).await?;
+        let (response, round_usage) = prompt::stream_round(session_id, model, context, cx).await?;
 
         // Usage is a per-round provider snapshot. Add it once to the
         // aggregate, regardless of how many usage events the provider sent.
@@ -101,8 +100,10 @@ async fn handle_tool_calls(
             .copied()
             .ok_or_else(|| AgentError::ToolNotFound(call.name.clone()))?;
 
-        // In plan and review modes only read-only tools (and bash) may be
-        // invoked.
+        // Sole guard against edits in plan/review mode. The full tool list is
+        // always sent to the model (for a stable cache prefix), so this
+        // runtime block is what actually prevents non-read-only tools from
+        // running outside Normal mode.
         if mode != Mode::Normal && !context.tools[tool_index].read_only && call.name != "bash" {
             return Err(AgentError::ToolNotFound(call.name.clone()));
         }

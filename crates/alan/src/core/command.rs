@@ -64,6 +64,17 @@ impl SlashCommand {
         format!("/{}", <&'static str>::from(self))
     }
 
+    /// Whether the command consumes arguments. Zero-argument commands run
+    /// immediately on completion accept; argument-taking ones insert text
+    /// so the user can keep typing. Adding a future command here makes its
+    /// accept-time behavior flow through automatically.
+    pub fn takes_args(self) -> bool {
+        matches!(
+            self,
+            Self::Effort | Self::ModelProviders | Self::SummarizeNew
+        )
+    }
+
     pub fn description(self) -> &'static str {
         match self {
             Self::Login => "sign in to a provider",
@@ -283,5 +294,22 @@ mod tests {
         assert_eq!(SlashCommand::parse_effort(""), None);
         assert_eq!(SlashCommand::parse_effort("ultra"), None);
         assert_eq!(SlashCommand::parse_effort("high low"), None);
+    }
+
+    #[test]
+    fn takes_args_classifies_commands() {
+        // Zero-argument commands.
+        assert!(!SlashCommand::Login.takes_args());
+        assert!(!SlashCommand::Models.takes_args());
+        assert!(!SlashCommand::New.takes_args());
+        assert!(!SlashCommand::Fork.takes_args());
+        assert!(!SlashCommand::Plan.takes_args());
+        assert!(!SlashCommand::Review.takes_args());
+        assert!(!SlashCommand::Normal.takes_args());
+        assert!(!SlashCommand::Help.takes_args());
+        // Argument-taking commands.
+        assert!(SlashCommand::Effort.takes_args());
+        assert!(SlashCommand::ModelProviders.takes_args());
+        assert!(SlashCommand::SummarizeNew.takes_args());
     }
 }

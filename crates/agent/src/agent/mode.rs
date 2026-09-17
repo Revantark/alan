@@ -7,7 +7,7 @@ pub enum Mode {
     /// Normal editing mode.
     #[default]
     Normal,
-    /// Planning mode: read-only tools, plan suffix on every message.
+    /// Planning mode: read-only tools, plan instruction on the first message and a short reminder thereafter.
     Plan,
     /// Review mode: read-only tools, review guidelines on the first message.
     Review,

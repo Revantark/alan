@@ -155,6 +155,7 @@ impl AgentBuilder {
             context: Mutex::new(context),
             mode: AtomicU8::new(Mode::Normal.as_u8()),
             review_intro_pending: AtomicBool::new(false),
+            plan_intro_pending: AtomicBool::new(false),
             max_tool_rounds: self.max_tool_rounds,
             session_id: Mutex::new(session_id),
             session_manager: self.session_manager,
