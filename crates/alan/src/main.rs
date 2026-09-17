@@ -53,35 +53,12 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let credential_store = Arc::new(FileCredentialStore::new(auth_path()?));
-    let selected_provider_id = settings.provider.as_deref().unwrap_or("openrouter");
     let providers: Vec<Arc<dyn Provider>> = vec![
         Arc::new(ZaiProvider::from_store(credential_store.clone()).build()?),
         Arc::new(GoogleProvider::from_store(credential_store.clone()).build()?),
         Arc::new(OpenRouterProvider::from_store(credential_store.clone()).build()?),
     ];
 
-    let provider = providers
-        .iter()
-        .find(|p| p.id().0 == selected_provider_id)
-        .ok_or_else(|| anyhow::anyhow!("Provider not found: {selected_provider_id}"))?
-        .as_ref();
-
-    let server_tools = enabled_server_tools(provider, &settings)?;
-    let reasoning_effort = settings.reasoning;
-    let model_id = settings
-        .model
-        .clone()
-        .unwrap_or_else(|| DEFAULT_MODEL.into());
-    let model = bind_model(
-        provider,
-        &model_id,
-        ModelOptions {
-            server_tools,
-            reasoning_effort: reasoning_effort.unwrap_or_default(),
-            provider_order: settings.provider_order(&model_id),
-        },
-    )?;
-    let registry = Arc::new(ProviderRegistry::new(providers));
     let session_manager = Arc::new(SessionManager::new(sessions_path()?));
     let resumed_session = if let Some(session_id) = configured_session_id()? {
         let cwd = std::env::current_dir()?;
@@ -89,6 +66,58 @@ async fn main() -> anyhow::Result<()> {
     } else {
         None
     };
+
+    let (_, _, _, model) =
+        if let Some(ref session) = resumed_session {
+            let provider_id = &session.provider;
+            let provider = providers
+                .iter()
+                .find(|p| p.id().0 == provider_id.as_str())
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "Session was created for provider {} but that provider is not available",
+                        provider_id
+                    )
+                })?;
+            let model_id = session.model.clone();
+            let server_tools = enabled_server_tools(provider.as_ref(), &settings)?;
+            let reasoning_effort = settings.reasoning;
+            let model = bind_model(
+                provider.as_ref(),
+                &model_id,
+                ModelOptions {
+                    server_tools,
+                    reasoning_effort: reasoning_effort.unwrap_or_default(),
+                    provider_order: settings.provider_order(&model_id),
+                },
+            )?;
+            (provider_id.as_str(), provider.as_ref(), model_id, model)
+        } else {
+            let selected_provider_id = settings.provider.as_deref().unwrap_or("openrouter");
+            let provider = providers
+                .iter()
+                .find(|p| p.id().0 == selected_provider_id)
+                .ok_or_else(|| anyhow::anyhow!("Provider not found: {selected_provider_id}"))?
+                .as_ref();
+            let model_id = settings
+                .model
+                .clone()
+                .unwrap_or_else(|| DEFAULT_MODEL.into());
+            let server_tools = enabled_server_tools(provider, &settings)?;
+            let reasoning_effort = settings.reasoning;
+            let model = bind_model(
+                provider,
+                &model_id,
+                ModelOptions {
+                    server_tools,
+                    reasoning_effort: reasoning_effort.unwrap_or_default(),
+                    provider_order: settings.provider_order(&model_id),
+                },
+            )?;
+            (selected_provider_id, provider, model_id, model)
+        };
+
+    let registry = Arc::new(ProviderRegistry::new(providers));
 
     let was_resumed = resumed_session.is_some();
     let current_dir = std::env::current_dir()?;
