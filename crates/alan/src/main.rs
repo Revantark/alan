@@ -21,7 +21,6 @@ use tui::Runtime;
 
 use crate::logging::init;
 use crate::root::{AlanKeyMapper, AlanRoot};
-use crate::views::ChatHistory;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -67,55 +66,54 @@ async fn main() -> anyhow::Result<()> {
         None
     };
 
-    let (_, _, _, model) =
-        if let Some(ref session) = resumed_session {
-            let provider_id = &session.provider;
-            let provider = providers
-                .iter()
-                .find(|p| p.id().0 == provider_id.as_str())
-                .ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "Session was created for provider {} but that provider is not available",
-                        provider_id
-                    )
-                })?;
-            let model_id = session.model.clone();
-            let server_tools = enabled_server_tools(provider.as_ref(), &settings)?;
-            let reasoning_effort = settings.reasoning;
-            let model = bind_model(
-                provider.as_ref(),
-                &model_id,
-                ModelOptions {
-                    server_tools,
-                    reasoning_effort: reasoning_effort.unwrap_or_default(),
-                    provider_order: settings.provider_order(&model_id),
-                },
-            )?;
-            (provider_id.as_str(), provider.as_ref(), model_id, model)
-        } else {
-            let selected_provider_id = settings.provider.as_deref().unwrap_or("openrouter");
-            let provider = providers
-                .iter()
-                .find(|p| p.id().0 == selected_provider_id)
-                .ok_or_else(|| anyhow::anyhow!("Provider not found: {selected_provider_id}"))?
-                .as_ref();
-            let model_id = settings
-                .model
-                .clone()
-                .unwrap_or_else(|| DEFAULT_MODEL.into());
-            let server_tools = enabled_server_tools(provider, &settings)?;
-            let reasoning_effort = settings.reasoning;
-            let model = bind_model(
-                provider,
-                &model_id,
-                ModelOptions {
-                    server_tools,
-                    reasoning_effort: reasoning_effort.unwrap_or_default(),
-                    provider_order: settings.provider_order(&model_id),
-                },
-            )?;
-            (selected_provider_id, provider, model_id, model)
-        };
+    let (_, _, _, model) = if let Some(ref session) = resumed_session {
+        let provider_id = &session.provider;
+        let provider = providers
+            .iter()
+            .find(|p| p.id().0 == provider_id.as_str())
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Session was created for provider {} but that provider is not available",
+                    provider_id
+                )
+            })?;
+        let model_id = session.model.clone();
+        let server_tools = enabled_server_tools(provider.as_ref(), &settings)?;
+        let reasoning_effort = settings.reasoning;
+        let model = bind_model(
+            provider.as_ref(),
+            &model_id,
+            ModelOptions {
+                server_tools,
+                reasoning_effort: reasoning_effort.unwrap_or_default(),
+                provider_order: settings.provider_order(&model_id),
+            },
+        )?;
+        (provider_id.as_str(), provider.as_ref(), model_id, model)
+    } else {
+        let selected_provider_id = settings.provider.as_deref().unwrap_or("openrouter");
+        let provider = providers
+            .iter()
+            .find(|p| p.id().0 == selected_provider_id)
+            .ok_or_else(|| anyhow::anyhow!("Provider not found: {selected_provider_id}"))?
+            .as_ref();
+        let model_id = settings
+            .model
+            .clone()
+            .unwrap_or_else(|| DEFAULT_MODEL.into());
+        let server_tools = enabled_server_tools(provider, &settings)?;
+        let reasoning_effort = settings.reasoning;
+        let model = bind_model(
+            provider,
+            &model_id,
+            ModelOptions {
+                server_tools,
+                reasoning_effort: reasoning_effort.unwrap_or_default(),
+                provider_order: settings.provider_order(&model_id),
+            },
+        )?;
+        (selected_provider_id, provider, model_id, model)
+    };
 
     let registry = Arc::new(ProviderRegistry::new(providers));
 
@@ -141,8 +139,7 @@ async fn main() -> anyhow::Result<()> {
     // `Runtime::run` consumes the root, so keep the agent for the saved-session
     // message printed after the TUI exits.
     let agent = controller.agent();
-    let chat = ChatHistory::new(controller);
-    let result = Runtime::builder(AlanRoot::new(chat, registry, credential_store))
+    let result = Runtime::builder(AlanRoot::new(controller, registry, credential_store))
         .key_mapper(AlanKeyMapper)
         .tick_rate(Duration::from_millis(16))
         .build()

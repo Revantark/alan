@@ -8,7 +8,6 @@ mod popup_v2;
 mod status;
 mod transcript;
 
-pub use chat_history::ChatHistory;
 pub use chat_view::{ChatView, LoginRequested};
 pub use fork_overlay::{ForkEvent, ForkOverlay};
 pub use header::Header;

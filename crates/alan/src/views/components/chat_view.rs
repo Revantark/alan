@@ -1,83 +1,68 @@
-//! The chat surface as a single `tui` component.
-//!
-//! Owns the vertical stack of the chat: the transcript ([`ChatHistory`]),
-//! the pending attachment list, the status line, and the prompt editor. A
-//! single owner is what lets the attachments sit *above* the status line —
-//! the root could not interleave them because it held only the editor while
-//! `ChatHistory` owned the status.
-
-use std::sync::Arc;
-
-use providers::{ModelInfo, ProviderId, ProviderRegistry, bind_model};
-
+use crate::core::chat::ChatController;
 use crate::core::settings::{self, Settings, SettingsStore};
-use crate::root::AlanAction;
+use crate::core::{Activity, Entry};
+use crate::root::{AlanAction, PromptSubmission};
 use crate::views::components::{ForkEvent, ForkOverlay, ModelPick, ModelsPicker};
 use crate::views::theme;
+use agent::{AgentEvent, AgentStream};
 use crossterm::event::{Event, KeyCode, KeyEventKind};
+use futures_util::Stream;
 use llm::Usage;
+use providers::{ModelInfo, ProviderId, ProviderRegistry, bind_model};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::Paragraph;
+use std::sync::Arc;
 use tui::component::{ActionStatus, Component, RenderContext};
 use tui::context::Context;
 use tui::entity::Entity;
+use tui::{Subscription, SubscriptionEvent};
 
 use super::chat_history::ChatHistory;
 use super::editor::{PromptEditor, is_plain_prompt};
-use super::status::{STATUS_HEIGHT, StatusSnapshot, render_status};
+use super::status::{STATUS_HEIGHT, Status, StatusInputs};
 
-/// Blank rows between the status line and the prompt cursor.
+/// Rows between the status line and the prompt cursor.
 const STATUS_EDITOR_GAP: u16 = 1;
 
-/// Blank rows below the prompt editor.
+/// Rows below the prompt editor.
 const EDITOR_BOTTOM_PAD: u16 = 1;
 
-/// Emitted when a submission needs the login overlay opened. The root owns the
-/// providers and credentials, so it subscribes and opens the overlay itself.
+const STREAM_REPAINT_INTERVAL: std::time::Duration = std::time::Duration::from_millis(32);
+
 #[derive(Debug, Clone, Copy)]
 pub struct LoginRequested;
 
-/// Plain prompts from transcript entries, oldest first, for the editor's
-/// Up/Down recall history.
-fn recall_prompts(entries: &[crate::core::Entry]) -> Vec<String> {
-    entries
-        .iter()
-        .filter_map(|e| match e {
-            // Defensive: `Entry::Prompt` is normally plain prompts only,
-            // but filter anyway so the recall deque stays clean if the
-            // contract changes.
-            crate::core::Entry::Prompt(text) if is_plain_prompt(text) => Some(text.clone()),
-            _ => None,
-        })
-        .collect()
-}
-
 /// The chat column: transcript, attachments, status, and prompt editor.
 pub struct ChatView {
-    /// The transcript component to install on `init`; taken when inserted.
-    chat_source: Option<ChatHistory>,
+    controller: ChatController,
     chat: Option<Entity<ChatHistory>>,
+    status: Option<Entity<Status>>,
     editor: Option<Entity<PromptEditor>>,
+
     providers: Arc<ProviderRegistry>,
     model_subscription: Option<tui::Subscription>,
-    /// True while a fork is in flight, so a second `/fork` (or a re-opened
-    /// overlay result) cannot race the in-flight `fork_session`. Set when the
-    /// overlay opens; cleared by a Cancelled event, the spawn completion
-    /// closure, or a missing agent.
+    /// Subscription to the in-flight agent stream. Dropping it cancels the run.
+    prompt: Option<Subscription>,
+    /// Fixed-rate repaint ticker, alive only while the agent is streaming.
+    /// Keeps render cadence independent of the token rate.
+    stream_repaint: Option<Subscription>,
     fork_in_flight: bool,
 }
 
 impl ChatView {
-    pub fn new(chat: ChatHistory, providers: Arc<ProviderRegistry>) -> Self {
+    pub fn new(controller: ChatController, providers: Arc<ProviderRegistry>) -> Self {
         Self {
-            chat_source: Some(chat),
+            controller,
             chat: None,
+            status: None,
             editor: None,
             providers,
             model_subscription: None,
+            prompt: None,
+            stream_repaint: None,
             fork_in_flight: false,
         }
     }
@@ -94,13 +79,324 @@ impl ChatView {
         cx.dispatch(chat, action)
     }
 
-    /// Open the `/models` picker, populate it with the cached catalog, refresh
-    /// it from the providers in the background, and subscribe to a selection.
-    fn open_models_picker(
+    /// Current activity, projected from the controller for the status band.
+    fn activity(&self) -> Activity {
+        if self.controller.is_busy() {
+            Activity::Thinking
+        } else if let Some(label) = self.controller.loading() {
+            Activity::Loading(label.to_owned())
+        } else {
+            Activity::Idle
+        }
+    }
+
+    fn sync_status(&mut self, cx: &mut Context<'_, Self, AlanAction>) {
+        let activity = self.activity();
+        if let Some(status) = self.status {
+            let loading = matches!(activity, Activity::Loading(_));
+            cx.dispatch(status, &AlanAction::SetLoadingDots(loading));
+        }
+        cx.notify();
+    }
+
+    fn handle_submit(
         &mut self,
-        chat: Entity<ChatHistory>,
+        submission: PromptSubmission,
         cx: &mut Context<'_, Self, AlanAction>,
     ) {
+        let controller = &mut self.controller;
+
+        if let Some(command) = crate::core::SlashCommand::parse(&submission.text) {
+            use crate::core::SlashCommand as Cmd;
+            match command {
+                Cmd::Login => cx.emit(LoginRequested),
+                Cmd::Plan => controller.set_mode(agent::Mode::Plan),
+                Cmd::Review => controller.set_mode(agent::Mode::Review),
+                Cmd::Normal => controller.set_mode(agent::Mode::Normal),
+
+                Cmd::Fork => self.request_fork(&submission.text, cx),
+                Cmd::Effort => self.apply_effort(&submission.text, cx),
+                Cmd::SummarizeNew => self.start_summarize_new(cx, &submission.text),
+                Cmd::ModelProviders => self.apply_model_provider(cx, &submission.text),
+                Cmd::Rename => self.rename_session(cx, &submission.text),
+
+                Cmd::Help => controller.push_info(crate::core::SlashCommand::help()),
+                Cmd::New => self.start_new_session(cx),
+                Cmd::Models => self.open_models_picker(cx),
+            }
+            cx.notify();
+            return;
+        }
+
+        let text = submission.text.trim().to_owned();
+        let Some(stream) = controller.submit(text, submission.images) else {
+            return;
+        };
+        // A new prompt pins the transcript to the newest content.
+        if let Some(chat) = self.chat {
+            cx.update(chat, |c| c.stick_to_bottom());
+        }
+        self.prompt = Some(
+            cx.subscribe_stream(agent_events(stream), |event, view, cx| {
+                match event {
+                    SubscriptionEvent::Item(result) => {
+                        view.controller.apply_event(result);
+                    }
+                    SubscriptionEvent::Closed => {
+                        view.controller.disconnect_stream();
+                        view.prompt = None;
+                    }
+                }
+                if !view.controller.is_busy() {
+                    view.stream_repaint = None;
+                    cx.notify();
+                }
+            }),
+        );
+        self.ensure_stream_repaint(cx);
+        cx.notify();
+    }
+
+    /// `/new`: reset to a fresh, empty session.
+    fn start_new_session(&mut self, cx: &mut Context<'_, Self, AlanAction>) {
+        if self.controller.is_busy() {
+            return;
+        }
+        let agent = self.controller.agent();
+        cx.spawn(
+            async move {
+                agent
+                    .reset_session()
+                    .await
+                    .map_err(|error| tui::TaskError(Box::new(error)))
+            },
+            move |result, view, _cx| match result {
+                Ok(()) => {
+                    view.controller.clear_transcript();
+                    view.controller.push_info("Started a new session.");
+                }
+                Err(error) => view
+                    .controller
+                    .push_info(format!("failed to start new session: {error}")),
+            },
+        );
+    }
+
+    fn request_fork(&mut self, text: &str, cx: &mut Context<'_, Self, AlanAction>) {
+        if self.controller.is_busy() {
+            self.controller
+                .push_info("cannot fork while a response is streaming".to_owned());
+            return;
+        }
+        if let Some((_, args)) = crate::core::SlashCommand::parse_with_args(text)
+            && !args.trim().is_empty()
+        {
+            self.controller.push_info("usage: /fork".to_owned());
+            return;
+        }
+        self.open_fork_overlay(cx);
+    }
+
+    fn apply_model_provider(&mut self, cx: &mut Context<'_, Self, AlanAction>, text: &str) {
+        if self.controller.is_busy() {
+            return;
+        }
+        let agent = self.controller.agent();
+
+        let provider_order =
+            match crate::core::SlashCommand::parse_with_args(text).map(|(_, args)| args) {
+                Some(args) if args.trim().eq_ignore_ascii_case("none") => Ok(Vec::new()),
+                Some(args) => parse_provider_order(args),
+                None => return,
+            };
+        let provider_order = match provider_order {
+            Ok(order) => order,
+            Err(error) => {
+                self.controller.push_info(format!(
+                    "usage: /providers <provider1,provider2,...>: {error}"
+                ));
+
+                return;
+            }
+        };
+
+        cx.spawn(
+            async move {
+                let model_id = agent.info().await.id;
+                agent
+                    .set_provider_order(provider_order.clone())
+                    .await
+                    .map_err(|error| tui::TaskError(Box::new(error)))?;
+
+                persist_provider_order(&model_id, &provider_order)
+                    .await
+                    .map_err(|error| tui::TaskError(error.into()))?;
+
+                Ok::<_, tui::TaskError>(if provider_order.is_empty() {
+                    "provider order cleared (using default)".to_owned()
+                } else {
+                    format!("provider order set to {}", provider_order.join(", "))
+                })
+            },
+            move |result, view, cx| match result {
+                Ok(msg) => {
+                    view.controller.push_info(msg);
+                    cx.notify();
+                }
+                Err(error) => {
+                    view.controller
+                        .push_info(format!("failed to set provider order: {error}"));
+                    cx.notify();
+                }
+            },
+        );
+    }
+
+    fn start_summarize_new(&mut self, cx: &mut Context<'_, Self, AlanAction>, text: &str) {
+        if self.controller.is_busy() {
+            return;
+        }
+        let agent = self.controller.agent();
+        let focus = crate::core::SlashCommand::parse_with_args(text)
+            .map(|(_, args)| args.trim().to_owned())
+            .filter(|args| !args.is_empty());
+
+        self.controller.set_loading(Some("summarizing".to_owned()));
+        self.sync_status(cx);
+
+        cx.spawn(
+            async move {
+                let summary = agent
+                    .summarize(focus.as_deref())
+                    .await
+                    .map_err(|error| tui::TaskError(Box::new(error)))?;
+                let seed = vec![agent::AgentMessage::user(format!(
+                    "Session handoff — continue from this state:\n\n{summary}"
+                ))];
+                agent
+                    .reset_session_with(seed)
+                    .await
+                    .map_err(|error| tui::TaskError(Box::new(error)))?;
+                Ok::<(), tui::TaskError>(())
+            },
+            move |result, view, cx| {
+                view.controller.set_loading(None);
+                view.controller.clear_transcript();
+                match result {
+                    Ok(()) => view.controller.push_info("Summarized into a new session."),
+                    Err(error) => view
+                        .controller
+                        .push_info(format!("failed to summarize session: {error}")),
+                }
+                view.sync_status(cx);
+            },
+        );
+    }
+
+    fn apply_effort(&mut self, text: &str, cx: &mut Context<'_, Self, AlanAction>) {
+        if self.controller.is_busy() {
+            return;
+        }
+        let agent = self.controller.agent();
+
+        let effort = match crate::core::SlashCommand::parse_with_args(text).map(|(_, args)| args) {
+            Some(args) => match crate::core::SlashCommand::parse_effort(args) {
+                Some(effort) => effort,
+                None => {
+                    self.controller.push_info(
+                        "usage: /effort <none|minimal|low|medium|high|xhigh|max>".to_owned(),
+                    );
+                    return;
+                }
+            },
+            None => return,
+        };
+
+        let agent = agent.clone();
+        cx.spawn(
+            async move {
+                agent
+                    .set_reasoning_effort(effort)
+                    .await
+                    .map_err(|error| tui::TaskError(Box::new(error)))?;
+
+                persist_reasoning_effort(effort)
+                    .await
+                    .map_err(|error| tui::TaskError(error.into()))?;
+
+                Ok::<_, tui::TaskError>(format!("reasoning effort set to {effort}"))
+            },
+            move |result, view, cx| match result {
+                Ok(msg) => {
+                    view.controller.set_reasoning_effort(effort);
+                    view.controller.push_info(msg);
+                    cx.notify();
+                }
+                Err(error) => {
+                    view.controller
+                        .push_info(format!("failed to set reasoning effort: {error}"));
+                    cx.notify();
+                }
+            },
+        );
+    }
+
+    fn rename_session(&mut self, cx: &mut Context<'_, Self, AlanAction>, text: &str) {
+        let args = crate::core::SlashCommand::parse_with_args(text)
+            .map(|(_, args)| args.trim().to_owned())
+            .filter(|args| !args.is_empty());
+        let name = match args {
+            Some(name) => name,
+            None => {
+                self.controller
+                    .push_info("usage: /rename <name>".to_owned());
+                return;
+            }
+        };
+        let agent = self.controller.agent();
+        cx.spawn(
+            async move {
+                agent
+                    .rename_session(&name)
+                    .await
+                    .map_err(|error| tui::TaskError(Box::new(error)))?;
+
+                Ok::<_, tui::TaskError>(format!("Session renamed to {name}"))
+            },
+            move |result, view, cx| match result {
+                Ok(msg) => {
+                    view.controller.push_info(msg);
+                    cx.notify();
+                }
+                Err(error) => {
+                    view.controller
+                        .push_info(format!("failed to rename session: {error}"));
+                    cx.notify();
+                }
+            },
+        );
+    }
+
+    /// Start the fixed-rate repaint ticker if a run is in flight and it is not
+    /// already running. The ticker repaints the transcript at
+    /// `STREAM_REPAINT_INTERVAL`; it is cancelled once the run finishes.
+    fn ensure_stream_repaint(&mut self, cx: &mut Context<'_, Self, AlanAction>) {
+        if self.stream_repaint.is_some() || !self.controller.is_busy() {
+            return;
+        }
+        self.stream_repaint = Some(cx.subscribe_stream(
+            stream_repaint_ticks(),
+            |event, view, cx| {
+                if matches!(event, SubscriptionEvent::Closed) || !view.controller.is_busy() {
+                    view.stream_repaint = None;
+                    return;
+                }
+                cx.notify();
+            },
+        ));
+    }
+
+    fn open_models_picker(&mut self, cx: &mut Context<'_, Self, AlanAction>) {
         let providers = Arc::clone(&self.providers);
         let picker = cx.open_overlay(ModelsPicker::new("Select Model", model_labels(&providers)));
 
@@ -122,14 +418,14 @@ impl ChatView {
         let providers = Arc::clone(&self.providers);
         self.model_subscription = Some(cx.subscribe::<ModelPick, ModelsPicker, _>(
             picker,
-            move |event, _view, _picker, cx| {
+            move |event, view, _picker, cx| {
                 let ModelPick::Chosen(index) = event else {
                     return;
                 };
                 let Some(model_info) = all_models(&providers).into_iter().nth(*index) else {
                     return;
                 };
-                let Some(agent) = cx.read(chat, |c| c.agent()) else {
+                let Some(agent) = Some(view.controller.agent()) else {
                     return;
                 };
                 let providers = Arc::clone(&providers);
@@ -142,17 +438,21 @@ impl ChatView {
                             .ok_or_else(|| {
                                 tui::TaskError("selected provider is unavailable".into())
                             })?;
+
                         let settings = settings::get_settings()
                             .await
                             .map_err(|e| tui::TaskError(e.into()))?;
+
                         let provider_order = settings.provider_order(&model_info.id);
                         let mut options = agent.model_options().await;
                         options.provider_order = provider_order;
+
                         let model = bind_model(provider.as_ref(), &model_info.id, options)
                             .map_err(|e| tui::TaskError(e.into()))?;
                         let name = model_info.name.clone();
                         let max_context = model_info.context_length;
                         let reasoning_effort = model.reasoning_effort();
+
                         agent
                             .set_model(model)
                             .await
@@ -162,32 +462,24 @@ impl ChatView {
                             .map_err(|e| tui::TaskError(e.into()))?;
                         Ok((name, max_context, reasoning_effort))
                     },
-                    move |result, _view, cx| {
-                        let _ = cx.update(chat, |c| match result {
+                    move |result, view, cx| {
+                        match result {
                             Ok((name, max_context, reasoning_effort)) => {
-                                c.set_max_context(max_context);
-                                c.set_reasoning_effort(reasoning_effort);
-                                c.apply_model_switch(name);
+                                view.controller.set_max_context(max_context);
+                                view.controller.set_reasoning_effort(reasoning_effort);
+                                view.controller.apply_model_switch(name);
                             }
-                            Err(e) => c.apply_model_switch_failed(e.to_string()),
-                        });
+                            Err(e) => view.controller.apply_model_switch_failed(e.to_string()),
+                        }
+                        cx.notify();
                     },
                 );
             },
         ));
     }
 
-    /// Open the `/fork` overlay. The session snapshot is loaded asynchronously
-    /// before the overlay is constructed so `ForkOverlay::init` has no async
-    /// work to do; a missing agent renders as an empty checkpoint list.
-    fn open_fork_overlay(
-        &mut self,
-        chat: Entity<ChatHistory>,
-        cx: &mut Context<'_, Self, AlanAction>,
-    ) {
-        let Some(agent) = cx.read(chat, |c| c.agent()) else {
-            return;
-        };
+    fn open_fork_overlay(&mut self, cx: &mut Context<'_, Self, AlanAction>) {
+        let agent = self.controller.agent();
         self.fork_in_flight = true;
         let picker = cx.open_overlay(ForkOverlay::new(Arc::clone(&agent)));
         cx.subscribe_once::<ForkEvent, ForkOverlay, _>(picker, move |_event, view, _picker, cx| {
@@ -197,10 +489,7 @@ impl ChatView {
                 view.fork_in_flight = false;
                 return;
             };
-            let Some(agent) = cx.read(chat, |c| c.agent()) else {
-                view.fork_in_flight = false;
-                return;
-            };
+            let agent = view.controller.agent();
             let _ = cx.spawn(
                 async move {
                     agent
@@ -214,25 +503,21 @@ impl ChatView {
                     view.fork_in_flight = false;
                     match result {
                         Ok(messages) => {
-                            let _ = cx.update(chat, |c| {
-                                c.apply_restored(
-                                    messages,
-                                    Usage::default(),
-                                    c.model_name(),
-                                    c.max_context(),
-                                )
-                            });
-                            let _ = cx.update(chat, |c| c.push_info("forked session".to_owned()));
+                            view.controller.apply_restored(
+                                messages,
+                                Usage::default(),
+                                view.controller.model_name(),
+                                view.controller.max_context(),
+                            );
+                            view.controller.push_info("forked session".to_owned());
                             if let Some(editor) = view.editor {
-                                let prompts = cx
-                                    .read(chat, |c| recall_prompts(c.entries()))
-                                    .unwrap_or_default();
+                                let prompts = recall_prompts(view.controller.entries());
                                 cx.update(editor, |e| e.seed_history(prompts));
                             }
                         }
                         Err(error) => {
-                            let _ = cx
-                                .update(chat, |c| c.push_info(format!("failed to fork: {error}")));
+                            view.controller
+                                .push_info(format!("failed to fork: {error}"));
                         }
                     }
                     cx.notify();
@@ -247,19 +532,15 @@ impl Component<AlanAction> for ChatView {
     where
         Self: Sized,
     {
-        let chat = self
-            .chat_source
-            .take()
-            .expect("chat component installed once");
         let mut editor = PromptEditor::new();
-        let prompts: Vec<String> = recall_prompts(chat.entries());
+        let prompts: Vec<String> = recall_prompts(self.controller.entries());
         editor.seed_history(prompts);
-        self.chat = Some(cx.insert(chat));
+        self.chat = Some(cx.insert(ChatHistory::new()));
+        self.status = Some(cx.insert(Status::new()));
         self.editor = Some(cx.insert(editor));
         let editor_entity = self.editor.expect("editor entity");
         cx.focus_entity(editor_entity);
 
-        let chat_entity = self.chat.expect("chat installed before spawn");
         let providers_for_fetch = Arc::clone(&self.providers);
         let providers_for_lookup = Arc::clone(&self.providers);
         let _ = cx.spawn(
@@ -267,18 +548,19 @@ impl Component<AlanAction> for ChatView {
                 fetch_all_models(&providers_for_fetch).await;
                 Ok(())
             },
-            move |result, _view, cx| {
+            move |result, view, cx| {
                 if result.is_err() {
                     return;
                 }
-                if let Some(model_id) = cx.read(chat_entity, |c| c.model_name()) {
-                    // Find the model in any provider's catalog
+                // Find the model in any provider's catalog
+                if let Some(model_id) = view.controller.model_name().into() {
                     let max_context = all_models(&providers_for_lookup)
                         .into_iter()
                         .find(|m| m.id == model_id)
                         .and_then(|m| m.context_length);
-                    let _ = cx.update(chat_entity, |c| c.set_max_context(max_context));
+                    view.controller.set_max_context(max_context);
                 }
+                cx.notify();
             },
         );
     }
@@ -291,63 +573,39 @@ impl Component<AlanAction> for ChatView {
     where
         Self: Sized,
     {
-        // While a blocking operation (e.g. `/summarize-new`) is in flight, all
-        // input is swallowed so it cannot race the in-flight task.
-        if let Some(chat) = self.chat
-            && cx.read(chat, |c| c.is_loading()).unwrap_or(false)
-        {
+        if self.controller.loading().is_some() {
             return ActionStatus::Handled;
         }
+
         match action {
-            // The editor bubbles submissions up to here. Run them on the
-            // transcript, then forward a `/login` request to the root as a
-            // typed event — the chat cannot open the overlay itself.
-            AlanAction::Submit(_) => {
-                let Some(chat) = self.chat else {
-                    return ActionStatus::Continue;
-                };
-                let status = cx.dispatch(chat, action);
-                if cx.update(chat, |c| c.take_login_request()).unwrap_or(false) {
-                    cx.emit(LoginRequested);
-                }
-                if cx
-                    .update(chat, |c| c.take_models_request())
-                    .unwrap_or(false)
-                {
-                    self.open_models_picker(chat, cx);
-                }
-                // `/fork` opens the fork overlay. Ignored while a fork is
-                // already in flight so a second `/fork` cannot race it.
-                if cx.update(chat, |c| c.take_fork_request()).unwrap_or(false)
-                    && !self.fork_in_flight
-                {
-                    self.open_fork_overlay(chat, cx);
-                }
-                status
+            AlanAction::Submit(submission) => {
+                self.handle_submit(submission.clone(), cx);
+                self.sync_status(cx);
+                ActionStatus::Handled
             }
-            // Mode toggle, quit (cancel-or-exit), and wheel scrolling are all
-            // owned by the transcript component.
-            AlanAction::ToggleMode | AlanAction::Quit => self.dispatch_chat(action, cx),
-            AlanAction::Raw(event) => match event {
-                // Mouse traffic is owned by the transcript; it hit-tests its
-                // own rect and ignores misses.
-                Event::Mouse(_) => self.dispatch_chat(action, cx),
-                // PageUp/PageDown scroll the transcript, not the editor.
-                Event::Key(key)
-                    if matches!(key.code, KeyCode::PageUp | KeyCode::PageDown)
-                        && key.kind == KeyEventKind::Press =>
-                {
-                    self.dispatch_chat(action, cx)
+            AlanAction::ToggleMode => {
+                self.controller.toggle_mode();
+                cx.notify();
+                ActionStatus::Handled
+            }
+            AlanAction::Quit => {
+                if self.controller.is_busy() {
+                    self.prompt = None;
+                    self.stream_repaint = None;
+                    self.controller.finish_stream();
+                    cx.notify();
+                } else {
+                    cx.quit();
                 }
-                // Esc clears an active transcript selection (the editor gets
-                // first refusal and pops attachments).
+                ActionStatus::Handled
+            }
+            AlanAction::Raw(event) => match event {
                 Event::Key(key)
                     if key.code == KeyCode::Esc
                         && key.kind == KeyEventKind::Press
-                        && self
-                            .chat
-                            .and_then(|chat| cx.read(chat, |c| c.has_active_selection()))
-                            .unwrap_or(false) =>
+                        && self.chat.is_some_and(|chat| {
+                            cx.read(chat, |c| c.has_active_selection()).unwrap_or(false)
+                        }) =>
                 {
                     self.dispatch_chat(action, cx)
                 }
@@ -361,6 +619,9 @@ impl Component<AlanAction> for ChatView {
 
     fn render(&self, frame: &mut Frame, area: Rect, cx: &RenderContext<'_, '_, AlanAction>) {
         let Some(chat) = self.chat else {
+            return;
+        };
+        let Some(status) = self.status else {
             return;
         };
         let Some(editor) = self.editor else {
@@ -390,11 +651,10 @@ impl Component<AlanAction> for ChatView {
         ])
         .areas(area);
 
-        cx.render_entity(chat, frame, chat_area);
+        cx.render_with_state(chat, frame, chat_area, &self.controller);
+
         render_attachments(frame, attachment_area, editor, cx);
-        // Paint the whole footer (status through bottom pad) with the editor
-        // background, so the gap and bottom padding don't fall back to the
-        // terminal default.
+
         let footer = Rect {
             x: area.x,
             y: status_area.y,
@@ -405,14 +665,20 @@ impl Component<AlanAction> for ChatView {
             Paragraph::new("").style(Style::default().bg(theme::EDITOR_BG)),
             footer,
         );
-        if let Some(snap) = cx.read(chat, |c| c.snapshot()).flatten() {
-            render_status(frame, status_area, &StatusSnapshot::from_snapshot(&snap));
-        }
+
+        let inputs = StatusInputs {
+            activity: self.activity(),
+            mode: self.controller.mode(),
+            usage: self.controller.usage(),
+            model_name: self.controller.model_name(),
+            max_context: self.controller.max_context(),
+            reasoning_effort: self.controller.reasoning_effort(),
+        };
+        cx.render_with_state(status, frame, status_area, &inputs);
         cx.render_entity(editor, frame, editor_area);
     }
 }
 
-/// Paint the pending attachment list into `area`.
 fn render_attachments(
     frame: &mut Frame,
     area: Rect,
@@ -452,8 +718,6 @@ fn render_attachments(
     frame.render_widget(attachments, area);
 }
 
-/// Refresh every provider's model catalog, logging (but not failing on)
-/// individual provider errors.
 async fn fetch_all_models(providers: &ProviderRegistry) {
     for provider in providers.providers() {
         if let Err(e) = provider.fetch_models().await {
@@ -466,7 +730,6 @@ async fn fetch_all_models(providers: &ProviderRegistry) {
     }
 }
 
-/// Flatten every provider's catalog into a single list of models.
 fn all_models(providers: &ProviderRegistry) -> Vec<ModelInfo> {
     providers
         .providers()
@@ -475,7 +738,6 @@ fn all_models(providers: &ProviderRegistry) -> Vec<ModelInfo> {
         .collect()
 }
 
-/// Render each known model as a `"<provider> — <name>"` picker label.
 fn model_labels(providers: &ProviderRegistry) -> Vec<String> {
     all_models(providers)
         .into_iter()
@@ -490,4 +752,64 @@ async fn persist_model(model_id: &str, provider_id: &ProviderId) -> anyhow::Resu
     settings.provider = Some(provider_id.to_string());
 
     store.save(&settings).await
+}
+
+fn agent_events(
+    stream: AgentStream,
+) -> impl Stream<Item = Result<AgentEvent, agent::AgentError>> + Send + 'static {
+    futures_util::stream::unfold(stream, |mut stream| async move {
+        stream.recv().await.map(|event| (event, stream))
+    })
+}
+
+fn stream_repaint_ticks() -> impl Stream<Item = ()> + Send + 'static {
+    futures_util::stream::unfold((), |_| async {
+        tokio::time::sleep(STREAM_REPAINT_INTERVAL).await;
+        Some(((), ()))
+    })
+}
+
+fn parse_provider_order(value: &str) -> anyhow::Result<Vec<String>> {
+    let order = value
+        .split(',')
+        .map(|entry| entry.trim().to_string())
+        .filter(|entry| !entry.is_empty())
+        .collect::<Vec<_>>();
+    if order.is_empty() {
+        return Err(anyhow::anyhow!("provider order must not be empty"));
+    }
+    Ok(order)
+}
+
+async fn persist_reasoning_effort(effort: llm::ReasoningEffort) -> anyhow::Result<()> {
+    let store = SettingsStore::<Settings>::new(settings::default_settings_path()?);
+    let mut settings = store.load().await?.unwrap_or_default();
+    settings.reasoning = Some(effort);
+    store.save(&settings).await
+}
+
+async fn persist_provider_order(model: &str, provider_order: &[String]) -> anyhow::Result<()> {
+    let store = SettingsStore::<Settings>::new(settings::default_settings_path()?);
+    let mut settings = store.load().await?.unwrap_or_default();
+    if provider_order.is_empty() {
+        settings.provider_orders.remove(model);
+    } else {
+        settings
+            .provider_orders
+            .insert(model.to_owned(), provider_order.to_vec());
+    }
+    store.save(&settings).await
+}
+
+fn recall_prompts(entries: &[Entry]) -> Vec<String> {
+    entries
+        .iter()
+        .filter_map(|e| match e {
+            // Defensive: `Entry::Prompt` is normally plain prompts only,
+            // but filter anyway so the recall deque stays clean if the
+            // contract changes.
+            Entry::Prompt(text) if is_plain_prompt(text) => Some(text.clone()),
+            _ => None,
+        })
+        .collect()
 }

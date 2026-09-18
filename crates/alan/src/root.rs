@@ -1,6 +1,6 @@
 //! Single-root `tui` adapter for Alan.
 //!
-//! The chat session (controller + agent stream) lives in [`ChatHistory`], the
+//! The chat session (controller + agent stream) lives in [`ChatView`], the
 //! prompt editor owns input, and this root is a thin layout/router: it routes
 //! input to the focused child or dispatches it to the chat component, and
 //! composes the header, transcript, and footer. It also owns the providers and
@@ -20,8 +20,9 @@ use tui::keymap::{InputContext, KeyMapper};
 use tui::{ActionStatus, Component, RenderContext, Subscription};
 
 use crate::core::ImageAttachment;
+use crate::core::chat::ChatController;
 use crate::login_overlay::LoginOverlay;
-use crate::views::{ChatHistory, ChatView, Header, LoginRequested};
+use crate::views::{ChatView, Header, LoginRequested};
 
 /// Semantic input for the Alan frontend.
 ///
@@ -36,6 +37,8 @@ pub enum AlanAction {
     Quit,
     /// Terminal was resized; components re-measure on the next frame.
     Resize,
+    /// TODO: SHOULD be moved from here
+    SetLoadingDots(bool),
     Raw(Event),
 }
 
@@ -84,8 +87,8 @@ impl KeyMapper<AlanAction> for AlanKeyMapper {
 pub struct AlanRoot {
     providers: Arc<ProviderRegistry>,
     credentials: Arc<dyn CredentialStore>,
-    /// The chat component to install on `init`; taken when inserted.
-    chat_source: Option<ChatHistory>,
+    /// The chat controller to install on `init`; taken when inserted.
+    chat_source: Option<ChatController>,
     header: Option<Entity<Header>>,
     view: Option<Entity<ChatView>>,
     /// Subscription that opens the login overlay when the chat requests it.
@@ -95,7 +98,7 @@ pub struct AlanRoot {
 
 impl AlanRoot {
     pub fn new(
-        chat: ChatHistory,
+        chat: ChatController,
         providers: Arc<ProviderRegistry>,
         credentials: Arc<dyn CredentialStore>,
     ) -> Self {

@@ -94,7 +94,7 @@ impl Agent {
             system_prompt: None,
             skills: Vec::new(),
             tools: Vec::new(),
-            max_tool_rounds: 100,
+            max_tool_rounds: 200,
             session_manager: None,
             resumed_session: None,
             working_directory: None,

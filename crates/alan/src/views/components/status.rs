@@ -1,9 +1,5 @@
-//! Bottom status line of the chat area: activity state, key hints, and the
-//! mode/cost/model badges. Rendered by the chat container, which owns the
-//! vertical stack (transcript, attachments, status, editor); it depends only
-//! on the controller snapshot types, the theme, and ratatui.
-
 use crate::core::Activity;
+use crate::root::AlanAction;
 use crate::views::theme;
 use agent::Mode;
 use llm::{ReasoningEffort, Usage};
@@ -11,19 +7,18 @@ use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::Block;
-use ratatui::widgets::Padding;
-use ratatui::widgets::Paragraph;
+use ratatui::widgets::{Block, Padding, Paragraph};
+use tui::component::{ActionStatus, Component, RenderContext};
+use tui::context::Context;
+use tui::{Subscription, SubscriptionEvent};
 
-/// Rows the status band occupies: one blank pad row above the status text.
 pub(crate) const STATUS_HEIGHT: u16 = 2;
 
+const LOADING_DOT_INTERVAL: std::time::Duration = std::time::Duration::from_millis(350);
+
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) struct StatusSnapshot {
+pub(crate) struct StatusInputs {
     pub activity: Activity,
-    /// Dot count (0..3) for the loading animation; only read when `activity`
-    /// is `Activity::Loading`.
-    pub loading_dots: usize,
     pub mode: Mode,
     pub usage: Usage,
     pub model_name: String,
@@ -31,22 +26,70 @@ pub(crate) struct StatusSnapshot {
     pub reasoning_effort: ReasoningEffort,
 }
 
-impl StatusSnapshot {
-    /// Project the transcript snapshot onto the fields the status line reads.
-    pub(crate) fn from_snapshot(snap: &super::chat_history::ChatSnapshot) -> Self {
+/// The pinned status band: activity, badges, and the loading-dot animation.
+pub(crate) struct Status {
+    /// Current dot count (0..3) driving the loading animation. Advanced by the
+    /// repaint ticker while a blocking operation is in flight.
+    loading_dots: usize,
+    /// Fixed-rate ticker driving the loading-dot animation, alive only while a
+    /// blocking operation is in flight. Dropping it cancels the animation.
+    loading_repaint: Option<Subscription>,
+}
+
+impl Status {
+    pub fn new() -> Self {
         Self {
-            activity: snap.activity.clone(),
-            loading_dots: snap.loading_dots,
-            mode: snap.mode,
-            usage: snap.usage.clone(),
-            model_name: snap.model_name.clone(),
-            max_context: snap.max_context,
-            reasoning_effort: snap.reasoning_effort,
+            loading_dots: 0,
+            loading_repaint: None,
         }
+    }
+
+    pub fn set_loading_with(&mut self, loading: bool, cx: &mut Context<'_, Self, AlanAction>) {
+        if loading == self.loading_repaint.is_some() {
+            return;
+        }
+        self.loading_dots = 0;
+        if loading {
+            self.loading_repaint =
+                Some(cx.subscribe_stream(loading_ticks(), |event, status, cx| {
+                    if matches!(event, SubscriptionEvent::Closed) {
+                        status.loading_repaint = None;
+                        return;
+                    }
+                    status.loading_dots = (status.loading_dots + 1) % 4;
+                    cx.notify();
+                }));
+        } else {
+            self.loading_repaint = None;
+        }
+        cx.notify();
     }
 }
 
-/// How a non-loading [`Activity`] presents itself in the status line.
+impl Component<AlanAction> for Status {
+    fn handle_action(
+        &mut self,
+        action: &AlanAction,
+        cx: &mut Context<'_, Self, AlanAction>,
+    ) -> ActionStatus
+    where
+        Self: Sized,
+    {
+        match action {
+            AlanAction::SetLoadingDots(loading) => {
+                self.set_loading_with(*loading, cx);
+                ActionStatus::Handled
+            }
+            _ => ActionStatus::Continue,
+        }
+    }
+
+    fn render(&self, frame: &mut Frame, area: Rect, cx: &RenderContext<'_, '_, AlanAction>) {
+        let inputs = cx.expect_state::<StatusInputs>();
+        render_status(frame, area, inputs, self.loading_dots);
+    }
+}
+
 struct StatusStyle {
     style: Style,
     label: &'static str,
@@ -74,7 +117,7 @@ impl From<&Activity> for StatusStyle {
 }
 
 /// Flags that layer onto any activity.
-fn badges(snap: &StatusSnapshot) -> Vec<Span<'static>> {
+fn badges(snap: &StatusInputs) -> Vec<Span<'static>> {
     let mut badges = Vec::new();
     let badge = match snap.mode {
         Mode::Plan => Some((" · Plan mode", Color::White)),
@@ -111,7 +154,7 @@ fn format_tokens(n: u64) -> String {
 
 /// Context badge shows `context: 12k/1.05M`. Color is muted normally, yellow
 /// at >= 70% of the window, red at >= 85%. Omitted when the window is unknown.
-fn context_badge(snap: &StatusSnapshot) -> Option<Span<'static>> {
+fn context_badge(snap: &StatusInputs) -> Option<Span<'static>> {
     let max = snap.max_context?;
     let context_tokens = snap.usage.input_tokens + snap.usage.output_tokens;
     let mut ratio = context_tokens as f64 / max as f64;
@@ -133,10 +176,10 @@ fn context_badge(snap: &StatusSnapshot) -> Option<Span<'static>> {
     Some(Span::styled(label, Style::default().fg(color)))
 }
 
-fn status_line(snap: &StatusSnapshot) -> Line<'static> {
+fn status_line(snap: &StatusInputs, loading_dots: usize) -> Line<'static> {
     if let Activity::Loading(text) = &snap.activity {
         return Line::from(Span::styled(
-            format!("  ● {text} {}", ".".repeat(snap.loading_dots)),
+            format!("  ● {text} {}", ".".repeat(loading_dots)),
             Style::default().fg(Color::Cyan),
         ));
     }
@@ -156,11 +199,18 @@ fn status_line(snap: &StatusSnapshot) -> Line<'static> {
 }
 
 /// Render the pinned status line into `area`.
-pub(crate) fn render_status(frame: &mut Frame, area: Rect, snap: &StatusSnapshot) {
+fn render_status(frame: &mut Frame, area: Rect, snap: &StatusInputs, loading_dots: usize) {
     frame.render_widget(
-        Paragraph::new(status_line(snap))
+        Paragraph::new(status_line(snap, loading_dots))
             .style(Style::default().bg(theme::EDITOR_BG))
             .block(Block::new().padding(Padding::new(0, 0, 1, 0))),
         area,
     );
+}
+
+fn loading_ticks() -> impl futures_util::Stream<Item = ()> + Send + 'static {
+    futures_util::stream::unfold((), |_| async {
+        tokio::time::sleep(LOADING_DOT_INTERVAL).await;
+        Some(((), ()))
+    })
 }
