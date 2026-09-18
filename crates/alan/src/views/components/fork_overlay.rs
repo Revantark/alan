@@ -213,7 +213,7 @@ impl Component<AlanAction> for ForkOverlay {
         }
     }
 
-    fn render(&self, frame: &mut Frame, area: Rect, _: &RenderContext<'_, AlanAction>) {
+    fn render(&self, frame: &mut Frame, area: Rect, _: &RenderContext<'_, '_, AlanAction>) {
         let width = area.width.saturating_sub(8).min(100);
         let height = area.height.clamp(1, 16);
         let popup = Rect {

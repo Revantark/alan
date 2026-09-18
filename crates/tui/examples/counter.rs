@@ -111,7 +111,7 @@ impl Component<Action> for Counter {
         }
     }
 
-    fn render(&self, frame: &mut Frame, area: Rect, cx: &RenderContext<'_, Action>) {
+    fn render(&self, frame: &mut Frame, area: Rect, cx: &RenderContext<'_, '_, Action>) {
         let style = if cx.is_focused() {
             Style::default().add_modifier(Modifier::BOLD)
         } else {
@@ -135,7 +135,7 @@ struct Status {
 }
 
 impl Component<Action> for Status {
-    fn render(&self, frame: &mut Frame, area: Rect, _: &RenderContext<'_, Action>) {
+    fn render(&self, frame: &mut Frame, area: Rect, _: &RenderContext<'_, '_, Action>) {
         frame.render_widget(Paragraph::new(self.text.clone()), area);
     }
 }
@@ -165,7 +165,7 @@ impl Component<Action> for ConfirmOverlay {
         }
     }
 
-    fn render(&self, frame: &mut Frame, area: Rect, _: &RenderContext<'_, Action>) {
+    fn render(&self, frame: &mut Frame, area: Rect, _: &RenderContext<'_, '_, Action>) {
         let verb = if self.delta > 0 {
             "increment"
         } else {
@@ -271,7 +271,7 @@ impl Component<Action> for Root {
         }
     }
 
-    fn render(&self, frame: &mut Frame, area: Rect, cx: &RenderContext<'_, Action>) {
+    fn render(&self, frame: &mut Frame, area: Rect, cx: &RenderContext<'_, '_, Action>) {
         let Some(children) = &self.children else {
             return;
         };

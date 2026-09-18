@@ -264,7 +264,7 @@ impl Component<Action> for ModelsApp {
         }
     }
 
-    fn render(&self, frame: &mut Frame, area: Rect, _cx: &RenderContext<'_, Action>) {
+    fn render(&self, frame: &mut Frame, area: Rect, _cx: &RenderContext<'_, '_, Action>) {
         match self.screen {
             Screen::Loading => render_loading(frame, area),
             Screen::List => self.render_list(frame, area),

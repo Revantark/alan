@@ -159,7 +159,7 @@ impl Component<AlanAction> for AlanRoot {
         }
     }
 
-    fn render(&self, frame: &mut Frame, area: Rect, cx: &RenderContext<'_, AlanAction>) {
+    fn render(&self, frame: &mut Frame, area: Rect, cx: &RenderContext<'_, '_, AlanAction>) {
         // Body area is everything below the header row (if present).
         let body_area = if let Some(header) = self.header {
             let [header_area, body] =

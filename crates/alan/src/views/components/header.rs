@@ -10,7 +10,7 @@ use tui::{Component, RenderContext};
 pub struct Header;
 
 impl<A: 'static> Component<A> for Header {
-    fn render(&self, frame: &mut Frame, area: Rect, _cx: &RenderContext<'_, A>) {
+    fn render(&self, frame: &mut Frame, area: Rect, _cx: &RenderContext<'_, '_, A>) {
         let header = Paragraph::new(Line::from(vec![Span::styled(
             " alan ",
             Style::default()

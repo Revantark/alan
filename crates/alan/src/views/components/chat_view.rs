@@ -359,7 +359,7 @@ impl Component<AlanAction> for ChatView {
         }
     }
 
-    fn render(&self, frame: &mut Frame, area: Rect, cx: &RenderContext<'_, AlanAction>) {
+    fn render(&self, frame: &mut Frame, area: Rect, cx: &RenderContext<'_, '_, AlanAction>) {
         let Some(chat) = self.chat else {
             return;
         };
@@ -417,7 +417,7 @@ fn render_attachments(
     frame: &mut Frame,
     area: Rect,
     editor: Entity<PromptEditor>,
-    cx: &RenderContext<'_, AlanAction>,
+    cx: &RenderContext<'_, '_, AlanAction>,
 ) {
     if area.height == 0 {
         return;

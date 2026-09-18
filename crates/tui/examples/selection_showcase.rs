@@ -203,7 +203,7 @@ impl Component<Action> for TextPane {
         ActionStatus::Handled
     }
 
-    fn render(&self, frame: &mut Frame, area: Rect, _: &RenderContext<'_, Action>) {
+    fn render(&self, frame: &mut Frame, area: Rect, _: &RenderContext<'_, '_, Action>) {
         let block = Block::default()
             .borders(Borders::ALL)
             .title(TextPane::TITLE);
@@ -283,7 +283,7 @@ impl Component<Action> for ListPane {
         ActionStatus::Handled
     }
 
-    fn render(&self, frame: &mut Frame, area: Rect, _: &RenderContext<'_, Action>) {
+    fn render(&self, frame: &mut Frame, area: Rect, _: &RenderContext<'_, '_, Action>) {
         let block = Block::default()
             .borders(Borders::ALL)
             .title(ListPane::TITLE);
@@ -399,7 +399,7 @@ impl Component<Action> for NotesPane {
         ActionStatus::Handled
     }
 
-    fn render(&self, frame: &mut Frame, area: Rect, _: &RenderContext<'_, Action>) {
+    fn render(&self, frame: &mut Frame, area: Rect, _: &RenderContext<'_, '_, Action>) {
         let block = Block::default()
             .borders(Borders::ALL)
             .title(NotesPane::TITLE);
@@ -462,7 +462,7 @@ struct StatusBar {
 }
 
 impl Component<Action> for StatusBar {
-    fn render(&self, frame: &mut Frame, area: Rect, _: &RenderContext<'_, Action>) {
+    fn render(&self, frame: &mut Frame, area: Rect, _: &RenderContext<'_, '_, Action>) {
         let consumer = self.last_consumer.as_deref().unwrap_or("none");
         let kind = self.last_kind.as_deref().unwrap_or("-");
         let text = Line::from(vec![
@@ -580,7 +580,7 @@ impl Component<Action> for ModalOverlay {
         ActionStatus::Handled
     }
 
-    fn render(&self, frame: &mut Frame, area: Rect, _: &RenderContext<'_, Action>) {
+    fn render(&self, frame: &mut Frame, area: Rect, _: &RenderContext<'_, '_, Action>) {
         let popup = self.popup(area);
         frame.render_widget(Clear, popup);
         let block = Block::default().borders(Borders::ALL).title(" overlay ");
@@ -696,7 +696,7 @@ impl Component<Action> for Root {
         }
     }
 
-    fn render(&self, frame: &mut Frame, area: Rect, cx: &RenderContext<'_, Action>) {
+    fn render(&self, frame: &mut Frame, area: Rect, cx: &RenderContext<'_, '_, Action>) {
         let [main, status_row] =
             Layout::vertical([Constraint::Min(3), Constraint::Length(1)]).areas(area);
 

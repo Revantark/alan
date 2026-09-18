@@ -33,7 +33,7 @@ impl Component<A> for Pane {
         ActionStatus::Handled
     }
 
-    fn render(&self, frame: &mut ratatui::Frame, area: Rect, _cx: &RenderContext<'_, A>) {
+    fn render(&self, frame: &mut ratatui::Frame, area: Rect, _cx: &RenderContext<'_, '_, A>) {
         Paragraph::new("content").render(area, frame.buffer_mut());
     }
 }
@@ -51,7 +51,7 @@ impl Component<A> for Root {
         self.pane = Some(pane);
     }
 
-    fn render(&self, frame: &mut ratatui::Frame, area: Rect, cx: &RenderContext<'_, A>) {
+    fn render(&self, frame: &mut ratatui::Frame, area: Rect, cx: &RenderContext<'_, '_, A>) {
         let inner = Rect::new(area.x + 2, area.y + 1, area.width - 4, area.height - 2);
         if let Some(pane) = self.pane {
             cx.render_entity(pane, frame, inner);
@@ -60,14 +60,22 @@ impl Component<A> for Root {
 }
 
 /// Mirrors the event loop's `flush_requests`: inserts queued by `init` land
-/// in the store here, not synchronously during `cx.insert`.
+/// in the store here, not synchronously during `cx.insert`. Loops until
+/// nothing is pending, because children inserted during an `init` queue
+/// their own inserts/inits.
 fn flush_pending(core: &mut RuntimeState<A>, store: &mut EntityStore<A>) {
-    while let Some((id, slot)) = core.pending_inserts.pop_front() {
-        store.insert_slot(id, slot);
-    }
-    for id in std::mem::take(&mut core.pending_inits) {
-        let mut cx = Ctx::new(core, store, id);
-        store.init_if_needed(id, &mut cx);
+    loop {
+        while let Some((id, slot)) = core.pending_inserts.pop_front() {
+            store.insert_slot(id, slot);
+        }
+        let pending = std::mem::take(&mut core.pending_inits);
+        if pending.is_empty() && core.pending_inserts.is_empty() {
+            break;
+        }
+        for id in pending {
+            let mut cx = Ctx::new(core, store, id);
+            store.init_if_needed(id, &mut cx);
+        }
     }
 }
 
@@ -122,4 +130,340 @@ fn draw_then_mouse_hits_child_not_root() {
         ActionStatus::Handled
     );
     assert_eq!(hits.get(), 1, "pane should have received the mouse event");
+}
+
+// --- render_with_state / cx.state tests -------------------------------------
+
+use std::cell::RefCell as StdRefCell;
+use std::rc::Rc as StdRc;
+
+/// Records the typed state seen during render, or "" when none.
+struct StateReader {
+    seen: StdRc<StdRefCell<String>>,
+    expect: &'static str,
+}
+
+impl Component<A> for StateReader {
+    fn render(&self, _frame: &mut ratatui::Frame, _area: Rect, cx: &RenderContext<'_, '_, A>) {
+        let text = match cx.state::<String>() {
+            Some(s) => s.clone(),
+            None => "(none)".to_string(),
+        };
+        assert_eq!(text, self.expect, "state seen by StateReader");
+        self.seen.borrow_mut().push_str(&text);
+        self.seen.borrow_mut().push('\n');
+    }
+}
+
+struct Provider {
+    child: Option<Entity<StateReader>>,
+    middle: Option<Entity<Middle>>,
+    log: StdRc<StdRefCell<String>>,
+}
+
+impl Component<A> for Provider {
+    fn init(&mut self, cx: &mut crate::context::Context<'_, Self, A>) {
+        self.child = Some(cx.insert(StateReader {
+            seen: self.log.clone(),
+            expect: "hello",
+        }));
+        self.middle = Some(cx.insert(Middle {
+            leaf: None,
+            log: self.log.clone(),
+        }));
+    }
+
+    fn render(&self, frame: &mut ratatui::Frame, area: Rect, cx: &RenderContext<'_, '_, A>) {
+        let half = Rect::new(area.x, area.y, area.width / 2, area.height);
+        let other = Rect::new(
+            area.x + area.width / 2,
+            area.y,
+            area.width / 2,
+            area.height,
+        );
+        // Child reads the provided state.
+        if let Some(child) = self.child {
+            cx.render_with_state(child, frame, half, &"hello".to_string());
+        }
+        // Middle renders its own child via plain render_entity; the state
+        // provided to Middle propagates down to it.
+        if let Some(middle) = self.middle {
+            cx.render_with_state(middle, frame, other, &"hello".to_string());
+        }
+    }
+}
+
+/// Renders its child with plain `render_entity`: the state provided to it by
+/// its parent must stay visible to that child.
+struct Middle {
+    leaf: Option<Entity<StateReader>>,
+    log: StdRc<StdRefCell<String>>,
+}
+
+impl Component<A> for Middle {
+    fn init(&mut self, cx: &mut crate::context::Context<'_, Self, A>) {
+        self.leaf = Some(cx.insert(StateReader {
+            seen: self.log.clone(),
+            expect: "hello",
+        }));
+    }
+
+    fn render(&self, frame: &mut ratatui::Frame, area: Rect, cx: &RenderContext<'_, '_, A>) {
+        if let Some(leaf) = self.leaf {
+            cx.render_entity(leaf, frame, area);
+        }
+    }
+}
+
+#[test]
+fn provided_state_reaches_child_and_propagates_to_grandchild() {
+    let log = StdRc::new(StdRefCell::new(String::new()));
+    let mut store = EntityStore::new();
+    let root = store.insert(Provider {
+        child: None,
+        middle: None,
+        log: log.clone(),
+    });
+    let mut core = core_for();
+    {
+        let mut cx = Ctx::new(&mut core, &store, root.id());
+        store.init_if_needed(root.id(), &mut cx);
+    }
+    flush_pending(&mut core, &mut store);
+
+    let mut terminal = Terminal::new(TestBackend::new(40, 12)).unwrap();
+    terminal
+        .draw(|frame| {
+            render::draw(root.id(), &OverlayStack::new(), &store, frame, None);
+        })
+        .unwrap();
+
+    assert_eq!(*log.borrow(), "hello\nhello\n");
+}
+
+struct Shadower {
+    leaf: Option<Entity<StateReader>>,
+    log: StdRc<StdRefCell<String>>,
+}
+
+impl Component<A> for Shadower {
+    fn init(&mut self, cx: &mut crate::context::Context<'_, Self, A>) {
+        self.leaf = Some(cx.insert(StateReader {
+            seen: self.log.clone(),
+            expect: "shadow",
+        }));
+    }
+
+    fn render(&self, frame: &mut ratatui::Frame, area: Rect, cx: &RenderContext<'_, '_, A>) {
+        if let Some(leaf) = self.leaf {
+            // Shadows the "hello" provided by the ancestor.
+            cx.render_with_state(leaf, frame, area, &"shadow".to_string());
+        }
+    }
+}
+
+struct ShadowRoot {
+    reader: Option<Entity<StateReader>>,
+    shadower: Option<Entity<Shadower>>,
+    log: StdRc<StdRefCell<String>>,
+}
+
+impl Component<A> for ShadowRoot {
+    fn init(&mut self, cx: &mut crate::context::Context<'_, Self, A>) {
+        self.reader = Some(cx.insert(StateReader {
+            seen: self.log.clone(),
+            expect: "outer",
+        }));
+        self.shadower = Some(cx.insert(Shadower {
+            leaf: None,
+            log: self.log.clone(),
+        }));
+    }
+
+    fn render(&self, frame: &mut ratatui::Frame, area: Rect, cx: &RenderContext<'_, '_, A>) {
+        let top = Rect::new(area.x, area.y, area.width, 1);
+        let bottom = Rect::new(area.x, area.y + 1, area.width, area.height - 1);
+        if let Some(reader) = self.reader {
+            cx.render_with_state(reader, frame, top, &"outer".to_string());
+        }
+        if let Some(shadower) = self.shadower {
+            cx.render_entity(shadower, frame, bottom);
+        }
+    }
+}
+
+#[test]
+fn nested_render_with_state_shadows_outer() {
+    let log = StdRc::new(StdRefCell::new(String::new()));
+    let mut store = EntityStore::new();
+    let root = store.insert(ShadowRoot {
+        reader: None,
+        shadower: None,
+        log: log.clone(),
+    });
+    let mut core = core_for();
+    {
+        let mut cx = Ctx::new(&mut core, &store, root.id());
+        store.init_if_needed(root.id(), &mut cx);
+    }
+    flush_pending(&mut core, &mut store);
+
+    let mut terminal = Terminal::new(TestBackend::new(40, 12)).unwrap();
+    terminal
+        .draw(|frame| {
+            render::draw(root.id(), &OverlayStack::new(), &store, frame, None);
+        })
+        .unwrap();
+
+    assert_eq!(*log.borrow(), "outer\nshadow\n");
+}
+
+/// No provider anywhere: `state()` must be `None`.
+struct BareReader {
+    seen: StdRc<StdRefCell<bool>>,
+}
+
+impl Component<A> for BareReader {
+    fn render(&self, _frame: &mut ratatui::Frame, _area: Rect, cx: &RenderContext<'_, '_, A>) {
+        assert!(cx.state::<String>().is_none(), "no state should be visible");
+        *self.seen.borrow_mut() = true;
+    }
+}
+
+struct BareRoot {
+    reader: Option<Entity<BareReader>>,
+    seen: StdRc<StdRefCell<bool>>,
+}
+
+impl Component<A> for BareRoot {
+    fn init(&mut self, cx: &mut crate::context::Context<'_, Self, A>) {
+        self.reader = Some(cx.insert(BareReader {
+            seen: self.seen.clone(),
+        }));
+    }
+
+    fn render(&self, frame: &mut ratatui::Frame, area: Rect, cx: &RenderContext<'_, '_, A>) {
+        if let Some(reader) = self.reader {
+            cx.render_entity(reader, frame, area);
+        }
+    }
+}
+
+#[test]
+fn no_provider_means_no_state() {
+    let seen = StdRc::new(StdRefCell::new(false));
+    let mut store = EntityStore::new();
+    let root = store.insert(BareRoot {
+        reader: None,
+        seen: seen.clone(),
+    });
+    let mut core = core_for();
+    {
+        let mut cx = Ctx::new(&mut core, &store, root.id());
+        store.init_if_needed(root.id(), &mut cx);
+    }
+    flush_pending(&mut core, &mut store);
+
+    let mut terminal = Terminal::new(TestBackend::new(40, 12)).unwrap();
+    terminal
+        .draw(|frame| {
+            render::draw(root.id(), &OverlayStack::new(), &store, frame, None);
+        })
+        .unwrap();
+
+    assert!(*seen.borrow(), "bare reader rendered");
+}
+
+#[test]
+fn expect_state_panics_without_provider() {
+    struct Panner;
+    impl Component<A> for Panner {
+        fn render(&self, _: &mut ratatui::Frame, _: Rect, cx: &RenderContext<'_, '_, A>) {
+            let _ = cx.expect_state::<String>();
+        }
+    }
+    struct PannerRoot {
+        child: Option<Entity<Panner>>,
+    }
+    impl Component<A> for PannerRoot {
+        fn init(&mut self, cx: &mut crate::context::Context<'_, Self, A>) {
+            self.child = Some(cx.insert(Panner));
+        }
+        fn render(&self, frame: &mut ratatui::Frame, area: Rect, cx: &RenderContext<'_, '_, A>) {
+            if let Some(child) = self.child {
+                // Plain render_entity: no state provided.
+                cx.render_entity(child, frame, area);
+            }
+        }
+    }
+
+    let mut store = EntityStore::new();
+    let root = store.insert(PannerRoot { child: None });
+    let mut core = core_for();
+    {
+        let mut cx = Ctx::new(&mut core, &store, root.id());
+        store.init_if_needed(root.id(), &mut cx);
+    }
+    flush_pending(&mut core, &mut store);
+
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let mut terminal = Terminal::new(TestBackend::new(40, 12)).unwrap();
+        terminal
+            .draw(|frame| {
+                render::draw(root.id(), &OverlayStack::new(), &store, frame, None);
+            })
+            .unwrap();
+    }));
+    assert!(result.is_err(), "expect_state must panic without a provider");
+}
+
+#[test]
+fn expect_state_returns_value_when_provided() {
+    struct Reader {
+        seen: StdRc<StdRefCell<String>>,
+    }
+    impl Component<A> for Reader {
+        fn render(&self, _: &mut ratatui::Frame, _: Rect, cx: &RenderContext<'_, '_, A>) {
+            let state: &String = cx.expect_state::<String>();
+            self.seen.borrow_mut().push_str(state);
+        }
+    }
+    struct Root {
+        child: Option<Entity<Reader>>,
+        seen: StdRc<StdRefCell<String>>,
+    }
+    impl Component<A> for Root {
+        fn init(&mut self, cx: &mut crate::context::Context<'_, Self, A>) {
+            self.child = Some(cx.insert(Reader {
+                seen: self.seen.clone(),
+            }));
+        }
+        fn render(&self, frame: &mut ratatui::Frame, area: Rect, cx: &RenderContext<'_, '_, A>) {
+            if let Some(child) = self.child {
+                cx.render_with_state(child, frame, area, &"provided".to_string());
+            }
+        }
+    }
+
+    let seen = StdRc::new(StdRefCell::new(String::new()));
+    let mut store = EntityStore::new();
+    let root = store.insert(Root {
+        child: None,
+        seen: seen.clone(),
+    });
+    let mut core = core_for();
+    {
+        let mut cx = Ctx::new(&mut core, &store, root.id());
+        store.init_if_needed(root.id(), &mut cx);
+    }
+    flush_pending(&mut core, &mut store);
+
+    let mut terminal = Terminal::new(TestBackend::new(40, 12)).unwrap();
+    terminal
+        .draw(|frame| {
+            render::draw(root.id(), &OverlayStack::new(), &store, frame, None);
+        })
+        .unwrap();
+
+    assert_eq!(*seen.borrow(), "provided");
 }

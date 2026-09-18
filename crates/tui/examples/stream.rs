@@ -162,7 +162,7 @@ impl Component<Action> for StreamView {
         }
     }
 
-    fn render(&self, frame: &mut Frame, area: Rect, cx: &RenderContext<'_, Action>) {
+    fn render(&self, frame: &mut Frame, area: Rect, cx: &RenderContext<'_, '_, Action>) {
         let border_style = if cx.is_focused() {
             Style::default().add_modifier(Modifier::BOLD)
         } else {
@@ -186,7 +186,7 @@ struct Status {
 }
 
 impl Component<Action> for Status {
-    fn render(&self, frame: &mut Frame, area: Rect, _cx: &RenderContext<'_, Action>) {
+    fn render(&self, frame: &mut Frame, area: Rect, _cx: &RenderContext<'_, '_, Action>) {
         frame.render_widget(Paragraph::new(self.text.clone()), area);
     }
 }
@@ -233,7 +233,7 @@ impl Component<Action> for Root {
         }
     }
 
-    fn render(&self, frame: &mut Frame, area: Rect, cx: &RenderContext<'_, Action>) {
+    fn render(&self, frame: &mut Frame, area: Rect, cx: &RenderContext<'_, '_, Action>) {
         let [main_area, status_area] =
             Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).areas(area);
         if let Some(view) = self.view {

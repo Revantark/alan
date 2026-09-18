@@ -12,20 +12,29 @@
 use crossterm::event::MouseEvent;
 use ratatui::Frame;
 use ratatui::layout::Rect;
+use std::any::Any;
 
 use crate::context::Context;
 use crate::entity::{Entity, EntityId, EntityStore};
 
 /// Read-only capabilities available during render.
-pub struct RenderContext<'a, A: 'static> {
+///
+/// `'cx` is the lifetime of the current render pass. Ancestors can provide
+/// state to their descendants via
+/// [`render_with_state`](Self::render_with_state); the reference is
+/// guaranteed to live for the child's render call because a child's render
+/// always happens synchronously inside its parent's render.
+pub struct RenderContext<'a, 'cx, A: 'static> {
     pub(crate) store: &'a EntityStore<A>,
     /// The entity that currently holds focus, if any.
     pub(crate) focused: Option<EntityId>,
     /// The entity this context renders.
     pub(crate) entity: Option<EntityId>,
+    /// State provided by an ancestor for this render pass, if any.
+    pub(crate) state: Option<&'cx dyn Any>,
 }
 
-impl<'a, A> RenderContext<'a, A> {
+impl<'a, 'cx, A> RenderContext<'a, 'cx, A> {
     pub(crate) fn new(
         store: &'a EntityStore<A>,
         focused: Option<EntityId>,
@@ -35,6 +44,7 @@ impl<'a, A> RenderContext<'a, A> {
             store,
             focused,
             entity,
+            state: None,
         }
     }
 
@@ -44,13 +54,76 @@ impl<'a, A> RenderContext<'a, A> {
     }
 
     /// Render a child entity into `area`.
-    pub fn render_entity<E: Component<A>>(&self, entity: Entity<E>, frame: &mut Frame, area: Rect) {
+    ///
+    /// State provided by an ancestor remains visible to the child and its
+    /// descendants, unless the child itself calls
+    /// [`render_with_state`](Self::render_with_state) (which shadows the
+    /// outer state for its own descendants).
+    pub fn render_entity<E: Component<A>>(
+        &self,
+        entity: Entity<E>,
+        frame: &mut Frame,
+        area: Rect,
+    ) {
         let cx = RenderContext {
             store: self.store,
             focused: self.focused,
             entity: Some(entity.id()),
+            state: self.state,
         };
         self.store.render_entity(entity.id(), frame, area, &cx);
+    }
+
+    /// Render a child entity into `area`, providing `state` for the child
+    /// and its descendants.
+    ///
+    /// The child can read it with [`state`](Self::state) during its render
+    /// call. Because a child's render is always a synchronous call nested
+    /// inside the parent's render, the borrow of `state` lives exactly as
+    /// long as the child's render — the compiler checks this via the `'cx`
+    /// lifetime, so no runtime or unsafe machinery is involved. Providing a
+    /// new state shadows the one seen by this context's entity, but only for
+    /// the child's subtree.
+    pub fn render_with_state<S: 'static, E: Component<A>>(
+        &self,
+        entity: Entity<E>,
+        frame: &mut Frame,
+        area: Rect,
+        state: &'cx S,
+    ) {
+        let cx = RenderContext {
+            store: self.store,
+            focused: self.focused,
+            entity: Some(entity.id()),
+            state: Some(state),
+        };
+        self.store.render_entity(entity.id(), frame, area, &cx);
+    }
+
+    /// The state provided by an ancestor for this render pass, if it is of
+    /// type `S`. Returns `None` when no ancestor provided state or when the
+    /// provided state is of a different type.
+    pub fn state<S: 'static>(&self) -> Option<&'cx S> {
+        self.state?.downcast_ref::<S>()
+    }
+
+    /// Like [`state`](Self::state), but panics when an ancestor did not
+    /// provide state of type `S`.
+    ///
+    /// Use this in components that cannot render without their state — a
+    /// missing or mistyped provider becomes an immediate, named error
+    /// instead of a silent fallback. Components that tolerate absence
+    /// should use [`state`](Self::state) instead.
+    pub fn expect_state<S: 'static>(&self) -> &'cx S {
+        match self.state::<S>() {
+            Some(state) => state,
+            None => panic!(
+                "no state of type {} provided; the parent must render this \
+                 component with render_with_state passing a &{}",
+                std::any::type_name::<S>(),
+                std::any::type_name::<S>(),
+            ),
+        }
     }
 
     /// Read another entity's state during render. The target's slot is locked
@@ -134,5 +207,5 @@ pub trait Component<A: 'static>: 'static {
 
     /// Render the component's current state. Rendering must not perform I/O
     /// or mutate state.
-    fn render(&self, frame: &mut Frame, area: Rect, cx: &RenderContext<'_, A>);
+    fn render(&self, frame: &mut Frame, area: Rect, cx: &RenderContext<'_, '_, A>);
 }

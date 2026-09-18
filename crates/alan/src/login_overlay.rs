@@ -252,7 +252,7 @@ impl Component<AlanAction> for LoginOverlay {
         }
     }
 
-    fn render(&self, frame: &mut Frame, area: Rect, _cx: &RenderContext<'_, AlanAction>) {
+    fn render(&self, frame: &mut Frame, area: Rect, _cx: &RenderContext<'_, '_, AlanAction>) {
         render_login(frame, area, &self.state);
     }
 }

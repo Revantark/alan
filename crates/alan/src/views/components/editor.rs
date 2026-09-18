@@ -679,7 +679,7 @@ impl Component<AlanAction> for PromptEditor {
         status
     }
 
-    fn render(&self, frame: &mut Frame, area: Rect, cx: &RenderContext<'_, AlanAction>) {
+    fn render(&self, frame: &mut Frame, area: Rect, cx: &RenderContext<'_, '_, AlanAction>) {
         let background = Paragraph::new("").style(Style::default().bg(theme::EDITOR_BG));
         frame.render_widget(background, area);
 

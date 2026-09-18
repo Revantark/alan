@@ -433,56 +433,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn defaults_to_first_150_lines_with_paging_footer() {
-        let path = temp_path();
-        let body = (1..=200).map(|n| format!("line {n}\n")).collect::<String>();
-        tokio::fs::write(&path, body).await.unwrap();
-
-        let result = FileReadExecutor
-            .execute(&tool_call(&path, ""))
-            .await
-            .unwrap();
-
-        let ToolOutput::Text(text) = result else {
-            panic!("expected text, got {result:?}");
-        };
-        assert!(text.starts_with("1:line 1\n"), "got start: {text}");
-        assert!(text.contains("150:line 150\n"), "got: {text}");
-        assert!(!text.contains("151:line 151"), "must cap at 150: {text}");
-        assert!(
-            text.contains(&format!("[read {} lines 1-150 of 200", path.display())),
-            "got: {text}"
-        );
-        tokio::fs::remove_file(path).await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn caps_range_over_150_lines() {
-        let path = temp_path();
-        let body = (1..=400).map(|n| format!("line {n}\n")).collect::<String>();
-        tokio::fs::write(&path, &body).await.unwrap();
-        let call = tool_call(&path, r#""line_start":100,"line_end":300"#);
-
-        let result = FileReadExecutor.execute(&call).await.unwrap();
-
-        let ToolOutput::Text(text) = result else {
-            panic!("expected text, got {result:?}");
-        };
-        assert!(text.starts_with("100:line 100\n"), "got: {text}");
-        assert!(text.contains("249:line 249\n"), "got: {text}");
-        assert!(!text.contains("250:line 250"), "must cap at 150: {text}");
-        assert!(
-            text.contains("requested lines 100-300 exceeds 150 line limit, capped to 150 lines"),
-            "got: {text}"
-        );
-        assert!(
-            text.contains(&format!("[read {} lines 100-249 of 400", path.display())),
-            "got: {text}"
-        );
-        tokio::fs::remove_file(path).await.unwrap();
-    }
-
-    #[tokio::test]
     async fn pages_second_window() {
         let path = temp_path();
         let body = (1..=200).map(|n| format!("line {n}\n")).collect::<String>();

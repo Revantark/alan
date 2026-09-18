@@ -89,7 +89,7 @@ pub(crate) trait ComponentSlot<A>: 'static {
 
     fn handle_mouse(&mut self, mouse: MouseEvent, area: Rect, cx: &mut Ctx<'_, A>) -> ActionStatus;
 
-    fn render(&self, frame: &mut Frame, area: Rect, cx: &RenderContext<'_, A>);
+    fn render(&self, frame: &mut Frame, area: Rect, cx: &RenderContext<'_, '_, A>);
 
     fn as_any(&self) -> &dyn Any;
 
@@ -121,7 +121,7 @@ where
         S::handle_mouse(self, mouse, area, &mut typed)
     }
 
-    fn render(&self, frame: &mut Frame, area: Rect, cx: &RenderContext<'_, A>) {
+    fn render(&self, frame: &mut Frame, area: Rect, cx: &RenderContext<'_, '_, A>) {
         S::render(self, frame, area, cx);
     }
 
@@ -234,7 +234,7 @@ impl<A: 'static> EntityStore<A> {
         id: EntityId,
         frame: &mut Frame,
         area: Rect,
-        cx: &RenderContext<'_, A>,
+        cx: &RenderContext<'_, '_, A>,
     ) {
         // Record before rendering: children register their areas during the
         // parent's render call, so children land later in the cache and win
@@ -327,7 +327,7 @@ mod tests {
     }
 
     impl Component<()> for Counter {
-        fn render(&self, _: &mut Frame, _: Rect, _: &RenderContext<'_, ()>) {}
+        fn render(&self, _: &mut Frame, _: Rect, _: &RenderContext<'_, '_, ()>) {}
     }
 
     struct ActionProbe;
@@ -336,7 +336,7 @@ mod tests {
             ActionStatus::Handled
         }
 
-        fn render(&self, _: &mut Frame, _: Rect, _: &RenderContext<'_, ()>) {}
+        fn render(&self, _: &mut Frame, _: Rect, _: &RenderContext<'_, '_, ()>) {}
     }
 
     fn core_for<A: 'static>() -> RuntimeState<A> {
@@ -408,7 +408,7 @@ mod tests {
             self.status
         }
 
-        fn render(&self, _: &mut Frame, _: Rect, _: &RenderContext<'_, ()>) {}
+        fn render(&self, _: &mut Frame, _: Rect, _: &RenderContext<'_, '_, ()>) {}
     }
 
     fn mouse_at(col: u16, row: u16) -> crossterm::event::MouseEvent {

@@ -75,7 +75,7 @@ impl Component<Event> for Greet {
         ActionStatus::Handled
     }
 
-    fn render(&self, frame: &mut Frame, area: Rect, _cx: &RenderContext<'_, Event>) {
+    fn render(&self, frame: &mut Frame, area: Rect, _cx: &RenderContext<'_, '_, Event>) {
         let [header, messages, input] = Layout::vertical([
             Constraint::Length(1),
             Constraint::Min(1),

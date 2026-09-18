@@ -976,7 +976,7 @@ impl Component<AlanAction> for ChatHistory {
         }
     }
 
-    fn render(&self, frame: &mut Frame, area: Rect, _cx: &RenderContext<'_, AlanAction>) {
+    fn render(&self, frame: &mut Frame, area: Rect, _cx: &RenderContext<'_, '_, AlanAction>) {
         self.refresh();
         let controller = &self.controller;
         let mut view = self.view.borrow_mut();

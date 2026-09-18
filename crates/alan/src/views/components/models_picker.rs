@@ -113,7 +113,7 @@ impl Component<AlanAction> for SearchListOverlay {
         ActionStatus::Handled
     }
 
-    fn render(&self, frame: &mut Frame, area: Rect, _: &RenderContext<'_, AlanAction>) {
+    fn render(&self, frame: &mut Frame, area: Rect, _: &RenderContext<'_, '_, AlanAction>) {
         self.render_picker(frame, area);
     }
 }

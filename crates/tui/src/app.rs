@@ -125,7 +125,7 @@ mod tests {
     use ratatui::{Frame, layout::Rect};
     struct TestRoot;
     impl Component<()> for TestRoot {
-        fn render(&self, _: &mut Frame, _: Rect, _: &crate::component::RenderContext<'_, ()>) {}
+        fn render(&self, _: &mut Frame, _: Rect, _: &crate::component::RenderContext<'_, '_, ()>) {}
     }
 
     #[test]
@@ -138,7 +138,7 @@ mod tests {
         hits: usize,
     }
     impl Component<()> for Probe {
-        fn render(&self, _: &mut Frame, _: Rect, _: &crate::component::RenderContext<'_, ()>) {}
+        fn render(&self, _: &mut Frame, _: Rect, _: &crate::component::RenderContext<'_, '_, ()>) {}
     }
 
     #[derive(Debug, Clone, PartialEq, Eq)]

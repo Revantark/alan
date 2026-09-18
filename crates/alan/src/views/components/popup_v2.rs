@@ -132,7 +132,7 @@ impl PopupListv2 {
 }
 
 impl Component<AlanAction> for PopupListv2 {
-    fn render(&self, frame: &mut Frame, area: Rect, _: &RenderContext<'_, AlanAction>) {
+    fn render(&self, frame: &mut Frame, area: Rect, _: &RenderContext<'_, '_, AlanAction>) {
         self.render_into(frame, area);
     }
 
