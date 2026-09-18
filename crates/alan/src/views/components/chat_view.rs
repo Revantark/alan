@@ -327,10 +327,7 @@ impl Component<AlanAction> for ChatView {
             }
             // Mode toggle, quit (cancel-or-exit), and wheel scrolling are all
             // owned by the transcript component.
-            AlanAction::ToggleMode
-            | AlanAction::Quit
-            | AlanAction::MouseScrollUp
-            | AlanAction::MouseScrollDown => self.dispatch_chat(action, cx),
+            AlanAction::ToggleMode | AlanAction::Quit => self.dispatch_chat(action, cx),
             AlanAction::Raw(event) => match event {
                 // Mouse traffic is owned by the transcript; it hit-tests its
                 // own rect and ignores misses.

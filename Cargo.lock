@@ -2855,6 +2855,7 @@ dependencies = [
  "serde",
  "tokio",
  "tui-textarea-2",
+ "unicode-width",
 ]
 
 [[package]]

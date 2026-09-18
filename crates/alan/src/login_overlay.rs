@@ -194,16 +194,6 @@ impl Component<AlanAction> for LoginOverlay {
         Self: Sized,
     {
         match action {
-            AlanAction::MouseScrollUp => {
-                self.move_selection(-1);
-                cx.notify();
-                ActionStatus::Handled
-            }
-            AlanAction::MouseScrollDown => {
-                self.move_selection(1);
-                cx.notify();
-                ActionStatus::Handled
-            }
             AlanAction::Paste(text) => {
                 if let LoginState::Prompting { input, .. } = &mut self.state {
                     input.push_str(text);

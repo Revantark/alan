@@ -8,8 +8,6 @@
 use crate::core::settings::{self, Settings, SettingsStore};
 use crate::core::{Activity, ChatController, Entry, SlashCommand};
 use crate::root::{AlanAction, PromptSubmission};
-use crate::views::selection;
-use crate::views::selection::{Selection, TextPosition};
 use crate::views::theme;
 use agent::{Agent, AgentEvent, AgentStream, Mode};
 use crossterm::event::Event;
@@ -26,6 +24,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tui::component::{ActionStatus, Component, RenderContext};
 use tui::context::Context;
+use tui::selection;
+use tui::selection::{Selection, TextPosition};
 use tui::{Subscription, SubscriptionEvent};
 
 use super::transcript::{TranscriptLayout, scrollbar_position};
@@ -809,33 +809,24 @@ impl View {
     fn handle_mouse(&mut self, mouse: &MouseEvent) -> bool {
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) => {
-                if self.is_mouse_in_chat(mouse.column, mouse.row) {
-                    let now = Instant::now();
-                    let is_double_click = self.last_click.is_some_and(|(t, c, r)| {
-                        c == mouse.column
-                            && r == mouse.row
-                            && now.duration_since(t).as_millis() <= 500
-                    });
+                let now = Instant::now();
+                let is_double_click = self.last_click.is_some_and(|(t, c, r)| {
+                    c == mouse.column && r == mouse.row && now.duration_since(t).as_millis() <= 500
+                });
 
-                    if let Some(pos) = self.screen_to_text_pos(mouse.column, mouse.row) {
-                        let lines = self.layout.lines();
-                        if is_double_click && pos.line < lines.len() {
-                            let (start_col, end_col) =
-                                selection::find_word_bounds_at(&lines[pos.line], pos.col);
-                            let sel = Selection::new_word(pos, start_col, end_col);
-                            self.selection = Some(sel);
-                            self.last_click = None;
-                            self.copy_selection();
-                        } else {
-                            self.selection = Some(Selection::new(pos));
-                            self.last_click = Some((now, mouse.column, mouse.row));
-                        }
-                        true
+                if let Some(pos) = self.screen_to_text_pos(mouse.column, mouse.row) {
+                    let lines = self.layout.lines();
+                    if is_double_click && pos.line < lines.len() {
+                        let (start_col, end_col) =
+                            selection::find_word_bounds_at(&lines[pos.line], pos.col);
+                        let sel = Selection::new_word(pos, start_col, end_col);
+                        self.selection = Some(sel);
+                        self.last_click = None;
+                        self.copy_selection();
                     } else {
-                        false
+                        self.selection = Some(Selection::new(pos));
+                        self.last_click = Some((now, mouse.column, mouse.row));
                     }
-                } else if self.selection.is_some() {
-                    self.selection = None;
                     true
                 } else {
                     false
@@ -878,13 +869,6 @@ impl View {
         }
     }
 
-    fn is_mouse_in_chat(&self, column: u16, row: u16) -> bool {
-        column >= self.chat_area.left()
-            && column < self.chat_area.right()
-            && row >= self.chat_area.top()
-            && row < self.chat_area.bottom()
-    }
-
     fn screen_to_text_pos(&self, column: u16, row: u16) -> Option<TextPosition> {
         let rel_row = row.saturating_sub(self.chat_area.top()) as usize;
         let line = self.scroll_offset.saturating_add(rel_row);
@@ -906,6 +890,31 @@ impl View {
 }
 
 impl Component<AlanAction> for ChatHistory {
+    fn handle_mouse(
+        &mut self,
+        mouse: MouseEvent,
+        _area: Rect,
+        cx: &mut Context<'_, Self, AlanAction>,
+    ) -> ActionStatus
+    where
+        Self: Sized,
+    {
+        if mouse.kind == MouseEventKind::ScrollUp {
+            self.push_wheel(-WHEEL_LINES_PER_NOTCH);
+            self.ensure_momentum(cx);
+            return ActionStatus::Handled;
+        } else if mouse.kind == MouseEventKind::ScrollDown {
+            self.push_wheel(WHEEL_LINES_PER_NOTCH);
+            self.ensure_momentum(cx);
+            return ActionStatus::Handled;
+        }
+        let changed = self.handle_mouse_action(&mouse);
+        if changed {
+            cx.notify();
+        }
+        ActionStatus::Handled
+    }
+
     fn handle_action(
         &mut self,
         action: &AlanAction,
@@ -936,18 +945,6 @@ impl Component<AlanAction> for ChatHistory {
                 }
                 ActionStatus::Handled
             }
-            // Wheel notches are coalesced; the self-scheduled momentum ticker
-            // drains them a capped step at a time.
-            AlanAction::MouseScrollUp => {
-                self.push_wheel(-WHEEL_LINES_PER_NOTCH);
-                self.ensure_momentum(cx);
-                ActionStatus::Handled
-            }
-            AlanAction::MouseScrollDown => {
-                self.push_wheel(WHEEL_LINES_PER_NOTCH);
-                self.ensure_momentum(cx);
-                ActionStatus::Handled
-            }
             AlanAction::Raw(event) => match event {
                 Event::Key(key)
                     if key.kind == KeyEventKind::Press
@@ -958,13 +955,6 @@ impl Component<AlanAction> for ChatHistory {
                         _ => self.view.borrow().viewport_height.max(1) as isize,
                     };
                     if self.scroll_by(delta) {
-                        cx.notify();
-                    }
-                    ActionStatus::Handled
-                }
-                Event::Mouse(mouse) => {
-                    let changed = self.handle_mouse_action(mouse);
-                    if changed {
                         cx.notify();
                     }
                     ActionStatus::Handled
@@ -1007,9 +997,8 @@ impl Component<AlanAction> for ChatHistory {
         let viewport_height = usize::from(content_area.height.max(1));
         let scroll = view.sync_scroll(content_height, viewport_height);
 
-        let viewport_lines = view.layout.viewport(scroll, viewport_height);
         let highlighted_lines = selection::apply_selection_to_lines(
-            &viewport_lines,
+            view.layout.viewport(scroll, viewport_height),
             scroll,
             view.selection.as_ref(),
             theme::SELECTION_BG,

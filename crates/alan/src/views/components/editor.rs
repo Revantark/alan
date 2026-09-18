@@ -698,7 +698,13 @@ impl Component<AlanAction> for PromptEditor {
             frame.set_cursor_position(position);
         }
 
-        if let Some(area) = PopupListv2::area_above(area, frame.area(), 5)
+        // Only render the popup entity while it is open: recording its mouse
+        // area would otherwise shadow the bottom rows of the transcript.
+        let popup_visible = self
+            .popup
+            .is_some_and(|popup| cx.read(popup, |p| p.is_open()).unwrap_or(false));
+        if popup_visible
+            && let Some(area) = PopupListv2::area_above(area, frame.area(), 5)
             && let Some(popup) = self.popup
         {
             cx.render_entity(popup, frame, area);

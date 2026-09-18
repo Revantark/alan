@@ -59,6 +59,11 @@ impl PopupListv2 {
         self.items = items;
     }
 
+    /// Whether the popup currently has content to show.
+    pub fn is_open(&self) -> bool {
+        self.open
+    }
+
     /// Whether the popup already holds this snapshot, so a redundant push can
     /// be skipped — keeping the 16ms tick quiet, as the old snapshot diff did.
     pub fn matches(&self, open: bool, message: Option<&str>, items: &[String]) -> bool {

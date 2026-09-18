@@ -9,6 +9,7 @@
 //!
 //! Rendering is read-only and performs no I/O or mutation.
 
+use crossterm::event::MouseEvent;
 use ratatui::Frame;
 use ratatui::layout::Rect;
 
@@ -93,6 +94,28 @@ pub trait Component<A: 'static>: 'static {
 
     /// Handle a synchronous semantic action.
     fn handle_action(&mut self, _action: &A, _cx: &mut Context<'_, Self, A>) -> ActionStatus
+    where
+        Self: Sized,
+    {
+        ActionStatus::Continue
+    }
+
+    /// Handle a mouse event that hit this component's rendered area.
+    ///
+    /// Mouse events are routed by area: the framework hit-tests the pointer
+    /// position against the areas recorded during the last render pass and
+    /// delivers the event to the topmost component under the pointer. Return
+    /// [`ActionStatus::Continue`] to let the event bubble to the parent.
+    ///
+    /// Unlike `handle_action`, the event is a raw crossterm [`MouseEvent`]:
+    /// mouse geometry (columns, rows, drag state) is inherently positional and
+    /// has no meaningful semantic mapping.
+    fn handle_mouse(
+        &mut self,
+        _mouse: MouseEvent,
+        _area: Rect,
+        _cx: &mut Context<'_, Self, A>,
+    ) -> ActionStatus
     where
         Self: Sized,
     {

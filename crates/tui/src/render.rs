@@ -13,12 +13,19 @@ pub(crate) fn draw<A: 'static>(
     frame: &mut Frame,
     focused: Option<EntityId>,
 ) {
+    store.clear_mouse_areas();
     let area = frame.area();
     render_entity(store, root, frame, area, focused);
     if overlays.is_active() {
         for &overlay in overlays.overlays() {
             render_entity(store, overlay, frame, area, focused);
         }
+        // Active overlays consume the whole frame: pointer hits anywhere
+        // route to the topmost overlay, which decides how to react.
+        store.record_mouse_area(
+            *overlays.overlays().last().expect("overlays non-empty"),
+            area,
+        );
     }
 }
 

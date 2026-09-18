@@ -48,6 +48,33 @@ fn dispatch<A: 'static>(
     let _ = store.dispatch_action(root, action, &mut cx);
 }
 
+fn dispatch_mouse<A: 'static>(
+    mouse: crossterm::event::MouseEvent,
+    core: &mut RuntimeState<A>,
+    store: &EntityStore<A>,
+    root: EntityId,
+) {
+    let Some(mut target) = store.hit_test(mouse.column, mouse.row) else {
+        return;
+    };
+    // Bubble up the parent chain while components ignore the event. Overlays
+    // register the full frame area, so when one is active its topmost overlay
+    // is always the first target; it consumes everything itself.
+    loop {
+        let mut cx = Ctx::new(core, store, target);
+        if store.dispatch_mouse(target, mouse, &mut cx) != ActionStatus::Continue {
+            return;
+        }
+        if target == root {
+            return;
+        }
+        match core.parent_map.get(&target).copied() {
+            Some(parent) => target = parent,
+            None => return,
+        }
+    }
+}
+
 fn flush_requests<A: 'static>(core: &mut RuntimeState<A>, store: &mut EntityStore<A>) {
     loop {
         while let Some((id, slot)) = core.pending_inserts.pop_front() {
@@ -318,7 +345,10 @@ where
             maybe_event = events.next() => {
                 let Some(result) = maybe_event else { break };
                 let event = result?;
-                if let Some(action) = key_mapper.map(&event, &input_context) {
+                if let crossterm::event::Event::Mouse(mouse) = &event {
+                    let store = entity_store.lock().expect("entity store poisoned");
+                    dispatch_mouse(*mouse, &mut state, &store, root);
+                } else if let Some(action) = key_mapper.map(&event, &input_context) {
                     let store = entity_store.lock().expect("entity store poisoned");
                     dispatch(&action, &mut state, &store, root);
                 }

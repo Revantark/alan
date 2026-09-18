@@ -7,12 +7,12 @@ use std::path::Path;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
 
 const MAX_FILE_SIZE: usize = 1024 * 1024;
-const MAX_READ_LINES: u64 = 150;
+const MAX_READ_LINES: u64 = 300;
 
 pub fn file_read_definition() -> ToolDefinition {
     ToolDefinition {
         name: "read".into(),
-        description: "Read a file/image, capped at 150 lines per call (oversized ranges return the first 150 lines with a notice). Omit the range for lines 1-150; page larger files with line_start/line_end. Batch independent reads in one block".into(),
+        description: "Read a file/image, capped at 300 lines per call (oversized ranges return the first 300 lines with a notice). Omit the range for lines 1-300; page larger files with line_start/line_end. Batch independent reads in one block".into(),
         parameters: json!({
             "type": "object",
             "properties": {

@@ -11,7 +11,7 @@ use ratatui::layout::Constraint;
 use ratatui::layout::Layout;
 use std::sync::Arc;
 
-use crossterm::event::{Event, KeyCode, KeyModifiers, MouseEventKind};
+use crossterm::event::{Event, KeyCode, KeyModifiers};
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use tui::context::Context;
@@ -30,8 +30,6 @@ use crate::views::{ChatHistory, ChatView, Header, LoginRequested};
 /// [`AlanAction::Raw`] wrapper until a later slice moves it over.
 #[derive(Debug, Clone)]
 pub enum AlanAction {
-    MouseScrollUp,
-    MouseScrollDown,
     ToggleMode,
     Paste(String),
     Submit(PromptSubmission),
@@ -60,11 +58,6 @@ impl KeyMapper<AlanAction> for AlanKeyMapper {
     fn map(&self, event: &Event, _context: &InputContext) -> Option<AlanAction> {
         match event {
             Event::Resize(..) => Some(AlanAction::Resize),
-            Event::Mouse(mouse) => match mouse.kind {
-                MouseEventKind::ScrollUp => Some(AlanAction::MouseScrollUp),
-                MouseEventKind::ScrollDown => Some(AlanAction::MouseScrollDown),
-                _ => Some(AlanAction::Raw(event.clone())),
-            },
             Event::Paste(data) => Some(AlanAction::Paste(data.clone())),
             // Shift+Tab toggles the agent mode (plan/review/normal) before the
             // editor sees it, so the popup never consumes it as tab-completion.
@@ -198,51 +191,5 @@ mod tests {
         ));
         let mapped = mapper.map(&event, &InputContext::default());
         assert!(matches!(mapped, Some(AlanAction::Raw(actual)) if actual == event));
-    }
-
-    #[test]
-    fn mapper_maps_mouse_wheel_regardless_of_context() {
-        use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
-
-        let mapper = AlanKeyMapper;
-        for context in [
-            InputContext::default(),
-            InputContext {
-                overlay_active: true,
-                focus_active: true,
-            },
-        ] {
-            let up = Event::Mouse(MouseEvent {
-                kind: MouseEventKind::ScrollUp,
-                column: 0,
-                row: 0,
-                modifiers: KeyModifiers::NONE,
-            });
-            assert!(matches!(
-                mapper.map(&up, &context),
-                Some(AlanAction::MouseScrollUp)
-            ));
-            let down = Event::Mouse(MouseEvent {
-                kind: MouseEventKind::ScrollDown,
-                column: 0,
-                row: 0,
-                modifiers: KeyModifiers::NONE,
-            });
-            assert!(matches!(
-                mapper.map(&down, &context),
-                Some(AlanAction::MouseScrollDown)
-            ));
-            // Clicks still need chat-area geometry, so they stay raw.
-            let click = Event::Mouse(MouseEvent {
-                kind: MouseEventKind::Down(MouseButton::Left),
-                column: 0,
-                row: 0,
-                modifiers: KeyModifiers::NONE,
-            });
-            assert!(matches!(
-                mapper.map(&click, &context),
-                Some(AlanAction::Raw(_))
-            ));
-        }
     }
 }
