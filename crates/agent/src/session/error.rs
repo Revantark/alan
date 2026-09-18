@@ -23,7 +23,9 @@ pub enum SessionError {
         #[source]
         source: serde_json::Error,
     },
-    #[error("session was created for model {model} (provider {provider}) but that provider is not available")]
+    #[error(
+        "session was created for model {model} (provider {provider}) but that provider is not available"
+    )]
     IncompatibleProvider {
         path: PathBuf,
         model: String,

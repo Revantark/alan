@@ -59,12 +59,7 @@ impl<'a, 'cx, A> RenderContext<'a, 'cx, A> {
     /// descendants, unless the child itself calls
     /// [`render_with_state`](Self::render_with_state) (which shadows the
     /// outer state for its own descendants).
-    pub fn render_entity<E: Component<A>>(
-        &self,
-        entity: Entity<E>,
-        frame: &mut Frame,
-        area: Rect,
-    ) {
+    pub fn render_entity<E: Component<A>>(&self, entity: Entity<E>, frame: &mut Frame, area: Rect) {
         let cx = RenderContext {
             store: self.store,
             focused: self.focused,

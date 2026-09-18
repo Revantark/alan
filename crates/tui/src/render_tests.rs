@@ -175,12 +175,7 @@ impl Component<A> for Provider {
 
     fn render(&self, frame: &mut ratatui::Frame, area: Rect, cx: &RenderContext<'_, '_, A>) {
         let half = Rect::new(area.x, area.y, area.width / 2, area.height);
-        let other = Rect::new(
-            area.x + area.width / 2,
-            area.y,
-            area.width / 2,
-            area.height,
-        );
+        let other = Rect::new(area.x + area.width / 2, area.y, area.width / 2, area.height);
         // Child reads the provided state.
         if let Some(child) = self.child {
             cx.render_with_state(child, frame, half, &"hello".to_string());
@@ -414,7 +409,10 @@ fn expect_state_panics_without_provider() {
             })
             .unwrap();
     }));
-    assert!(result.is_err(), "expect_state must panic without a provider");
+    assert!(
+        result.is_err(),
+        "expect_state must panic without a provider"
+    );
 }
 
 #[test]

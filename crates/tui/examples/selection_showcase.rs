@@ -586,8 +586,13 @@ impl Component<Action> for ModalOverlay {
         let block = Block::default().borders(Borders::ALL).title(" overlay ");
         let inner = block.inner(popup);
         frame.render_widget(block, popup);
-        let highlighted =
-            apply_selection_to_lines(self.lines.clone(), 0, self.selection.as_ref(), SEL_BG, SEL_FG);
+        let highlighted = apply_selection_to_lines(
+            self.lines.clone(),
+            0,
+            self.selection.as_ref(),
+            SEL_BG,
+            SEL_FG,
+        );
         frame.render_widget(Paragraph::new(highlighted), inner);
     }
 }
