@@ -9,6 +9,9 @@
 
 use std::time::Duration;
 
+use alan_tui::context::Context;
+use alan_tui::keymap::KeyMapper;
+use alan_tui::{ActionStatus, Component, InputContext, RenderContext, Runtime, TaskError};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -16,9 +19,6 @@ use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap};
 use reqwest::Client;
 use serde::Deserialize;
-use tui::context::Context;
-use tui::keymap::KeyMapper;
-use tui::{ActionStatus, Component, InputContext, RenderContext, Runtime, TaskError};
 
 const MODELS_URL: &str = "https://openrouter.ai/api/v1/models?limit=10";
 

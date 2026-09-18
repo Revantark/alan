@@ -6,16 +6,16 @@
 use std::collections::VecDeque;
 use std::time::Duration;
 
+use alan_tui::context::Context;
+use alan_tui::entity::Entity;
+use alan_tui::keymap::KeyMapper;
+use alan_tui::subscription::SubscriptionEvent;
+use alan_tui::{ActionStatus, Component, InputContext, RenderContext, Runtime, Subscription};
 use futures_util::Stream;
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
-use tui::context::Context;
-use tui::entity::Entity;
-use tui::keymap::KeyMapper;
-use tui::subscription::SubscriptionEvent;
-use tui::{ActionStatus, Component, InputContext, RenderContext, Runtime, Subscription};
 
 /// Semantic user input for this application.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

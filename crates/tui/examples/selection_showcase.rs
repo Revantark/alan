@@ -16,6 +16,13 @@
 //!
 //! Keys: `o` toggle overlay, `c` clear selections, `q` quit.
 
+use alan_tui::context::Context;
+use alan_tui::entity::Entity;
+use alan_tui::keymap::KeyMapper;
+use alan_tui::selection::{
+    Selection, apply_selection_to_lines, extract_selected_text, find_word_bounds_at, rect_contains,
+};
+use alan_tui::{ActionStatus, Component, InputContext, RenderContext, Runtime};
 use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
@@ -23,13 +30,6 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 use std::time::Duration;
-use tui::context::Context;
-use tui::entity::Entity;
-use tui::keymap::KeyMapper;
-use tui::selection::{
-    Selection, apply_selection_to_lines, extract_selected_text, find_word_bounds_at, rect_contains,
-};
-use tui::{ActionStatus, Component, InputContext, RenderContext, Runtime};
 
 type Cx<'a, T> = Context<'a, T, Action>;
 
@@ -127,9 +127,9 @@ impl TextPane {
         let (line, col) = screen_to_text(block_inner(area, Self::TITLE), self.scroll, col, row);
         let col = col.min(self.lines.get(line).map(line_display_width).unwrap_or(0));
         match &mut self.selection {
-            Some(sel) => sel.update_cursor(tui::TextPosition::new(line, col), &self.lines),
+            Some(sel) => sel.update_cursor(alan_tui::TextPosition::new(line, col), &self.lines),
             None => {
-                self.selection = Some(Selection::new(tui::TextPosition::new(line, col)));
+                self.selection = Some(Selection::new(alan_tui::TextPosition::new(line, col)));
             }
         }
     }
@@ -150,7 +150,7 @@ impl TextPane {
             if let Some(line_ref) = self.lines.get(line) {
                 let (start, end) = find_word_bounds_at(line_ref, scol);
                 self.selection = Some(Selection::new_word(
-                    tui::TextPosition::new(line, scol),
+                    alan_tui::TextPosition::new(line, scol),
                     start,
                     end,
                 ));
@@ -158,7 +158,7 @@ impl TextPane {
         } else {
             self.selection = None;
             let (line, col) = screen_to_text(block_inner(area, Self::TITLE), self.scroll, col, row);
-            self.selection = Some(Selection::new(tui::TextPosition::new(
+            self.selection = Some(Selection::new(alan_tui::TextPosition::new(
                 line,
                 col.min(self.lines.get(line).map(line_display_width).unwrap_or(0)),
             )));
@@ -364,7 +364,7 @@ impl Component<Action> for NotesPane {
                 );
                 let col = col.min(self.lines.get(line).map(line_display_width).unwrap_or(0));
                 self.caret = Some((line, col));
-                self.selection = Some(Selection::new(tui::TextPosition::new(line, col)));
+                self.selection = Some(Selection::new(alan_tui::TextPosition::new(line, col)));
             }
             MouseEventKind::Drag(MouseButton::Left) => {
                 let (line, col) = screen_to_text(
@@ -374,7 +374,7 @@ impl Component<Action> for NotesPane {
                     mouse.row,
                 );
                 let col = col.min(self.lines.get(line).map(line_display_width).unwrap_or(0));
-                let pos = tui::TextPosition::new(line, col);
+                let pos = alan_tui::TextPosition::new(line, col);
                 match &mut self.selection {
                     Some(sel) => sel.update_cursor(pos, &self.lines),
                     None => self.selection = Some(Selection::new(pos)),
@@ -557,13 +557,13 @@ impl Component<Action> for ModalOverlay {
         let (line, col) = screen_to_text(inner, 0, mouse.column, mouse.row);
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) => {
-                self.selection = Some(Selection::new(tui::TextPosition::new(
+                self.selection = Some(Selection::new(alan_tui::TextPosition::new(
                     line,
                     col.min(self.lines.get(line).map(line_display_width).unwrap_or(0)),
                 )));
             }
             MouseEventKind::Drag(MouseButton::Left) => {
-                let pos = tui::TextPosition::new(line, col);
+                let pos = alan_tui::TextPosition::new(line, col);
                 match &mut self.selection {
                     Some(sel) => sel.update_cursor(pos, &self.lines),
                     None => self.selection = Some(Selection::new(pos)),

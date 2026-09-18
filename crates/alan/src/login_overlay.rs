@@ -1,6 +1,8 @@
 //! Login overlay owning the provider authentication flow.
 use crate::root::AlanAction;
 use crate::views::theme;
+use alan_tui::context::Context;
+use alan_tui::{ActionStatus, Component, RenderContext};
 use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers};
 use providers::{AuthMethod, AuthResult, CredentialStore, ProviderId, ProviderRegistry};
 use ratatui::Frame;
@@ -10,8 +12,6 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Clear, Paragraph, Wrap};
 use std::sync::Arc;
-use tui::context::Context;
-use tui::{ActionStatus, Component, RenderContext};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct LoginProvider {
@@ -106,13 +106,13 @@ impl LoginOverlay {
                 provider
                     .validate_auth(&auth_result)
                     .await
-                    .map_err(|e| tui::TaskError(e.into()))?;
+                    .map_err(|e| alan_tui::TaskError(e.into()))?;
 
                 match auth_result {
                     AuthResult::ApiKey(key) => {
                         let credential = providers::Credential::ApiKey { key };
                         if let Err(e) = credentials.put(&provider.id(), credential).await {
-                            return Err(tui::TaskError(e.into()));
+                            return Err(alan_tui::TaskError(e.into()));
                         }
                     }
                 }

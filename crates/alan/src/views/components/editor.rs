@@ -7,6 +7,10 @@
 
 use crate::core::completion::token;
 use crate::core::{Completer, CompletionRequest, ImageAttachment, PathsContext, SlashCommand};
+use alan_tui::context::Context;
+use alan_tui::entity::Entity;
+use alan_tui::subscription::Subscription;
+use alan_tui::{ActionStatus, Component, RenderContext};
 use base64::Engine;
 use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers};
 use ratatui::Frame;
@@ -15,10 +19,6 @@ use ratatui::style::Style;
 use ratatui::widgets::{Paragraph, Widget};
 use std::collections::VecDeque;
 use strum::IntoEnumIterator;
-use tui::context::Context;
-use tui::entity::Entity;
-use tui::subscription::Subscription;
-use tui::{ActionStatus, Component, RenderContext};
 use tui_textarea::{CursorMove, CursorRenderMode, TextArea, WrapMode};
 
 use crate::root::{AlanAction, PromptSubmission};
@@ -602,12 +602,12 @@ fn popup_completion_request(editor: &TextArea<'static>) -> Option<CompletionRequ
 
 /// A spawned scan: walks the workspace and returns its relative paths.
 /// Runs on the blocking thread pool, so it never blocks the UI loop.
-async fn scan_task(root: std::path::PathBuf) -> Result<Vec<String>, tui::TaskError> {
+async fn scan_task(root: std::path::PathBuf) -> Result<Vec<String>, alan_tui::TaskError> {
     let result =
         tokio::task::spawn_blocking(move || crate::core::completion::scan::scan_dir(&root))
             .await
             .unwrap_or_else(|_| Err(std::io::Error::other("scan panicked")));
-    result.map_err(|error| tui::TaskError(Box::new(error)))
+    result.map_err(|error| alan_tui::TaskError(Box::new(error)))
 }
 
 impl Component<AlanAction> for PromptEditor {

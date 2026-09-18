@@ -11,13 +11,13 @@ use ratatui::layout::Constraint;
 use ratatui::layout::Layout;
 use std::sync::Arc;
 
+use alan_tui::context::Context;
+use alan_tui::entity::Entity;
+use alan_tui::keymap::{InputContext, KeyMapper};
+use alan_tui::{ActionStatus, Component, RenderContext, Subscription};
 use crossterm::event::{Event, KeyCode, KeyModifiers};
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use tui::context::Context;
-use tui::entity::Entity;
-use tui::keymap::{InputContext, KeyMapper};
-use tui::{ActionStatus, Component, RenderContext, Subscription};
 
 use crate::core::ImageAttachment;
 use crate::core::chat::ChatController;

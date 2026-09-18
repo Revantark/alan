@@ -5,6 +5,10 @@ use crate::root::{AlanAction, PromptSubmission};
 use crate::views::components::{ForkEvent, ForkOverlay, ModelPick, ModelsPicker};
 use crate::views::theme;
 use agent::{AgentEvent, AgentStream};
+use alan_tui::component::{ActionStatus, Component, RenderContext};
+use alan_tui::context::Context;
+use alan_tui::entity::Entity;
+use alan_tui::{Subscription, SubscriptionEvent};
 use crossterm::event::{Event, KeyCode, KeyEventKind};
 use futures_util::Stream;
 use llm::Usage;
@@ -15,10 +19,6 @@ use ratatui::style::Style;
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::Paragraph;
 use std::sync::Arc;
-use tui::component::{ActionStatus, Component, RenderContext};
-use tui::context::Context;
-use tui::entity::Entity;
-use tui::{Subscription, SubscriptionEvent};
 
 use super::chat_history::ChatHistory;
 use super::editor::{PromptEditor, is_plain_prompt};
@@ -43,7 +43,7 @@ pub struct ChatView {
     editor: Option<Entity<PromptEditor>>,
 
     providers: Arc<ProviderRegistry>,
-    model_subscription: Option<tui::Subscription>,
+    model_subscription: Option<alan_tui::Subscription>,
     /// Subscription to the in-flight agent stream. Dropping it cancels the run.
     prompt: Option<Subscription>,
     /// Fixed-rate repaint ticker, alive only while the agent is streaming.
@@ -169,7 +169,7 @@ impl ChatView {
                 agent
                     .reset_session()
                     .await
-                    .map_err(|error| tui::TaskError(Box::new(error)))
+                    .map_err(|error| alan_tui::TaskError(Box::new(error)))
             },
             move |result, view, _cx| match result {
                 Ok(()) => {
@@ -227,13 +227,13 @@ impl ChatView {
                 agent
                     .set_provider_order(provider_order.clone())
                     .await
-                    .map_err(|error| tui::TaskError(Box::new(error)))?;
+                    .map_err(|error| alan_tui::TaskError(Box::new(error)))?;
 
                 persist_provider_order(&model_id, &provider_order)
                     .await
-                    .map_err(|error| tui::TaskError(error.into()))?;
+                    .map_err(|error| alan_tui::TaskError(error.into()))?;
 
-                Ok::<_, tui::TaskError>(if provider_order.is_empty() {
+                Ok::<_, alan_tui::TaskError>(if provider_order.is_empty() {
                     "provider order cleared (using default)".to_owned()
                 } else {
                     format!("provider order set to {}", provider_order.join(", "))
@@ -270,15 +270,15 @@ impl ChatView {
                 let summary = agent
                     .summarize(focus.as_deref())
                     .await
-                    .map_err(|error| tui::TaskError(Box::new(error)))?;
+                    .map_err(|error| alan_tui::TaskError(Box::new(error)))?;
                 let seed = vec![agent::AgentMessage::user(format!(
                     "Session handoff — continue from this state:\n\n{summary}"
                 ))];
                 agent
                     .reset_session_with(seed)
                     .await
-                    .map_err(|error| tui::TaskError(Box::new(error)))?;
-                Ok::<(), tui::TaskError>(())
+                    .map_err(|error| alan_tui::TaskError(Box::new(error)))?;
+                Ok::<(), alan_tui::TaskError>(())
             },
             move |result, view, cx| {
                 view.controller.set_loading(None);
@@ -319,13 +319,13 @@ impl ChatView {
                 agent
                     .set_reasoning_effort(effort)
                     .await
-                    .map_err(|error| tui::TaskError(Box::new(error)))?;
+                    .map_err(|error| alan_tui::TaskError(Box::new(error)))?;
 
                 persist_reasoning_effort(effort)
                     .await
-                    .map_err(|error| tui::TaskError(error.into()))?;
+                    .map_err(|error| alan_tui::TaskError(error.into()))?;
 
-                Ok::<_, tui::TaskError>(format!("reasoning effort set to {effort}"))
+                Ok::<_, alan_tui::TaskError>(format!("reasoning effort set to {effort}"))
             },
             move |result, view, cx| match result {
                 Ok(msg) => {
@@ -360,9 +360,9 @@ impl ChatView {
                 agent
                     .rename_session(&name)
                     .await
-                    .map_err(|error| tui::TaskError(Box::new(error)))?;
+                    .map_err(|error| alan_tui::TaskError(Box::new(error)))?;
 
-                Ok::<_, tui::TaskError>(format!("Session renamed to {name}"))
+                Ok::<_, alan_tui::TaskError>(format!("Session renamed to {name}"))
             },
             move |result, view, cx| match result {
                 Ok(msg) => {
@@ -437,19 +437,19 @@ impl ChatView {
                             .iter()
                             .find(|p| p.id() == model_info.provider)
                             .ok_or_else(|| {
-                                tui::TaskError("selected provider is unavailable".into())
+                                alan_tui::TaskError("selected provider is unavailable".into())
                             })?;
 
                         let settings = settings::get_settings()
                             .await
-                            .map_err(|e| tui::TaskError(e.into()))?;
+                            .map_err(|e| alan_tui::TaskError(e.into()))?;
 
                         let provider_order = settings.provider_order(&model_info.id);
                         let mut options = agent.model_options().await;
                         options.provider_order = provider_order;
 
                         let model = bind_model(provider.as_ref(), &model_info.id, options)
-                            .map_err(|e| tui::TaskError(e.into()))?;
+                            .map_err(|e| alan_tui::TaskError(e.into()))?;
                         let name = model_info.name.clone();
                         let max_context = model_info.context_length;
                         let reasoning_effort = model.reasoning_effort();
@@ -457,10 +457,10 @@ impl ChatView {
                         agent
                             .set_model(model)
                             .await
-                            .map_err(|e| tui::TaskError(e.into()))?;
+                            .map_err(|e| alan_tui::TaskError(e.into()))?;
                         persist_model(&model_info.id, &model_info.provider)
                             .await
-                            .map_err(|e| tui::TaskError(e.into()))?;
+                            .map_err(|e| alan_tui::TaskError(e.into()))?;
                         Ok((name, max_context, reasoning_effort))
                     },
                     move |result, view, cx| {
@@ -496,9 +496,9 @@ impl ChatView {
                     agent
                         .fork_session(end_index)
                         .await
-                        .map_err(|e| tui::TaskError(Box::new(e)))?;
+                        .map_err(|e| alan_tui::TaskError(Box::new(e)))?;
                     let messages = agent.messages().await;
-                    Ok::<_, tui::TaskError>(messages)
+                    Ok::<_, alan_tui::TaskError>(messages)
                 },
                 move |result, view, cx| {
                     view.fork_in_flight = false;

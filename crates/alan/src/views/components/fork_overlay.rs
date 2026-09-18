@@ -10,6 +10,8 @@
 
 use crate::root::AlanAction;
 use agent::{Agent, AgentMessage};
+use alan_tui::component::{ActionStatus, Component, RenderContext};
+use alan_tui::context::Context;
 use crossterm::event::{Event, KeyCode, KeyEventKind};
 use ratatui::{
     Frame,
@@ -19,8 +21,6 @@ use ratatui::{
     widgets::{Block, Clear, Padding, Paragraph},
 };
 use std::sync::Arc;
-use tui::component::{ActionStatus, Component, RenderContext};
-use tui::context::Context;
 
 /// Emitted by the overlay on selection or cancellation. Carrying the
 /// exclusive end index keeps the parent free of message-type logic.
@@ -144,7 +144,7 @@ impl Component<AlanAction> for ForkOverlay {
         let _ = cx.spawn(
             async move {
                 let messages = agent.messages().await;
-                Ok::<_, tui::TaskError>(messages)
+                Ok::<_, alan_tui::TaskError>(messages)
             },
             move |result, overlay, cx| {
                 // A failed load is not the same as an empty conversation:

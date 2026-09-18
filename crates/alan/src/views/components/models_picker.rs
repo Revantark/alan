@@ -1,4 +1,6 @@
 use crate::{root::AlanAction, views::theme};
+use alan_tui::context::Context;
+use alan_tui::{ActionStatus, Component, RenderContext};
 use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers};
 use ratatui::{
     Frame,
@@ -8,8 +10,6 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Block, BorderType, Paragraph},
 };
-use tui::context::Context;
-use tui::{ActionStatus, Component, RenderContext};
 use unicode_width::UnicodeWidthChar;
 
 #[derive(Debug, Clone, PartialEq, Eq)]

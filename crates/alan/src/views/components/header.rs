@@ -1,10 +1,10 @@
 use crate::views::theme;
+use alan_tui::{Component, RenderContext};
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
-use tui::{Component, RenderContext};
 
 #[derive(Debug, Default)]
 pub struct Header;

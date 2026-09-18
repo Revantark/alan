@@ -12,14 +12,14 @@
 //! picking, command palettes — uses the same widget.
 
 use crate::views::theme;
+use alan_tui::context::Context;
+use alan_tui::{ActionStatus, Component, RenderContext};
 use crossterm::event::{KeyCode, KeyEventKind};
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::Style;
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Padding, Paragraph};
-use tui::context::Context;
-use tui::{ActionStatus, Component, RenderContext};
 
 use crate::root::AlanAction;
 

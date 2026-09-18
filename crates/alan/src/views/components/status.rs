@@ -2,15 +2,15 @@ use crate::core::Activity;
 use crate::root::AlanAction;
 use crate::views::theme;
 use agent::Mode;
+use alan_tui::component::{ActionStatus, Component, RenderContext};
+use alan_tui::context::Context;
+use alan_tui::{Subscription, SubscriptionEvent};
 use llm::{ReasoningEffort, Usage};
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Padding, Paragraph};
-use tui::component::{ActionStatus, Component, RenderContext};
-use tui::context::Context;
-use tui::{Subscription, SubscriptionEvent};
 
 pub(crate) const STATUS_HEIGHT: u16 = 2;
 

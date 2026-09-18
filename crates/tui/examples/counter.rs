@@ -9,16 +9,18 @@
 //! than a global message bus. The root observes each counter's state and reads
 //! it again to derive the status text.
 
+use alan_tui::context::Context;
+use alan_tui::entity::Entity;
+use alan_tui::keymap::KeyMapper;
+use alan_tui::{
+    ActionStatus, Component, InputContext, RenderContext, Runtime, Subscription, TaskError,
+};
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 use std::time::Duration;
-use tui::context::Context;
-use tui::entity::Entity;
-use tui::keymap::KeyMapper;
-use tui::{ActionStatus, Component, InputContext, RenderContext, Runtime, Subscription, TaskError};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Action {

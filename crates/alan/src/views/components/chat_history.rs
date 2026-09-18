@@ -2,6 +2,11 @@ use super::transcript::{TranscriptLayout, scrollbar_position};
 use crate::core::ChatController;
 use crate::root::AlanAction;
 use crate::views::theme;
+use alan_tui::component::{ActionStatus, Component, RenderContext};
+use alan_tui::context::Context;
+use alan_tui::selection;
+use alan_tui::selection::{Selection, TextPosition};
+use alan_tui::{Subscription, SubscriptionEvent};
 use crossterm::event::{Event, KeyCode, KeyEventKind, MouseButton, MouseEvent, MouseEventKind};
 use futures_util::Stream;
 use ratatui::Frame;
@@ -11,11 +16,6 @@ use ratatui::text::Text;
 use ratatui::widgets::{Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState};
 use std::cell::RefCell;
 use std::time::{Duration, Instant};
-use tui::component::{ActionStatus, Component, RenderContext};
-use tui::context::Context;
-use tui::selection;
-use tui::selection::{Selection, TextPosition};
-use tui::{Subscription, SubscriptionEvent};
 
 /// Lines moved per mouse-wheel notch.
 const WHEEL_LINES_PER_NOTCH: isize = 1;

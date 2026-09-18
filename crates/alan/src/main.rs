@@ -10,6 +10,7 @@ use llm::ServerTool;
 use std::time::Duration;
 
 use agent::{Agent, SessionManager, default_tools};
+use alan_tui::Runtime;
 use llm::ReasoningEffort;
 use providers::{
     FileCredentialStore, GoogleProvider, ModelOptions, OpenRouterProvider, Provider,
@@ -17,7 +18,6 @@ use providers::{
 };
 use std::path::PathBuf;
 use std::sync::Arc;
-use tui::Runtime;
 
 use crate::logging::init;
 use crate::root::{AlanKeyMapper, AlanRoot};

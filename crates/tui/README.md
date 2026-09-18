@@ -1,4 +1,4 @@
-# tui
+# alan-tui
 
 A small Ratatui runtime with explicit, typed communication. Components are
 `Component<A>`: they receive semantic actions, own their state, and render it
@@ -8,7 +8,7 @@ without I/O or mutation.
 
 ```toml
 [dependencies]
-tui = "0.1"
+alan-tui = "0.1"
 ```
 
 ## First program
@@ -16,9 +16,9 @@ tui = "0.1"
 Every app needs a root component, a `KeyMapper`, and a `Runtime`:
 
 ```rust
-use tui::{Component, Runtime, KeyMapper, PassthroughMapper, RenderContext};
-use tui::context::Context;
-use tui::entity::Entity;
+use alan_tui::{Component, Runtime, KeyMapper, PassthroughMapper, RenderContext};
+use alan_tui::context::Context;
+use alan_tui::entity::Entity;
 use ratatui::Frame;
 use ratatui::layout::Rect;
 
@@ -30,13 +30,13 @@ enum Action { Quit, Increment, Decrement }
 struct Counter { value: u32 }
 
 impl Component<Action> for Counter {
-    fn handle_action(&mut self, action: &Action, cx: &mut Context<'_, Self, Action>) -> tui::ActionStatus {
+    fn handle_action(&mut self, action: &Action, cx: &mut Context<'_, Self, Action>) -> alan_tui::ActionStatus {
         match action {
             Action::Increment => { self.value += 1; cx.notify(); }
             Action::Decrement => { self.value = self.value.saturating_sub(1); cx.notify(); }
             _ => {}
         }
-        tui::ActionStatus::Handled
+        alan_tui::ActionStatus::Handled
     }
 
     fn render(&self, frame: &mut Frame, area: Rect, cx: &RenderContext<'_, '_, Action>) {
@@ -75,8 +75,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 Run an example to see it in action:
 
 ```bash
-cargo run -p tui --example counter
-cargo run -p tui --example greet
+cargo run -p alan-tui --example counter
+cargo run -p alan-tui --example greet
 ```
 
 ## The `Component<A>` trait

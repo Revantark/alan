@@ -15,8 +15,8 @@ use ratatui::text::Line;
 use ratatui::widgets::{Block, Borders, Paragraph, Widget};
 use tui_textarea::{CursorRenderMode, TextArea, WrapMode};
 
-use tui::context::Context;
-use tui::{ActionStatus, Component, PassthroughMapper, RenderContext, Runtime};
+use alan_tui::context::Context;
+use alan_tui::{ActionStatus, Component, PassthroughMapper, RenderContext, Runtime};
 
 struct Greet {
     messages: Vec<String>,

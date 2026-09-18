@@ -22,15 +22,15 @@
 
 use std::time::Duration;
 
+use alan_tui::context::Context;
+use alan_tui::entity::Entity;
+use alan_tui::{ActionStatus, Component, PassthroughMapper, RenderContext, Runtime};
 use crossterm::event::{Event, KeyCode, KeyEventKind};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::Line;
 use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph, Widget};
-use tui::context::Context;
-use tui::entity::Entity;
-use tui::{ActionStatus, Component, PassthroughMapper, RenderContext, Runtime};
 
 /// The one big state owned by the parent.
 struct Model {

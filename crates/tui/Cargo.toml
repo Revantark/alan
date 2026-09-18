@@ -1,7 +1,8 @@
 [package]
-name = "tui"
+name = "alan-tui"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.85"
 description = "A small Ratatui runtime with explicit, typed communication."
 license = "MIT"
 homepage = "https://github.com/Revantark/alan"
