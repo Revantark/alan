@@ -123,6 +123,7 @@ impl ChatView {
                 Cmd::Help => controller.push_info(crate::core::SlashCommand::help()),
                 Cmd::New => self.start_new_session(cx),
                 Cmd::Models => self.open_models_picker(cx),
+                Cmd::Quit => cx.quit(),
             }
             cx.notify();
             return;

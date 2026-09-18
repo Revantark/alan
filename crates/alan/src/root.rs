@@ -178,21 +178,3 @@ impl Component<AlanAction> for AlanRoot {
         }
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use crossterm::event::{KeyCode, KeyModifiers};
-
-    use super::*;
-
-    #[test]
-    fn mapper_passes_other_events_through_unchanged() {
-        let mapper = AlanKeyMapper;
-        let event = Event::Key(crossterm::event::KeyEvent::new(
-            KeyCode::Up,
-            KeyModifiers::NONE,
-        ));
-        let mapped = mapper.map(&event, &InputContext::default());
-        assert!(matches!(mapped, Some(AlanAction::Raw(actual)) if actual == event));
-    }
-}

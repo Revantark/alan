@@ -26,6 +26,7 @@ pub enum SlashCommand {
     Help,
     // Rename the current session.
     Rename,
+    Quit,
 }
 
 impl SlashCommand {
@@ -91,6 +92,7 @@ impl SlashCommand {
             Self::Help => "list the available commands",
             Self::ModelProviders => "pick a provider from openrouter for the selected model",
             Self::Rename => "rename the current session",
+            Self::Quit => "abort and quit",
         }
     }
 
