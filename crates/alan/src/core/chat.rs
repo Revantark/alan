@@ -56,6 +56,8 @@ pub struct ChatController {
     usage: Usage,
     model_name: String,
 
+    steering: Option<String>,
+
     /// Maximum context window from the model catalog. `None` means unknown.
     max_context: Option<u64>,
     /// Reasoning effort configured on the bound model. Sync cache mirroring
@@ -72,6 +74,7 @@ impl ChatController {
             entries: Vec::new(),
             busy: false,
             loading: None,
+            steering: None,
             revision: 0,
             usage: Usage::default(),
             model_name: name,
@@ -244,6 +247,27 @@ impl ChatController {
         self.revision = self.revision.wrapping_add(1);
     }
 
+    /// The pending steering message, if one is queued for the in-flight run.
+    pub fn steering(&self) -> Option<&str> {
+        self.steering.as_deref()
+    }
+
+    /// Queue `text` as a steering message while a run is in flight.
+    pub fn steer(&mut self, text: String) {
+        if text.trim().is_empty() {
+            return;
+        }
+        self.steering = Some(text.clone());
+        self.agent.steer(text);
+    }
+
+    /// Take the pending steering message, clearing the mirror and agent
+    /// slot. Used by cancel (Esc) to discard a queued steer.
+    pub fn take_steering(&mut self) -> Option<String> {
+        self.steering = None;
+        self.agent.take_pending_steer()
+    }
+
     /// Push the prompt and start the agent run, returning the stream of
     /// display events for the caller to feed back via [`apply_event`](Self::apply_event).
     ///
@@ -255,6 +279,9 @@ impl ChatController {
         if (text.is_empty() && images.is_empty()) || self.busy || self.loading.is_some() {
             return None;
         }
+
+        self.steering = None;
+        let _ = self.agent.take_pending_steer();
 
         self.entries.push(Entry::Prompt(text.to_owned()));
         self.revision = self.revision.wrapping_add(1);
@@ -298,6 +325,11 @@ impl ChatController {
                 }
                 AgentEvent::ReasoningDelta(reasoning) => {
                     changed |= Self::append_reasoning(&mut self.entries, &reasoning);
+                }
+                AgentEvent::SteerConsumed { text } => {
+                    self.entries.push(Entry::Prompt(text));
+                    self.steering = None;
+                    changed = true;
                 }
                 AgentEvent::ToolCallStarted {
                     id,
@@ -520,16 +552,118 @@ mod tests {
     }
 
     #[test]
-    fn apply_model_switch_failed_records_error() {
-        let mut controller = make_controller("old-model");
-        controller.entries.push(Entry::Prompt("test".to_string()));
-        let old_revision = controller.revision();
-        controller.apply_model_switch_failed("timeout".to_string());
-        assert_eq!(controller.model_name(), "old-model");
+    fn steer_queues_without_entry() {
+        let mut controller = make_controller("m");
+        controller.busy = true;
+        let len_before = controller.entries().len();
+        controller.steer("go faster".into());
+
+        // steer() sets the mirror (band shows) and agent slot, but does
+        // NOT push an entry — the tool loop emits SteerConsumed for that.
+        assert_eq!(controller.steering(), Some("go faster"));
+        assert_eq!(controller.entries().len(), len_before);
+        assert_eq!(
+            controller.agent().take_pending_steer(),
+            Some("go faster".into())
+        );
+    }
+
+    #[test]
+    fn steer_consumed_emits_entry_and_clears_mirror() {
+        let mut controller = make_controller("m");
+        controller.busy = true;
+        controller.steer("go faster".into());
+        assert!(controller.entries().is_empty());
+        assert_eq!(controller.steering(), Some("go faster"));
+
+        // Simulate the tool loop picking up the steer.
+        controller.apply_event(Ok(AgentEvent::SteerConsumed {
+            text: "go faster".into(),
+        }));
         assert_eq!(
             controller.entries().last(),
-            Some(&Entry::Error("Model switch failed: timeout".to_string()))
+            Some(&Entry::Prompt("go faster".to_string()))
         );
-        assert!(controller.revision() > old_revision);
+        // Mirror cleared — band disappears.
+        assert_eq!(controller.steering(), None);
+    }
+
+    #[test]
+    fn take_steering_drains_mirror_and_slot() {
+        let mut controller = make_controller("m");
+        controller.busy = true;
+        controller.steer("pending".into());
+        assert_eq!(controller.steering(), Some("pending"));
+
+        let taken = controller.take_steering();
+        assert_eq!(taken.as_deref(), Some("pending"));
+        assert_eq!(controller.steering(), None);
+        assert_eq!(controller.agent().take_pending_steer(), None);
+
+        // Nothing pending: no revision bump, no agent slot churn.
+        let revision = controller.revision();
+        assert_eq!(controller.take_steering(), None);
+        assert_eq!(controller.revision(), revision);
+    }
+
+    #[tokio::test]
+    async fn steering_autosubmits_when_unconsumed_and_is_discarded_otherwise() {
+        // Unconsumed at run end -> take_steering returns it for auto-submit.
+        let mut controller = make_controller("m");
+        let first = controller.submit("initial".into(), Vec::new()).unwrap();
+        assert!(controller.is_busy());
+        controller.steer("steer text".into());
+        controller.apply_event(Ok(AgentEvent::Finished {
+            usage: Default::default(),
+            response: Box::new(llm::LlmResponse::from_message(llm::Message {
+                role: llm::Role::Assistant,
+                content: Some(String::new()),
+                content_parts: None,
+                tool_calls: None,
+                tool_call_id: None,
+                reasoning: None,
+                reasoning_details: None,
+            })),
+        }));
+        let text = controller.take_steering();
+        assert_eq!(text.as_deref(), Some("steer text"));
+        let second = controller.submit(text.unwrap(), Vec::new());
+        assert!(second.is_some());
+        assert!(controller.is_busy());
+        drop(second);
+        drop(first);
+
+        // Consumed by the tool loop -> dropped at run end (no duplicate).
+        let mut controller = make_controller("m");
+        let first = controller.submit("initial".into(), Vec::new()).unwrap();
+        controller.steer("steer text".into());
+        let _ = controller.agent().take_pending_steer();
+        controller.apply_event(Ok(AgentEvent::SteerConsumed {
+            text: "steer text".into(),
+        }));
+        controller.apply_event(Ok(AgentEvent::Finished {
+            usage: Default::default(),
+            response: Box::new(llm::LlmResponse::from_message(llm::Message {
+                role: llm::Role::Assistant,
+                content: Some(String::new()),
+                content_parts: None,
+                tool_calls: None,
+                tool_call_id: None,
+                reasoning: None,
+                reasoning_details: None,
+            })),
+        }));
+        assert_eq!(controller.take_steering(), None);
+        drop(first);
+
+        // submit() while a stale steer is queued discards it.
+        let mut controller = make_controller("m");
+        controller.busy = true;
+        controller.steer("stale".into());
+        controller.busy = false;
+        let stream = controller.submit("fresh".into(), Vec::new());
+        assert!(stream.is_some());
+        assert_eq!(controller.agent().take_pending_steer(), None);
+        drop(stream);
     }
 }

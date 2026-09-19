@@ -324,6 +324,13 @@ impl<'a, T: Component<A>, A: 'static> Context<'a, T, A> {
     }
 
     /// Subscribe to an external asynchronous stream.
+    ///
+    /// Mutates `runtime_state.subscriptions`, which lives behind the
+    /// entity-store lock the event loop holds while it delivers callbacks.
+    /// Calling this from inside an action or stream callback (rather than
+    /// from a [`Context::spawn`] handler) re-enters that non-reentrant mutex
+    /// and freezes the UI. Defer it via `spawn` if a callback needs to
+    /// (re)subscribe.
     pub fn subscribe_stream<S, Item, F>(&mut self, stream: S, callback: F) -> Subscription
     where
         T: Component<A>,
@@ -360,6 +367,17 @@ impl<'a, T: Component<A>, A: 'static> Context<'a, T, A> {
     }
 
     /// Start one-shot work; its typed result is delivered to this entity.
+    ///
+    /// This is also the framework's *deferred execution* primitive, not just a
+    /// concurrency helper. Component action callbacks and stream subscription
+    /// callbacks run while the event loop holds the entity-store lock, so any
+    /// inline call that mutates runtime state (`subscribe_stream`, `dispatch`
+    /// to another entity, `update`) would re-enter that non-reentrant
+    /// `std::sync::Mutex` and deadlock the UI. When a callback needs to do such
+    /// work, wrap it in `spawn` with a trivial future such as
+    /// `async { Ok::<(), _>(()) }` — the handler then runs later, after the
+    /// lock is released. Do not "simplify" that pattern into a synchronous
+    /// call just because the future body awaits nothing.
     pub fn spawn<F, R, H>(&mut self, future: F, handler: H) -> TaskHandle
     where
         F: Future<Output = Result<R, TaskError>> + Send + 'static,

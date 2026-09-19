@@ -60,6 +60,9 @@ pub enum AgentEvent {
     Usage {
         usage: Usage,
     },
+    SteerConsumed {
+        text: String,
+    },
     ToolCallStarted {
         id: String,
         name: String,

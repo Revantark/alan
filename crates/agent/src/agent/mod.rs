@@ -79,6 +79,7 @@ pub struct Agent {
     /// Working directory reported in the conversation's first message.
     pub(super) working_directory: Option<PathBuf>,
     pub(super) model_info: Mutex<ModelInfo>,
+    steering: std::sync::Mutex<Option<String>>,
     /// Reasoning effort configured on the bound model, cached as an atomic so
     /// the status line can read it synchronously from the UI thread without
     /// contending with the model mutex. 0 means `None`; otherwise the variant
@@ -130,6 +131,20 @@ impl Agent {
             builder.images,
             builder.stream,
         ))
+    }
+
+    /// Queue `text` as a steering message for the in-flight run.
+    pub fn steer(&self, text: String) {
+        *self.steering.lock().expect("steering lock") = Some(text);
+    }
+
+    /// Take the pending steering message, if any.
+    pub fn take_pending_steer(&self) -> Option<String> {
+        self.steering
+            .lock()
+            .expect("steering lock")
+            .take()
+            .filter(|text| !text.trim().is_empty())
     }
 
     /// Reset to a brand-new, empty session in place.

@@ -154,6 +154,7 @@ impl AgentBuilder {
             model: Mutex::new(self.model),
             context: Mutex::new(context),
             mode: AtomicU8::new(Mode::Normal.as_u8()),
+            steering: std::sync::Mutex::new(None),
             review_intro_pending: AtomicBool::new(false),
             plan_intro_pending: AtomicBool::new(false),
             max_tool_rounds: self.max_tool_rounds,

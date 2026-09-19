@@ -39,6 +39,8 @@ pub enum AlanAction {
     Resize,
     /// TODO: SHOULD be moved from here
     SetLoadingDots(bool),
+    SetSteering(Option<String>),
+    CancelSteer,
     Raw(Event),
 }
 

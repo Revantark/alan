@@ -47,6 +47,9 @@ pub struct PromptEditor {
     /// Index into `history` of the entry currently shown in the editor.
     /// `None` means the live draft (what the user is typing) is shown.
     history_index: Option<usize>,
+    /// Mirror of the controller's pending steering message. Up recalls it
+    /// into the editor (taking priority over history recall); Esc cancels it.
+    pending_steer: Option<String>,
 }
 
 impl PromptEditor {
@@ -74,6 +77,7 @@ impl PromptEditor {
                 ),
             history: VecDeque::new(),
             history_index: None,
+            pending_steer: None,
         }
     }
 
@@ -135,6 +139,15 @@ impl PromptEditor {
         self.editor.clear();
     }
 
+    /// Replace the editor buffer with `text`, cursor at the end. Shared by
+    /// history recall and steering recall.
+    fn load_text(&mut self, text: &str) {
+        self.editor.clear();
+        self.editor.move_cursor(CursorMove::Jump(0, 0));
+        self.editor.insert_str(text);
+        self.editor.move_cursor(CursorMove::End);
+    }
+
     fn handle_event(
         &mut self,
         event: Event,
@@ -193,17 +206,29 @@ impl PromptEditor {
                 self.editor.insert_str(text);
                 ActionStatus::Handled
             }
+            Event::Key(key)
+                if key.code == KeyCode::Esc
+                    && key.kind == KeyEventKind::Press
+                    && self.attachments.is_empty()
+                    && self.pending_steer.is_some() =>
+            {
+                self.pending_steer = None;
+                cx.dispatch_parent(&AlanAction::CancelSteer);
+                ActionStatus::Handled
+            }
             Event::Key(key) if key.code == KeyCode::Up && key.kind == KeyEventKind::Press => {
                 let buffer = self.editor.lines().join("\n");
                 let cursor_row = self.editor.cursor().0;
-                if let Some(recall) =
+                if self.pending_steer.is_some() && buffer.trim().is_empty() && cursor_row == 0 {
+                    let text = self.pending_steer.take().unwrap_or_default();
+                    cx.dispatch_parent(&AlanAction::CancelSteer);
+                    self.load_text(&text);
+                    ActionStatus::Handled
+                } else if let Some(recall) =
                     recall_up(&self.history, self.history_index, &buffer, cursor_row)
                 {
                     self.history_index = recall.index;
-                    self.editor.clear();
-                    self.editor.move_cursor(CursorMove::Jump(0, 0));
-                    self.editor.insert_str(&recall.text);
-                    self.editor.move_cursor(CursorMove::End);
+                    self.load_text(&recall.text);
                     refresh_completion(
                         &mut self.completer,
                         self.popup,
@@ -231,10 +256,7 @@ impl PromptEditor {
                 };
                 if let Some(recall) = maybe_recall {
                     self.history_index = recall.index;
-                    self.editor.clear();
-                    self.editor.move_cursor(CursorMove::Jump(0, 0));
-                    self.editor.insert_str(&recall.text);
-                    self.editor.move_cursor(CursorMove::End);
+                    self.load_text(&recall.text);
                     refresh_completion(
                         &mut self.completer,
                         self.popup,
@@ -671,6 +693,10 @@ impl Component<AlanAction> for PromptEditor {
         let status = match action {
             AlanAction::Raw(event) => self.handle_event(event.clone(), cx),
             AlanAction::Paste(text) => self.handle_event(Event::Paste(text.clone()), cx),
+            AlanAction::SetSteering(text) => {
+                self.pending_steer = text.clone();
+                ActionStatus::Handled
+            }
             _ => ActionStatus::Continue,
         };
         if status == ActionStatus::Handled {

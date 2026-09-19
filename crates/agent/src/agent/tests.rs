@@ -503,9 +503,119 @@ impl LlmApi for ToolCallingApi {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Session persistence
-// ---------------------------------------------------------------------------
+/// Two-round API: round 1 queues a steering message on the agent (as if the
+/// user submitted it mid-run) and returns a tool call; round 2 records the
+/// user messages it was given so the test can assert the steer joined them.
+struct SteeringApi {
+    calls: AtomicUsize,
+    agent: std::sync::OnceLock<Arc<Agent>>,
+    round_user_texts: std::sync::Mutex<Vec<Vec<String>>>,
+}
+
+#[async_trait]
+impl LlmApi for SteeringApi {
+    async fn stream(&self, request: llm::LlmRequest<'_>) -> Result<llm::LlmStream, LlmError> {
+        let user_texts: Vec<String> = request
+            .messages
+            .iter()
+            .filter(|m| m.role == llm::Role::User)
+            .filter_map(|m| m.content.clone())
+            .collect();
+        self.round_user_texts.lock().unwrap().push(user_texts);
+
+        match self.calls.fetch_add(1, Ordering::SeqCst) {
+            0 => {
+                if let Some(agent) = self.agent.get() {
+                    agent.steer("steer: prefer ripgrep".into());
+                }
+                Ok(Box::pin(futures_util::stream::iter([
+                    Ok(LlmEvent::ToolCallDelta {
+                        index: 0,
+                        id: Some("call-1".into()),
+                        name: Some("bash".into()),
+                        arguments: serde_json::json!({"command": "echo hi"}).to_string(),
+                        signature: None,
+                    }),
+                    Ok(LlmEvent::Done {
+                        stop_reason: StopReason::ToolUse,
+                        usage: None,
+                        model: Some(request.model_id.to_owned()),
+                    }),
+                ])))
+            }
+            _ => Ok(Box::pin(futures_util::stream::iter([
+                Ok(LlmEvent::TextDelta {
+                    text: "done".into(),
+                }),
+                Ok(LlmEvent::Done {
+                    stop_reason: StopReason::Stop,
+                    usage: None,
+                    model: Some(request.model_id.to_owned()),
+                }),
+            ]))),
+        }
+    }
+}
+
+#[tokio::test]
+async fn steer_joins_the_next_llm_round_exactly_once() {
+    let api = Arc::new(SteeringApi {
+        calls: AtomicUsize::new(0),
+        agent: std::sync::OnceLock::new(),
+        round_user_texts: std::sync::Mutex::new(Vec::new()),
+    });
+    let a = Arc::new(
+        Agent::builder(model_with_api(api.clone()))
+            .with_tools([AgentTool::new(
+                llm::ToolDefinition {
+                    name: "bash".into(),
+                    description: "Run a shell command".into(),
+                    parameters: serde_json::json!({}),
+                },
+                tools::BashExecutor,
+            )])
+            .build()
+            .unwrap(),
+    );
+    api.agent.set(a.clone()).ok().expect("agent set twice");
+
+    a.ask(a.prompt().content("initial"))
+        .unwrap()
+        .into_response()
+        .await
+        .unwrap();
+
+    let rounds = api.round_user_texts.lock().unwrap().clone();
+    assert_eq!(rounds.len(), 2);
+    // Round 1 saw only the original prompt.
+    assert_eq!(rounds[0], vec!["initial".to_string()]);
+    // Round 2 saw the steer appended after it, exactly once.
+    assert_eq!(
+        rounds[1],
+        vec!["initial".to_string(), "steer: prefer ripgrep".to_string()]
+    );
+    // The steer persisted as a regular user message in the conversation.
+    let messages = a.messages().await;
+    assert!(
+        messages.iter().any(
+            |m| matches!(m, AgentMessage::User { text, .. } if text == "steer: prefer ripgrep")
+        )
+    );
+    // Slot drained: a later peek sees nothing.
+    assert_eq!(a.take_pending_steer(), None);
+}
+
+#[tokio::test]
+async fn steer_replaces_previous_and_rejects_blank() {
+    let a = agent(model());
+    a.steer("first".into());
+    a.steer("second".into());
+    assert_eq!(a.take_pending_steer(), Some("second".into()));
+    assert_eq!(a.take_pending_steer(), None);
+
+    a.steer("   ".into());
+    assert_eq!(a.take_pending_steer(), None);
+}
 
 #[tokio::test]
 async fn building_agent_with_manager_creates_no_file() {

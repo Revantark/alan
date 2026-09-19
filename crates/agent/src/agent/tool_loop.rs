@@ -24,6 +24,16 @@ pub(super) async fn run_with(
     for _ in 0..agent.max_tool_rounds {
         cx.check_cancelled()?;
 
+        if let Some(text) = agent.take_pending_steer() {
+            emit_event(
+                cx.events,
+                AgentEvent::SteerConsumed { text: text.clone() },
+                cx.cancellation,
+            )
+            .await?;
+            persistence::append_context_message(agent, context, AgentMessage::user(text)).await?;
+        }
+
         let session_id = agent.session_id.lock().await.clone();
         let (response, round_usage) = prompt::stream_round(session_id, model, context, cx).await?;
 

@@ -4,7 +4,7 @@ use crate::core::{Activity, Entry};
 use crate::root::{AlanAction, PromptSubmission};
 use crate::views::components::{ForkEvent, ForkOverlay, ModelPick, ModelsPicker};
 use crate::views::theme;
-use agent::{AgentEvent, AgentStream};
+use agent::{AgentError, AgentEvent, AgentStream};
 use alan_tui::component::{ActionStatus, Component, RenderContext};
 use alan_tui::context::Context;
 use alan_tui::entity::Entity;
@@ -19,6 +19,7 @@ use ratatui::style::Style;
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::Paragraph;
 use std::sync::Arc;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use super::chat_history::ChatHistory;
 use super::editor::{PromptEditor, is_plain_prompt};
@@ -29,6 +30,61 @@ const STATUS_EDITOR_GAP: u16 = 1;
 
 /// Rows below the prompt editor.
 const EDITOR_BOTTOM_PAD: u16 = 1;
+
+/// Rows of the steering band shown while a steering prompt is queued.
+const STEER_BAND_HEIGHT: u16 = 3;
+
+fn truncate_single_line(text: &str, max_width: usize) -> String {
+    let text = text.lines().next().unwrap_or(text);
+    if Line::from(text).width() <= max_width {
+        return text.to_owned();
+    }
+    let budget = max_width.saturating_sub(1);
+    let mut out = String::new();
+    for ch in text.chars() {
+        let w = ch.width().unwrap_or(0);
+        if out.width() + w > budget {
+            break;
+        }
+        out.push(ch);
+    }
+    format!("{out}…")
+}
+
+fn render_steering(frame: &mut Frame, area: Rect, text: Option<&str>) {
+    let Some(text) = text else {
+        return;
+    };
+    if area.height == 0 || area.width == 0 {
+        return;
+    }
+    let content_width = area
+        .width
+        .saturating_sub((theme::CHAT_PADDING * 2) as u16)
+        .max(1) as usize;
+    let line = truncate_single_line(text, content_width);
+    let style = Style::default().fg(theme::STEER_FG);
+    let [top, middle, _bottom] = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+    ])
+    .areas(area);
+    frame.render_widget(Paragraph::new(""), top);
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            format!(
+                "{}{} {}",
+                " ".repeat(theme::CHAT_PADDING),
+                theme::STEER_MARKER,
+                line
+            ),
+            style,
+        ))),
+        middle,
+    );
+    frame.render_widget(Paragraph::new(""), _bottom);
+}
 
 const STREAM_REPAINT_INTERVAL: std::time::Duration = std::time::Duration::from_millis(32);
 
@@ -130,6 +186,31 @@ impl ChatView {
         }
 
         let text = submission.text.trim().to_owned();
+
+        // Steering: a plain prompt submitted while a run streams is queued
+        // for the agent's next LLM round instead of starting a new run.
+        // Slash commands keep executing normally.
+        if controller.is_busy() {
+            controller.steer(text.clone());
+            // Defer to a task: this callback runs with the entity store
+            // locked, so dispatching to the editor inline would re-enter that
+            // non-reentrant lock and freeze the UI.
+            if self.editor.is_some() {
+                cx.spawn(
+                    async move { Ok::<String, alan_tui::TaskError>(text) },
+                    |result, view, cx| {
+                        if let Ok(text) = result
+                            && let Some(editor) = view.editor
+                        {
+                            cx.dispatch(editor, &AlanAction::SetSteering(Some(text)));
+                        }
+                    },
+                );
+            }
+            self.sync_status(cx);
+            return;
+        }
+
         let Some(stream) = controller.submit(text, submission.images) else {
             return;
         };
@@ -137,23 +218,7 @@ impl ChatView {
         if let Some(chat) = self.chat {
             cx.update(chat, |c| c.stick_to_bottom());
         }
-        self.prompt = Some(
-            cx.subscribe_stream(agent_events(stream), |event, view, cx| {
-                match event {
-                    SubscriptionEvent::Item(result) => {
-                        view.controller.apply_event(result);
-                    }
-                    SubscriptionEvent::Closed => {
-                        view.controller.disconnect_stream();
-                        view.prompt = None;
-                    }
-                }
-                if !view.controller.is_busy() {
-                    view.stream_repaint = None;
-                    cx.notify();
-                }
-            }),
-        );
+        self.prompt = Some(cx.subscribe_stream(agent_events(stream), handle_agent_stream_event));
         self.ensure_stream_repaint(cx);
         cx.notify();
     }
@@ -589,6 +654,15 @@ impl Component<AlanAction> for ChatView {
                 cx.notify();
                 ActionStatus::Handled
             }
+            AlanAction::CancelSteer => {
+                if self.controller.take_steering().is_some() {
+                    if let Some(editor) = self.editor {
+                        cx.dispatch(editor, &AlanAction::SetSteering(None));
+                    }
+                    cx.notify();
+                }
+                ActionStatus::Handled
+            }
             AlanAction::Quit => {
                 if self.controller.is_busy() {
                     self.prompt = None;
@@ -634,9 +708,16 @@ impl Component<AlanAction> for ChatView {
         let editor_width = area.width.saturating_sub(theme::PROMPT_GUTTER);
         let editor_rows = cx.read(editor, |e| e.rows(editor_width)).unwrap_or(1);
         let attachment_height = cx.read(editor, |e| e.attachment_height()).unwrap_or(0);
+        let steer_text = self.controller.steering().map(str::to_owned);
+        let steer_height = if steer_text.is_some() {
+            STEER_BAND_HEIGHT
+        } else {
+            0
+        };
 
         let [
             chat_area,
+            steer_area,
             attachment_area,
             status_area,
             _gap,
@@ -644,6 +725,7 @@ impl Component<AlanAction> for ChatView {
             _bottom_pad,
         ] = Layout::vertical([
             Constraint::Min(1),
+            Constraint::Length(steer_height),
             Constraint::Length(attachment_height),
             Constraint::Length(STATUS_HEIGHT),
             Constraint::Length(STATUS_EDITOR_GAP),
@@ -653,6 +735,8 @@ impl Component<AlanAction> for ChatView {
         .areas(area);
 
         cx.render_with_state(chat, frame, chat_area, &self.controller);
+
+        render_steering(frame, steer_area, steer_text.as_deref());
 
         render_attachments(frame, attachment_area, editor, cx);
 
@@ -761,6 +845,58 @@ fn agent_events(
     futures_util::stream::unfold(stream, |mut stream| async move {
         stream.recv().await.map(|event| (event, stream))
     })
+}
+
+/// Shared event handler for agent-stream subscriptions. Both the initial
+/// submit path and the steer auto-submit path wire their subscriptions
+/// through this function so the `Closed` → auto-submit logic is not
+/// duplicated.
+fn handle_agent_stream_event(
+    event: SubscriptionEvent<Result<AgentEvent, AgentError>>,
+    view: &mut ChatView,
+    cx: &mut Context<'_, ChatView, AlanAction>,
+) {
+    match event {
+        SubscriptionEvent::Item(result) => {
+            view.controller.apply_event(result);
+        }
+        SubscriptionEvent::Closed => {
+            view.controller.disconnect_stream();
+            if view.controller.steering().is_some() {
+                // Defer to a task: this callback runs while the event loop
+                // holds the entity-store mutex, so calling `subscribe_stream`
+                // (which mutates `runtime_state.subscriptions`) inline would
+                // re-enter that non-reentrant mutex and deadlock the UI.
+                cx.spawn(
+                    async { Ok::<(), alan_tui::TaskError>(()) },
+                    |result, view, cx| {
+                        if result.is_ok()
+                            && let Some(text) = view.controller.take_steering()
+                        {
+                            if let Some(editor) = view.editor {
+                                cx.dispatch(editor, &AlanAction::SetSteering(None));
+                            }
+                            if let Some(stream) = view.controller.submit(text, Vec::new()) {
+                                if let Some(chat) = view.chat {
+                                    cx.update(chat, |c| c.stick_to_bottom());
+                                }
+                                view.prompt = Some(cx.subscribe_stream(
+                                    agent_events(stream),
+                                    handle_agent_stream_event,
+                                ));
+                                view.ensure_stream_repaint(cx);
+                            }
+                            view.sync_status(cx);
+                        }
+                    },
+                );
+            }
+        }
+    }
+    if !view.controller.is_busy() {
+        view.stream_repaint = None;
+        cx.notify();
+    }
 }
 
 fn stream_repaint_ticks() -> impl Stream<Item = ()> + Send + 'static {
