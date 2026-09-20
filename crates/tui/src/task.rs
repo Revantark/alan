@@ -75,7 +75,6 @@ impl TaskHandle {
         self.active.load(Ordering::Acquire)
     }
 
-    #[allow(dead_code)]
     pub(crate) fn with_cancel_cleanup(self, cleanup: impl Fn() + Send + Sync + 'static) -> Self {
         let active = Arc::clone(&self.active);
         let cancel = Arc::clone(&self.cancel);

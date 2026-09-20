@@ -4,16 +4,12 @@
 //! overlay saves the focus path, closes capture, and schedules a redraw;
 //! closing restores the previous focus. A modal is a focus boundary:
 //! components behind an overlay receive no input.
-
 use crate::entity::EntityId;
-
-/// An overlay id (an [`EntityId`]) occupying the stack.
-pub type OverlayId = EntityId;
 
 /// Stack of open overlays; the last entry is topmost.
 #[derive(Debug, Default)]
 pub(crate) struct OverlayStack {
-    overlays: Vec<OverlayId>,
+    overlays: Vec<EntityId>,
 }
 
 impl OverlayStack {
@@ -24,17 +20,17 @@ impl OverlayStack {
     }
 
     /// Push an overlay, capturing input for it.
-    pub(crate) fn push(&mut self, id: OverlayId) {
+    pub(crate) fn push(&mut self, id: EntityId) {
         self.overlays.push(id);
     }
 
     /// Pop the topmost overlay, returning its id.
-    pub(crate) fn pop(&mut self) -> Option<OverlayId> {
+    pub(crate) fn pop(&mut self) -> Option<EntityId> {
         self.overlays.pop()
     }
 
     /// The topmost overlay, receiving input first and rendering last.
-    pub(crate) fn top(&self) -> Option<OverlayId> {
+    pub(crate) fn top(&self) -> Option<EntityId> {
         self.overlays.last().copied()
     }
 
@@ -44,7 +40,7 @@ impl OverlayStack {
     }
 
     /// All overlays, bottom to top.
-    pub(crate) fn overlays(&self) -> &[OverlayId] {
+    pub(crate) fn overlays(&self) -> &[EntityId] {
         &self.overlays
     }
 }
@@ -54,7 +50,7 @@ mod tests {
     use super::*;
     use crate::entity::EntityId;
 
-    fn id(value: u64) -> OverlayId {
+    fn id(value: u64) -> EntityId {
         EntityId::from_u64(value)
     }
 

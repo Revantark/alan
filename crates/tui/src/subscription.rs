@@ -337,11 +337,34 @@ pub(crate) async fn worker<S, Item>(
     let mut stream = Box::pin(stream);
     loop {
         tokio::select! {
-            changed = cancellation.changed() => { if changed.is_err() || *cancellation.borrow() { break; } }
-            item = stream.next() => { match item {
-                Some(item) if active.load(Ordering::Acquire) => { if sender.send(RuntimeDelivery::Stream(StreamDelivery { id, event: StreamDeliveryEvent::Item(Box::new(item)) })).is_err() { break; } }
-                Some(_) | None => { if active.load(Ordering::Acquire) { let _ = sender.send(RuntimeDelivery::Stream(StreamDelivery { id, event: StreamDeliveryEvent::Closed })); } break; }
-            }}
+            changed = cancellation.changed() => {
+                if changed.is_err() || *cancellation.borrow() {
+                    break;
+                }
+            }
+            item = stream.next() => {
+                match item {
+                    Some(item) if active.load(Ordering::Acquire) => {
+                        let delivery = RuntimeDelivery::Stream(StreamDelivery {
+                            id,
+                            event: StreamDeliveryEvent::Item(Box::new(item)),
+                        });
+                        if sender.send(delivery).is_err() {
+                            break;
+                        }
+                    }
+                    Some(_) | None => {
+                        if active.load(Ordering::Acquire) {
+                            let delivery = RuntimeDelivery::Stream(StreamDelivery {
+                                id,
+                                event: StreamDeliveryEvent::Closed,
+                            });
+                            let _ = sender.send(delivery);
+                        }
+                        break;
+                    }
+                }
+            }
         }
     }
 }
