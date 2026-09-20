@@ -26,6 +26,8 @@ pub enum SlashCommand {
     Help,
     // Rename the current session.
     Rename,
+    // Manage local models (add, remove, edit).
+    Local,
     Quit,
 }
 
@@ -74,7 +76,7 @@ impl SlashCommand {
     pub fn takes_args(self) -> bool {
         matches!(
             self,
-            Self::Effort | Self::ModelProviders | Self::SummarizeNew | Self::Rename
+            Self::Effort | Self::ModelProviders | Self::SummarizeNew | Self::Rename | Self::Local
         )
     }
 
@@ -92,6 +94,7 @@ impl SlashCommand {
             Self::Help => "list the available commands",
             Self::ModelProviders => "pick a provider from openrouter for the selected model",
             Self::Rename => "rename the current session",
+            Self::Local => "manage local models (add, remove, edit)",
             Self::Quit => "abort and quit",
         }
     }
@@ -312,5 +315,40 @@ mod tests {
         assert!(!SlashCommand::Review.takes_args());
         assert!(!SlashCommand::Normal.takes_args());
         assert!(!SlashCommand::Help.takes_args());
+        // Argument-taking commands.
+        assert!(SlashCommand::Local.takes_args());
+        assert!(SlashCommand::Effort.takes_args());
+        assert!(SlashCommand::ModelProviders.takes_args());
+        assert!(SlashCommand::SummarizeNew.takes_args());
+        assert!(SlashCommand::Rename.takes_args());
+    }
+
+    #[test]
+    fn parses_local_command() {
+        assert_eq!(SlashCommand::parse("/local"), Some(SlashCommand::Local));
+    }
+
+    #[test]
+    fn parses_local_subcommands() {
+        assert_eq!(
+            SlashCommand::parse_with_args("/local add"),
+            Some((SlashCommand::Local, "add"))
+        );
+        assert_eq!(
+            SlashCommand::parse_with_args("/local remove"),
+            Some((SlashCommand::Local, "remove"))
+        );
+        assert_eq!(
+            SlashCommand::parse_with_args("/local edit"),
+            Some((SlashCommand::Local, "edit"))
+        );
+    }
+
+    #[test]
+    fn parses_local_with_empty_args() {
+        assert_eq!(
+            SlashCommand::parse_with_args("/local"),
+            Some((SlashCommand::Local, ""))
+        );
     }
 }

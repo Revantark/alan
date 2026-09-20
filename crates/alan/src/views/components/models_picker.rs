@@ -8,7 +8,7 @@ use ratatui::{
     layout::Rect,
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, BorderType, Paragraph},
+    widgets::{Block, BorderType, Clear, Paragraph},
 };
 use unicode_width::UnicodeWidthChar;
 
@@ -131,7 +131,11 @@ impl SearchListOverlay {
             width,
             height,
         );
-        // frame.render_widget(Clear, popup);
+        frame.render_widget(
+            Paragraph::new("").style(Style::default().bg(theme::EDITOR_BG)),
+            popup,
+        );
+        frame.render_widget(Clear, popup);
         let accent = Style::default().fg(theme::PROMPT_FG);
         let muted = Style::default().fg(theme::TOOL_FG);
         let title = format!(" {}", self.title);

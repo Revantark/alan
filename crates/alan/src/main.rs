@@ -1,4 +1,5 @@
 mod core;
+mod local_model_overlay;
 mod logging;
 mod login_overlay;
 mod root;
@@ -13,7 +14,7 @@ use agent::{Agent, SessionManager, default_tools};
 use alan_tui::Runtime;
 use llm::ReasoningEffort;
 use providers::{
-    FileCredentialStore, GoogleProvider, ModelOptions, OpenRouterProvider, Provider,
+    FileCredentialStore, GoogleProvider, LocalProvider, ModelOptions, OpenRouterProvider, Provider,
     ProviderRegistry, ZaiProvider, bind_model,
 };
 use std::path::PathBuf;
@@ -52,10 +53,15 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let credential_store = Arc::new(FileCredentialStore::new(auth_path()?));
+    let local_provider = Arc::new(LocalProvider::new(
+        alan_data_dir()?.join("local_models.json"),
+    ));
+    local_provider.load().await?;
     let providers: Vec<Arc<dyn Provider>> = vec![
         Arc::new(ZaiProvider::from_store(credential_store.clone()).build()?),
         Arc::new(GoogleProvider::from_store(credential_store.clone()).build()?),
         Arc::new(OpenRouterProvider::from_store(credential_store.clone()).build()?),
+        Arc::clone(&local_provider) as Arc<dyn Provider>,
     ];
 
     let session_manager = Arc::new(SessionManager::new(sessions_path()?));
@@ -115,7 +121,10 @@ async fn main() -> anyhow::Result<()> {
         (selected_provider_id, provider, model_id, model)
     };
 
-    let registry = Arc::new(ProviderRegistry::new(providers));
+    let registry = Arc::new(ProviderRegistry::with_local_provider(
+        providers,
+        Arc::clone(&local_provider),
+    ));
 
     let was_resumed = resumed_session.is_some();
     let current_dir = std::env::current_dir()?;
@@ -139,12 +148,16 @@ async fn main() -> anyhow::Result<()> {
     // `Runtime::run` consumes the root, so keep the agent for the saved-session
     // message printed after the TUI exits.
     let agent = controller.agent();
-    let result = Runtime::builder(AlanRoot::new(controller, registry, credential_store))
-        .key_mapper(AlanKeyMapper)
-        .tick_rate(Duration::from_millis(16))
-        .build()
-        .run()
-        .await;
+    let result = Runtime::builder(AlanRoot::new(
+        controller,
+        registry,
+        credential_store,
+    ))
+    .key_mapper(AlanKeyMapper)
+    .tick_rate(Duration::from_millis(16))
+    .build()
+    .run()
+    .await;
     let result = result.map_err(|error| anyhow::anyhow!("{error}"));
     if let Some(session_id) = agent.session_id().await {
         println!("\nSession saved. Resume it with:\n\nALAN_SESSION={session_id} alan");

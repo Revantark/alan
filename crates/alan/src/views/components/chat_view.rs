@@ -12,7 +12,9 @@ use alan_tui::{Subscription, SubscriptionEvent};
 use crossterm::event::{Event, KeyCode, KeyEventKind};
 use futures_util::Stream;
 use llm::Usage;
-use providers::{ModelInfo, ProviderId, ProviderRegistry, bind_model};
+use providers::{
+    ModelInfo, Provider, ProviderId, ProviderRegistry, bind_local_model, bind_model,
+};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::Style;
@@ -108,8 +110,21 @@ pub struct ChatView {
     fork_in_flight: bool,
 }
 
+/// Callback run when a local model is chosen in a picker: resolves the local
+/// provider, the selected model, and the render context.
+type LocalPickFn = Box<
+    dyn for<'a> Fn(
+        Arc<providers::LocalProvider>,
+        ModelInfo,
+        &'a mut Context<'a, ChatView, AlanAction>,
+    ),
+>;
+
 impl ChatView {
-    pub fn new(controller: ChatController, providers: Arc<ProviderRegistry>) -> Self {
+    pub fn new(
+        controller: ChatController,
+        providers: Arc<ProviderRegistry>,
+    ) -> Self {
         Self {
             controller,
             chat: None,
@@ -179,6 +194,7 @@ impl ChatView {
                 Cmd::Help => controller.push_info(crate::core::SlashCommand::help()),
                 Cmd::New => self.start_new_session(cx),
                 Cmd::Models => self.open_models_picker(cx),
+                Cmd::Local => self.handle_local_command(&submission.text, cx),
                 Cmd::Quit => cx.quit(),
             }
             cx.notify();
@@ -482,6 +498,7 @@ impl ChatView {
         );
 
         let providers = Arc::clone(&self.providers);
+        let local_provider = self.providers.local().cloned();
         self.model_subscription = Some(cx.subscribe::<ModelPick, ModelsPicker, _>(
             picker,
             move |event, view, _picker, cx| {
@@ -495,26 +512,42 @@ impl ChatView {
                     return;
                 };
                 let providers = Arc::clone(&providers);
+                let local_provider = local_provider.clone();
                 let _ = cx.spawn(
                     async move {
-                        let provider = providers
-                            .providers()
-                            .iter()
-                            .find(|p| p.id() == model_info.provider)
-                            .ok_or_else(|| {
-                                alan_tui::TaskError("selected provider is unavailable".into())
-                            })?;
-
+                        let mut options = agent.model_options().await;
                         let settings = settings::get_settings()
                             .await
                             .map_err(|e| alan_tui::TaskError(e.into()))?;
+                        options.provider_order = settings.provider_order(&model_info.id);
 
-                        let provider_order = settings.provider_order(&model_info.id);
-                        let mut options = agent.model_options().await;
-                        options.provider_order = provider_order;
-
-                        let model = bind_model(provider.as_ref(), &model_info.id, options)
-                            .map_err(|e| alan_tui::TaskError(e.into()))?;
+                        let model = if model_info.provider == ProviderId::new("local") {
+                            // Local models bind per-entry from the local store.
+                            let Some(local_provider) = local_provider else {
+                                return Err(alan_tui::TaskError(
+                                    "local provider not available".into(),
+                                ));
+                            };
+                            let entry = local_provider
+                                .find_entry(&model_info.id)
+                                .ok_or_else(|| {
+                                    alan_tui::TaskError(
+                                        format!("local model not found: {}", model_info.id).into(),
+                                    )
+                                })?;
+                            bind_local_model(&entry, options)
+                                .map_err(|e| alan_tui::TaskError(e.into()))?
+                        } else {
+                            let provider = providers
+                                .providers()
+                                .iter()
+                                .find(|p| p.id() == model_info.provider)
+                                .ok_or_else(|| {
+                                    alan_tui::TaskError("selected provider is unavailable".into())
+                                })?;
+                            bind_model(provider.as_ref(), &model_info.id, options)
+                                .map_err(|e| alan_tui::TaskError(e.into()))?
+                        };
                         let name = model_info.name.clone();
                         let max_context = model_info.context_length;
                         let reasoning_effort = model.reasoning_effort();
@@ -590,6 +623,127 @@ impl ChatView {
                 },
             );
         });
+    }
+
+    fn handle_local_command(&mut self, text: &str, cx: &mut Context<'_, Self, AlanAction>) {
+        let args =
+            crate::core::SlashCommand::parse_with_args(text).map(|(_, a)| a.trim().to_owned());
+        match args.as_deref() {
+            Some("add") => self.open_local_model_overlay(cx, None),
+            Some("remove") => self.open_local_remove_picker(cx),
+            Some("edit") => self.open_local_edit_picker(cx),
+            _ => self
+                .controller
+                .push_info("usage: /local <add|remove|edit>".to_owned()),
+        }
+    }
+
+    fn open_local_model_overlay(
+        &mut self,
+        cx: &mut Context<'_, Self, AlanAction>,
+        edit_entry: Option<providers::LocalModelEntry>,
+    ) {
+        use crate::local_model_overlay::LocalModelOverlay;
+        let Some(local_provider) = self.providers.local() else {
+            self.controller
+                .push_info("Local provider not available".to_owned());
+            return;
+        };
+        cx.open_overlay(LocalModelOverlay::new(
+            Arc::clone(local_provider),
+            edit_entry,
+        ));
+    }
+
+    fn open_local_remove_picker(&mut self, cx: &mut Context<'_, Self, AlanAction>) {
+        self.open_local_picker(
+            cx,
+            "Remove Local Model",
+            "No local models to remove.",
+            Box::new(|local, model_info, cx| {
+                let model_id = model_info.id.clone();
+                let local = Arc::clone(&local);
+                let display_id = model_id.clone();
+                cx.spawn(
+                    async move {
+                        local
+                            .remove_model(&model_id)
+                            .await
+                            .map_err(|e| alan_tui::TaskError(e.to_string().into()))?;
+                        Ok::<(), alan_tui::TaskError>(())
+                    },
+                    move |result, view, _cx| match result {
+                        Ok(()) => {
+                            view.controller
+                                .push_info(format!("Removed local model: {display_id}"));
+                        }
+                        Err(e) => view.controller.push_info(format!("Failed to remove: {e}")),
+                    },
+                );
+            }),
+        );
+    }
+
+    fn open_local_edit_picker(&mut self, cx: &mut Context<'_, Self, AlanAction>) {
+        self.open_local_picker(
+            cx,
+            "Edit Local Model",
+            "No local models to edit.",
+            Box::new(|local, model_info, cx| {
+                let local = Arc::clone(&local);
+                cx.spawn(
+                    async move {
+                        local.find_entry(&model_info.id).ok_or_else(|| {
+                            alan_tui::TaskError(
+                                format!("Local model not found: {}", model_info.id).into(),
+                            )
+                        })
+                    },
+                    move |result, view, cx| match result {
+                        Ok(entry) => view.open_local_model_overlay(cx, Some(entry)),
+                        Err(e) => view.controller.push_info(e.to_string()),
+                    },
+                );
+            }),
+        );
+    }
+
+    /// Open a `ModelsPicker` over the local catalog and run `on_pick` with the
+    /// chosen entry's id. Shared by the remove and edit flows.
+    fn open_local_picker(
+        &mut self,
+        cx: &mut Context<'_, Self, AlanAction>,
+        title: &str,
+        empty_message: &str,
+        on_pick: LocalPickFn,
+    ) {
+        let Some(local) = self.providers.local() else {
+            self.controller.push_info(empty_message.to_owned());
+            return;
+        };
+        let models: Vec<String> = local
+            .models()
+            .iter()
+            .map(|m| format!("local — {}", m.name))
+            .collect();
+        if models.is_empty() {
+            self.controller.push_info(empty_message.to_owned());
+            return;
+        }
+        let picker = cx.open_overlay(ModelsPicker::new(title, models));
+        let local = Arc::clone(local);
+        cx.subscribe_once::<ModelPick, ModelsPicker, _>(
+            picker,
+            move |event, _view, _picker, cx| {
+                let ModelPick::Chosen(index) = event else {
+                    return;
+                };
+                let Some(model_info) = local.models().into_iter().nth(*index) else {
+                    return;
+                };
+                on_pick(Arc::clone(&local), model_info, cx);
+            },
+        );
     }
 }
 
