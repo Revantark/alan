@@ -180,7 +180,7 @@ fn deliver_event<A: 'static>(
     store: &EntityStore<A>,
 ) {
     // Snapshot ids so callbacks can cancel/remove subscriptions safely.
-    let ids: Vec<_> = core
+    let mut ids: Vec<_> = core
         .subscriptions
         .iter()
         .filter_map(|(id, record)| match record {
@@ -193,7 +193,6 @@ fn deliver_event<A: 'static>(
             _ => None,
         })
         .collect();
-    let mut ids = ids;
     ids.sort_unstable();
     for id in ids {
         let Some(record) = core.subscriptions.remove(&id) else {
@@ -382,7 +381,6 @@ fn deliver_deferred_batch<A: 'static>(core: &mut RuntimeState<A>, store: &Entity
             RuntimeDelivery::Task(delivery) => deliver_task(delivery, core, store),
             RuntimeDelivery::Stream(delivery) => deliver_stream(delivery, core, store),
             RuntimeDelivery::Event(delivery) => deliver_event(delivery, core, store),
-            RuntimeDelivery::Observation(_) => {}
         }
     }
 }

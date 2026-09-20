@@ -6,14 +6,12 @@ use crate::context::{Ctx, RuntimeState};
 use crate::entity::{Entity, EntityStore};
 use crate::overlay::OverlayStack;
 use crate::render;
-use crate::task::TokioExecutor;
 use crate::{ActionStatus, Component, RenderContext};
 use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use ratatui::layout::Rect;
 use ratatui::widgets::{Paragraph, Widget};
-use std::sync::Arc;
 use tokio::sync::mpsc::unbounded_channel;
 
 type A = ();
@@ -81,7 +79,7 @@ fn flush_pending(core: &mut RuntimeState<A>, store: &mut EntityStore<A>) {
 
 fn core_for() -> RuntimeState<A> {
     let (sender, _) = unbounded_channel();
-    RuntimeState::new(sender, Arc::new(TokioExecutor))
+    RuntimeState::new(sender)
 }
 
 #[test]

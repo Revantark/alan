@@ -31,4 +31,4 @@ pub use error::RuntimeError;
 pub use keymap::{InputContext, KeyMapper, NoopMapper, PassthroughMapper};
 pub use selection::{Selection, SelectionMode, TextPosition};
 pub use subscription::{Subscription, SubscriptionEvent};
-pub use task::{TaskError, TaskExecutor, TaskHandle, TokioExecutor};
+pub use task::{TaskError, TaskHandle};

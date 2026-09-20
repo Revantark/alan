@@ -11,7 +11,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::future::Future;
 use std::marker::PhantomData;
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use tokio::sync::mpsc::UnboundedSender;
 
@@ -22,12 +22,11 @@ use crate::overlay::OverlayStack;
 use crate::subscription::{
     self, EventDelivery, RuntimeDelivery, Subscription, SubscriptionId, SubscriptionRecord,
 };
-use crate::task::{TaskDelivery, TaskError, TaskExecutor, TaskHandle, TaskId};
+use crate::task::{TaskDelivery, TaskError, TaskHandle, TaskId};
 
 /// Runtime state shared by the event loop and component contexts.
 pub(crate) struct RuntimeState<A> {
     pub(crate) sender: UnboundedSender<RuntimeDelivery>,
-    pub(crate) executor: Arc<dyn TaskExecutor>,
     pub(crate) subscriptions: HashMap<SubscriptionId, SubscriptionRecord<A>>,
     pub(crate) task_handlers: HashMap<TaskId, Box<dyn TaskHandler<A>>>,
     pub(crate) deliveries: VecDeque<RuntimeDelivery>,
@@ -44,13 +43,9 @@ pub(crate) struct RuntimeState<A> {
 }
 
 impl<A: 'static> RuntimeState<A> {
-    pub(crate) fn new(
-        sender: UnboundedSender<RuntimeDelivery>,
-        executor: Arc<dyn TaskExecutor>,
-    ) -> Self {
+    pub(crate) fn new(sender: UnboundedSender<RuntimeDelivery>) -> Self {
         Self {
             sender,
-            executor,
             subscriptions: HashMap::new(),
             task_handlers: HashMap::new(),
             deliveries: VecDeque::new(),
@@ -360,9 +355,7 @@ impl<'a, T: Component<A>, A: 'static> Context<'a, T, A> {
             receiver,
             self.runtime_state.sender.clone(),
         );
-        self.runtime_state
-            .executor
-            .spawn_subscription(Box::pin(worker));
+        tokio::spawn(worker);
         Subscription::new(active, cancellation)
     }
 
@@ -405,10 +398,19 @@ impl<'a, T: Component<A>, A: 'static> Context<'a, T, A> {
                 result: Box::new(future.await),
             }
         };
-        let handle = self
-            .runtime_state
-            .executor
-            .spawn(Box::pin(delivery), self.runtime_state.sender.clone());
+
+        let active = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let task_active = Arc::clone(&active);
+        let sender = self.runtime_state.sender.clone();
+        let task = tokio::spawn(async move {
+            let delivery = delivery.await;
+            if task_active.load(Ordering::Acquire) {
+                let _ = sender.send(RuntimeDelivery::Task(delivery));
+            }
+        });
+
+        let abort = task.abort_handle();
+        let handle = TaskHandle::new(move || abort.abort());
         handle.with_cancel_cleanup(move || {
             cancellation.store(false, std::sync::atomic::Ordering::Release);
         })

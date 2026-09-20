@@ -206,11 +206,6 @@ impl<A: 'static> EntityStore<A> {
         removed
     }
 
-    #[cfg(test)]
-    pub(crate) fn remove(&mut self, id: EntityId) -> bool {
-        self.remove_entity(id)
-    }
-
     pub(crate) fn is_active_entity(&self, id: EntityId) -> bool {
         self.slots.contains_key(&id)
     }
@@ -320,8 +315,6 @@ impl<A: 'static> EntityStore<A> {
 mod tests {
     use super::*;
     use crate::context::{Context, Ctx, RuntimeState};
-    use crate::task::TokioExecutor;
-    use std::sync::Arc;
     struct Counter {
         value: i32,
     }
@@ -341,7 +334,7 @@ mod tests {
 
     fn core_for<A: 'static>() -> RuntimeState<A> {
         let (sender, _) = tokio::sync::mpsc::unbounded_channel();
-        RuntimeState::new(sender, Arc::new(TokioExecutor))
+        RuntimeState::new(sender)
     }
 
     #[test]
@@ -355,8 +348,8 @@ mod tests {
             store.typed_read(entity.id(), |c: &Counter| c.value),
             Some(2)
         );
-        assert!(store.remove(entity.id()));
-        assert!(!store.remove(entity.id()));
+        assert!(store.remove_entity(entity.id()));
+        assert!(!store.remove_entity(entity.id()));
     }
 
     #[test]

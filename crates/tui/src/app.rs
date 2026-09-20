@@ -11,7 +11,6 @@ use crate::error::RuntimeError;
 use crate::event_loop::event_loop;
 use crate::keymap::{KeyMapper, NoopMapper};
 use crate::subscription::RuntimeDelivery;
-use crate::task::{TaskExecutor, TokioExecutor};
 use crate::terminal::{TerminalGuard, TerminalOptions, install_panic_hook};
 
 const DEFAULT_TICK_RATE: Duration = Duration::from_millis(16);
@@ -20,7 +19,6 @@ const DEFAULT_TICK_RATE: Duration = Duration::from_millis(16);
 pub struct RuntimeBuilder<C, A> {
     root: C,
     key_mapper: Arc<dyn KeyMapper<A>>,
-    executor: Arc<dyn TaskExecutor>,
     tick_rate: Duration,
     terminal_options: TerminalOptions,
 }
@@ -34,7 +32,6 @@ where
         Self {
             root,
             key_mapper: Arc::new(NoopMapper),
-            executor: Arc::new(TokioExecutor),
             tick_rate: DEFAULT_TICK_RATE,
             terminal_options: TerminalOptions::default(),
         }
@@ -42,11 +39,6 @@ where
 
     pub fn key_mapper(mut self, key_mapper: impl KeyMapper<A> + 'static) -> Self {
         self.key_mapper = Arc::new(key_mapper);
-        self
-    }
-
-    pub fn executor(mut self, executor: impl TaskExecutor + 'static) -> Self {
-        self.executor = Arc::new(executor);
         self
     }
 
@@ -68,7 +60,6 @@ where
         Runtime {
             root: self.root,
             key_mapper: self.key_mapper,
-            executor: self.executor,
             tick_rate: self.tick_rate,
             terminal_options: self.terminal_options,
         }
@@ -79,7 +70,6 @@ where
 pub struct Runtime<C, A> {
     root: C,
     key_mapper: Arc<dyn KeyMapper<A>>,
-    executor: Arc<dyn TaskExecutor>,
     tick_rate: Duration,
     terminal_options: TerminalOptions,
 }
@@ -102,7 +92,7 @@ where
             store.insert(self.root).id()
         };
         let (sender, receiver) = mpsc::unbounded_channel::<RuntimeDelivery>();
-        let mut state = RuntimeState::new(sender, self.executor.clone());
+        let mut state = RuntimeState::new(sender);
         state.pending_inits.push_back(root);
         event_loop(
             guard,
@@ -154,7 +144,7 @@ mod tests {
         let mut store = EntityStore::new();
         let target = store.insert(Probe { hits: 0 });
         let source = store.insert(TestRoot);
-        let state = RuntimeState::new(sender, Arc::new(TokioExecutor));
+        let state = RuntimeState::new(sender);
         (state, store, target, source)
     }
 
@@ -163,7 +153,7 @@ mod tests {
         let (sender, mut receiver) = mpsc::unbounded_channel();
         let mut store = EntityStore::new();
         let target = store.insert(Probe { hits: 0 });
-        let mut state = RuntimeState::new(sender, Arc::new(TokioExecutor));
+        let mut state = RuntimeState::new(sender);
         let _handle = {
             let mut cx: Context<'_, Probe, ()> = Context::new(&mut state, &store, target.id());
             cx.spawn(

@@ -5,15 +5,10 @@
 
 use std::any::Any;
 use std::error::Error;
-use std::future::Future;
-use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use tokio::sync::mpsc::UnboundedSender;
-
 use crate::entity::EntityId;
-use crate::subscription::RuntimeDelivery;
 
 /// An error produced by background work.
 pub struct TaskError(pub Box<dyn Error + Send + Sync>);
@@ -93,44 +88,5 @@ impl std::fmt::Debug for TaskHandle {
         f.debug_struct("TaskHandle")
             .field("active", &self.is_active())
             .finish_non_exhaustive()
-    }
-}
-
-pub type DeliveryFuture = Pin<Box<dyn Future<Output = TaskDelivery> + Send>>;
-pub type SubscriptionFuture = Pin<Box<dyn Future<Output = ()> + Send>>;
-
-/// Executes tasks and stream workers outside runtime callbacks.
-pub trait TaskExecutor: Send + Sync + 'static {
-    fn spawn(&self, future: DeliveryFuture, sender: UnboundedSender<RuntimeDelivery>)
-    -> TaskHandle;
-
-    fn spawn_subscription(&self, future: SubscriptionFuture);
-}
-
-#[derive(Debug, Default, Clone, Copy)]
-pub struct TokioExecutor;
-impl TaskExecutor for TokioExecutor {
-    fn spawn(
-        &self,
-        future: DeliveryFuture,
-        sender: UnboundedSender<RuntimeDelivery>,
-    ) -> TaskHandle {
-        let active = Arc::new(AtomicBool::new(true));
-        let task_active = Arc::clone(&active);
-        let task = tokio::spawn(async move {
-            let delivery = future.await;
-            if task_active.load(Ordering::Acquire) {
-                let _ = sender.send(RuntimeDelivery::Task(delivery));
-            }
-        });
-        let abort = task.abort_handle();
-        TaskHandle {
-            active,
-            cancel: Arc::new(move || abort.abort()),
-        }
-    }
-
-    fn spawn_subscription(&self, future: SubscriptionFuture) {
-        tokio::spawn(future);
     }
 }

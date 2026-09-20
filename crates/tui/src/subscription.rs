@@ -75,7 +75,6 @@ pub enum RuntimeDelivery {
     Task(TaskDelivery),
     Stream(StreamDelivery),
     Event(EventDelivery),
-    Observation(EntityId),
 }
 
 pub struct StreamDelivery {
