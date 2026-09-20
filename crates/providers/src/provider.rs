@@ -81,8 +81,9 @@ impl ProviderRegistry {
         self.providers.iter().find(|p| p.id() == *id).cloned()
     }
 
-    pub fn local(&self) -> Option<&Arc<LocalProvider>> {
-        self.local_provider.as_ref()
+    /// Return an `Arc` clone of the local provider, if registered.
+    pub fn local(&self) -> Option<Arc<LocalProvider>> {
+        self.local_provider.clone()
     }
 }
 

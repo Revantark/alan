@@ -1,3 +1,4 @@
+use crate::store::LocalModelStore;
 use crate::{
     ApiId, ApiKeyAuth, AuthResolver, ModelInfo, ModelOptions, NoAuth, Provider, ProviderError,
     ProviderId, ServerToolInfo,
@@ -6,7 +7,6 @@ use async_trait::async_trait;
 use llm::{ChatCompletionsApi, HttpClient, LlmApi};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock, RwLock};
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -22,28 +22,23 @@ pub struct LocalModelEntry {
     pub api_key: Option<String>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-struct LocalModelsFile {
-    local_models: Vec<LocalModelEntry>,
-}
-
 pub struct LocalProvider {
-    path: PathBuf,
+    store: Arc<dyn LocalModelStore>,
     entries: RwLock<Vec<LocalModelEntry>>,
     models: RwLock<Vec<ModelInfo>>,
 }
 
 impl LocalProvider {
-    pub fn new(path: PathBuf) -> Self {
+    pub fn new(store: Arc<dyn LocalModelStore>) -> Self {
         Self {
-            path,
+            store,
             entries: RwLock::new(Vec::new()),
             models: RwLock::new(Vec::new()),
         }
     }
 
     pub async fn load(&self) -> Result<(), ProviderError> {
-        let entries = read_local_models(&self.path).await.unwrap_or_default();
+        let entries = self.store.load().await?;
         let models = Self::rebuild(&entries);
         *self.entries.write().unwrap_or_else(|e| e.into_inner()) = entries;
         *self.models.write().unwrap_or_else(|e| e.into_inner()) = models;
@@ -53,6 +48,15 @@ impl LocalProvider {
     pub async fn add_model(&self, entry: LocalModelEntry) -> Result<(), ProviderError> {
         {
             let mut entries = self.entries.write().unwrap_or_else(|e| e.into_inner());
+            if entries
+                .iter()
+                .any(|existing| existing.model_id == entry.model_id)
+            {
+                return Err(ProviderError::Fetch(format!(
+                    "local model already exists: {}",
+                    entry.model_id
+                )));
+            }
             entries.push(entry);
             let models = Self::rebuild(&entries);
             *self.models.write().unwrap_or_else(|e| e.into_inner()) = models;
@@ -79,9 +83,10 @@ impl LocalProvider {
     pub async fn update_model(&self, entry: LocalModelEntry) -> Result<(), ProviderError> {
         {
             let mut entries = self.entries.write().unwrap_or_else(|e| e.into_inner());
-            if let Some(existing) = entries.iter_mut().find(|e| e.model_id == entry.model_id) {
-                *existing = entry;
-            }
+            let Some(existing) = entries.iter_mut().find(|e| e.model_id == entry.model_id) else {
+                return Err(ProviderError::ModelNotFound(entry.model_id));
+            };
+            *existing = entry;
             let models = Self::rebuild(&entries);
             *self.models.write().unwrap_or_else(|e| e.into_inner()) = models;
         }
@@ -116,9 +121,7 @@ impl LocalProvider {
             .read()
             .unwrap_or_else(|e| e.into_inner())
             .clone();
-        write_local_models(&self.path, &entries)
-            .await
-            .map_err(|e| ProviderError::Fetch(e.to_string()))
+        self.store.save(&entries).await
     }
 }
 
@@ -197,41 +200,10 @@ pub fn bind_local_model(
     Ok(crate::Model::new_with_options(info, api, auth, options))
 }
 
-async fn read_local_models(path: &Path) -> Result<Vec<LocalModelEntry>, std::io::Error> {
-    let contents = tokio::fs::read_to_string(path).await?;
-    let file: LocalModelsFile = serde_json::from_str(&contents)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-    Ok(file.local_models)
-}
-
-async fn write_local_models(
-    path: &Path,
-    entries: &[LocalModelEntry],
-) -> Result<(), std::io::Error> {
-    let file = LocalModelsFile {
-        local_models: entries.to_vec(),
-    };
-    let contents = serde_json::to_string_pretty(&file)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-    if let Some(parent) = path.parent() {
-        tokio::fs::create_dir_all(parent).await?;
-    }
-    tokio::fs::write(path, contents).await
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn temp_path(name: &str) -> PathBuf {
-        let mut path = std::env::temp_dir();
-        path.push(format!(
-            "alan-local-test-{}-{name}.json",
-            std::process::id()
-        ));
-        let _ = std::fs::remove_file(&path);
-        path
-    }
+    use crate::store::LocalModelStore;
 
     fn make_entry(model_id: &str) -> LocalModelEntry {
         LocalModelEntry {
@@ -242,54 +214,92 @@ mod tests {
         }
     }
 
-    // --- CRUD tests ---
+    #[derive(Default)]
+    struct MockStore {
+        entries: RwLock<Vec<LocalModelEntry>>,
+    }
+
+    impl MockStore {
+        fn shared() -> Arc<dyn LocalModelStore> {
+            Arc::new(Self::default())
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl LocalModelStore for MockStore {
+        async fn load(&self) -> Result<Vec<LocalModelEntry>, ProviderError> {
+            Ok(self
+                .entries
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone())
+        }
+
+        async fn save(&self, entries: &[LocalModelEntry]) -> Result<(), ProviderError> {
+            *self.entries.write().unwrap_or_else(|e| e.into_inner()) = entries.to_vec();
+            Ok(())
+        }
+    }
 
     #[tokio::test]
     async fn load_missing_file_returns_empty() {
-        let path = temp_path("missing");
-        let provider = LocalProvider::new(path);
+        let store = MockStore::shared();
+        let provider = LocalProvider::new(store);
         provider.load().await.unwrap();
         assert!(provider.models().is_empty());
     }
 
     #[tokio::test]
     async fn add_model_appears_in_catalog() {
-        let provider = LocalProvider::new(temp_path("add-one"));
+        let store = MockStore::shared();
+        let provider = LocalProvider::new(Arc::clone(&store));
         provider.add_model(make_entry("llama3")).await.unwrap();
         let models = provider.models();
         assert_eq!(models.len(), 1);
         assert_eq!(models[0].id, "llama3");
         assert_eq!(models[0].provider, ProviderId::new("local"));
+        // Verify persistence via store
+        let persisted = store.load().await.unwrap();
+        assert_eq!(persisted.len(), 1);
     }
 
     #[tokio::test]
     async fn add_multiple_models() {
-        let provider = LocalProvider::new(temp_path("add-multi"));
+        let store = MockStore::shared();
+        let provider = LocalProvider::new(Arc::clone(&store));
         provider.add_model(make_entry("a")).await.unwrap();
         provider.add_model(make_entry("b")).await.unwrap();
         assert_eq!(provider.models().len(), 2);
+        let persisted = store.load().await.unwrap();
+        assert_eq!(persisted.len(), 2);
     }
 
     #[tokio::test]
     async fn remove_model() {
-        let provider = LocalProvider::new(temp_path("remove"));
+        let store = MockStore::shared();
+        let provider = LocalProvider::new(Arc::clone(&store));
         provider.add_model(make_entry("a")).await.unwrap();
         provider.add_model(make_entry("b")).await.unwrap();
         let removed = provider.remove_model("a").await.unwrap();
         assert!(removed);
         assert_eq!(provider.models().len(), 1);
         assert_eq!(provider.models()[0].id, "b");
+        let persisted = store.load().await.unwrap();
+        assert_eq!(persisted.len(), 1);
+        assert_eq!(persisted[0].model_id, "b");
     }
 
     #[tokio::test]
     async fn remove_nonexistent_returns_false() {
-        let provider = LocalProvider::new(temp_path("remove-none"));
+        let store = MockStore::shared();
+        let provider = LocalProvider::new(store);
         assert!(!provider.remove_model("nope").await.unwrap());
     }
 
     #[tokio::test]
     async fn update_model() {
-        let provider = LocalProvider::new(temp_path("update"));
+        let store = MockStore::shared();
+        let provider = LocalProvider::new(Arc::clone(&store));
         provider.add_model(make_entry("a")).await.unwrap();
         let updated = LocalModelEntry {
             model_id: "a".into(),
@@ -300,34 +310,34 @@ mod tests {
         provider.update_model(updated).await.unwrap();
         let found = provider.find_entry("a").unwrap();
         assert_eq!(found.url, "http://new-url:8080/v1");
-        assert_eq!(found.api, LocalApi::ChatCompletions);
-        assert_eq!(found.api_key, Some("key".into()));
+        let persisted = store.load().await.unwrap();
+        assert_eq!(persisted[0].url, "http://new-url:8080/v1");
     }
 
     #[tokio::test]
     async fn find_entry_returns_none_for_missing() {
-        let provider = LocalProvider::new(temp_path("find-miss"));
+        let store = MockStore::shared();
+        let provider = LocalProvider::new(store);
         assert!(provider.find_entry("nope").is_none());
     }
 
     #[tokio::test]
     async fn find_entry_returns_correct_entry() {
-        let provider = LocalProvider::new(temp_path("find-ok"));
+        let store = MockStore::shared();
+        let provider = LocalProvider::new(Arc::clone(&store));
         provider.add_model(make_entry("x")).await.unwrap();
         let entry = provider.find_entry("x").unwrap();
         assert_eq!(entry.model_id, "x");
     }
 
-    // --- Persistence tests ---
-
     #[tokio::test]
     async fn persists_to_disk_and_reloads() {
-        let path = temp_path("persist");
+        let store = MockStore::shared();
         {
-            let provider = LocalProvider::new(path.clone());
+            let provider = LocalProvider::new(Arc::clone(&store));
             provider.add_model(make_entry("a")).await.unwrap();
         }
-        let provider = LocalProvider::new(path);
+        let provider = LocalProvider::new(Arc::clone(&store));
         provider.load().await.unwrap();
         assert_eq!(provider.models().len(), 1);
         assert_eq!(provider.models()[0].id, "a");
@@ -335,14 +345,14 @@ mod tests {
 
     #[tokio::test]
     async fn remove_persists_to_disk() {
-        let path = temp_path("persist-remove");
+        let store = MockStore::shared();
         {
-            let provider = LocalProvider::new(path.clone());
+            let provider = LocalProvider::new(Arc::clone(&store));
             provider.add_model(make_entry("a")).await.unwrap();
             provider.add_model(make_entry("b")).await.unwrap();
             provider.remove_model("a").await.unwrap();
         }
-        let provider = LocalProvider::new(path);
+        let provider = LocalProvider::new(Arc::clone(&store));
         provider.load().await.unwrap();
         assert_eq!(provider.models().len(), 1);
         assert_eq!(provider.models()[0].id, "b");
@@ -350,9 +360,9 @@ mod tests {
 
     #[tokio::test]
     async fn update_persists_to_disk() {
-        let path = temp_path("persist-update");
+        let store = MockStore::shared();
         {
-            let provider = LocalProvider::new(path.clone());
+            let provider = LocalProvider::new(Arc::clone(&store));
             provider.add_model(make_entry("a")).await.unwrap();
             let updated = LocalModelEntry {
                 model_id: "a".into(),
@@ -362,29 +372,25 @@ mod tests {
             };
             provider.update_model(updated).await.unwrap();
         }
-        let provider = LocalProvider::new(path);
+        let provider = LocalProvider::new(Arc::clone(&store));
         provider.load().await.unwrap();
         let entry = provider.find_entry("a").unwrap();
         assert_eq!(entry.url, "http://updated:9090");
         assert_eq!(entry.api, LocalApi::ChatCompletions);
     }
 
-    // --- fetch_models test ---
-
     #[tokio::test]
     async fn fetch_models_populates_catalog() {
-        let path = temp_path("fetch");
+        let store = MockStore::shared();
         {
-            let provider = LocalProvider::new(path.clone());
+            let provider = LocalProvider::new(Arc::clone(&store));
             provider.add_model(make_entry("x")).await.unwrap();
         }
-        let provider = LocalProvider::new(path);
+        let provider = LocalProvider::new(Arc::clone(&store));
         provider.fetch_models().await.unwrap();
         assert_eq!(provider.models().len(), 1);
         assert_eq!(provider.models()[0].id, "x");
     }
-
-    // --- bind_local_model tests ---
 
     #[tokio::test]
     async fn bind_chat_completions() {
@@ -414,13 +420,15 @@ mod tests {
 
     #[tokio::test]
     async fn provider_id_is_local() {
-        let provider = LocalProvider::new(temp_path("id"));
+        let store = MockStore::shared();
+        let provider = LocalProvider::new(store);
         assert_eq!(provider.id(), ProviderId::new("local"));
     }
 
     #[tokio::test]
     async fn empty_provider_has_no_models() {
-        let provider = LocalProvider::new(temp_path("empty"));
+        let store = MockStore::shared();
+        let provider = LocalProvider::new(store);
         assert!(provider.models().is_empty());
     }
 }

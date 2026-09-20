@@ -443,4 +443,51 @@ mod tests {
             "label colon columns are not aligned: {colon_cols:?}"
         );
     }
+
+    #[test]
+    fn to_entry_rejects_empty_model_id() {
+        let fields = FormFields {
+            model_id: String::new(),
+            url: "http://localhost:11434".to_owned(),
+            api_key: String::new(),
+        };
+        assert!(fields.to_entry().is_none());
+    }
+
+    #[test]
+    fn to_entry_rejects_empty_url() {
+        let fields = FormFields {
+            model_id: "llama3".to_owned(),
+            url: String::new(),
+            api_key: String::new(),
+        };
+        assert!(fields.to_entry().is_none());
+    }
+
+    #[test]
+    fn to_entry_accepts_valid_fields() {
+        let fields = FormFields {
+            model_id: "llama3".to_owned(),
+            url: "http://localhost:11434".to_owned(),
+            api_key: "sk-abc".to_owned(),
+        };
+        let entry = fields.to_entry().unwrap();
+        assert_eq!(entry.model_id, "llama3");
+        assert_eq!(entry.url, "http://localhost:11434");
+        assert_eq!(entry.api, LocalApi::ChatCompletions);
+        assert_eq!(entry.api_key, Some("sk-abc".to_owned()));
+    }
+
+    #[test]
+    fn to_entry_strips_whitespace() {
+        let fields = FormFields {
+            model_id: "  llama3  ".to_owned(),
+            url: "  http://localhost:11434  ".to_owned(),
+            api_key: String::new(),
+        };
+        let entry = fields.to_entry().unwrap();
+        assert_eq!(entry.model_id, "llama3");
+        assert_eq!(entry.url, "http://localhost:11434");
+        assert_eq!(entry.api_key, None);
+    }
 }

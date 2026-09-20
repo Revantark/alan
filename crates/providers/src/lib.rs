@@ -6,6 +6,7 @@ mod local;
 mod model;
 mod openrouter;
 mod provider;
+mod store;
 mod zai;
 
 pub use auth::{
@@ -21,4 +22,5 @@ pub use local::{LocalApi, LocalModelEntry, LocalProvider, bind_local_model};
 pub use model::{Model, ModelError, ModelOptions};
 pub use openrouter::{OpenRouterBuilder, OpenRouterProvider};
 pub use provider::{Provider, ProviderError, ProviderRegistry, bind_model};
+pub use store::LocalModelStore;
 pub use zai::{ZaiBuilder, ZaiProvider};

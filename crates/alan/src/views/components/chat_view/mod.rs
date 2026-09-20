@@ -22,7 +22,7 @@ use alan_tui::entity::Entity;
 use alan_tui::{Subscription, SubscriptionEvent};
 use crossterm::event::{Event, KeyCode, KeyEventKind};
 use futures_util::Stream;
-use providers::{ModelInfo, ProviderRegistry};
+use providers::ProviderRegistry;
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::Style;
@@ -42,15 +42,11 @@ const EDITOR_BOTTOM_PAD: u16 = 1;
 /// Fixed-rate repaint interval while an agent stream is in flight.
 const STREAM_REPAINT_INTERVAL: std::time::Duration = std::time::Duration::from_millis(32);
 
-/// Callback run when a local model is chosen in a picker: resolves the local
-/// provider, the selected model, and the render context.
-pub(crate) type LocalPickFn = Box<
-    dyn for<'a> Fn(
-        Arc<providers::LocalProvider>,
-        ModelInfo,
-        &'a mut Context<'a, ChatView, AlanAction>,
-    ),
->;
+/// Action chosen from the local-model picker.
+pub(crate) enum LocalPick {
+    Remove,
+    Edit,
+}
 
 #[derive(Debug, Clone, Copy)]
 pub struct LoginRequested;

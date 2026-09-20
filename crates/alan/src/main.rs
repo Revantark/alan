@@ -1,5 +1,6 @@
 mod core;
 mod local_model_overlay;
+mod local_model_store;
 mod logging;
 mod login_overlay;
 mod root;
@@ -7,6 +8,7 @@ mod views;
 
 use crate::core::settings::{DEFAULT_MODEL, PatchSettings, Settings, SettingsStore};
 use crate::core::{ChatController, SlashCommand};
+use crate::local_model_store::JsonLocalModelStore;
 use llm::ServerTool;
 use std::time::Duration;
 
@@ -53,10 +55,13 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let credential_store = Arc::new(FileCredentialStore::new(auth_path()?));
-    let local_provider = Arc::new(LocalProvider::new(
+    let local_store = Arc::new(JsonLocalModelStore::new(
         alan_data_dir()?.join("local_models.json"),
     ));
-    local_provider.load().await?;
+    let local_provider = Arc::new(LocalProvider::new(local_store));
+    if let Err(e) = local_provider.load().await {
+        tracing::warn!("failed to load local models: {e}");
+    }
     let providers: Vec<Arc<dyn Provider>> = vec![
         Arc::new(ZaiProvider::from_store(credential_store.clone()).build()?),
         Arc::new(GoogleProvider::from_store(credential_store.clone()).build()?),
@@ -148,16 +153,12 @@ async fn main() -> anyhow::Result<()> {
     // `Runtime::run` consumes the root, so keep the agent for the saved-session
     // message printed after the TUI exits.
     let agent = controller.agent();
-    let result = Runtime::builder(AlanRoot::new(
-        controller,
-        registry,
-        credential_store,
-    ))
-    .key_mapper(AlanKeyMapper)
-    .tick_rate(Duration::from_millis(16))
-    .build()
-    .run()
-    .await;
+    let result = Runtime::builder(AlanRoot::new(controller, registry, credential_store))
+        .key_mapper(AlanKeyMapper)
+        .tick_rate(Duration::from_millis(16))
+        .build()
+        .run()
+        .await;
     let result = result.map_err(|error| anyhow::anyhow!("{error}"));
     if let Some(session_id) = agent.session_id().await {
         println!("\nSession saved. Resume it with:\n\nALAN_SESSION={session_id} alan");

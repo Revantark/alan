@@ -8,7 +8,7 @@ use alan_tui::context::Context;
 use providers::{ModelInfo, Provider, ProviderId, ProviderRegistry, bind_local_model, bind_model};
 use std::sync::Arc;
 
-use crate::views::components::chat_view::LocalPickFn;
+use super::LocalPick;
 use crate::views::components::{ModelPick, ModelsPicker};
 
 use super::{ChatView, parse_provider_order, persist_provider_order};
@@ -36,7 +36,7 @@ pub(crate) fn open_models_picker(view: &mut ChatView, cx: &mut Context<'_, ChatV
     );
 
     let providers = Arc::clone(&view.providers);
-    let local_provider = view.providers.local().cloned();
+    let local_provider = view.providers.local();
     view.model_subscription = Some(
         cx.subscribe::<crate::views::components::ModelPick, ModelsPicker, _>(
             picker,
@@ -202,10 +202,7 @@ pub(crate) fn open_local_model_overlay(
             .push_info("Local provider not available".to_owned());
         return;
     };
-    cx.open_overlay(LocalModelOverlay::new(
-        std::sync::Arc::clone(local_provider),
-        edit_entry,
-    ));
+    cx.open_overlay(LocalModelOverlay::new(local_provider, edit_entry));
 }
 
 /// Open a picker to remove a local model.
@@ -215,27 +212,7 @@ fn open_local_remove_picker(view: &mut ChatView, cx: &mut Context<'_, ChatView, 
         cx,
         "Remove Local Model",
         "No local models to remove.",
-        Box::new(|local, model_info, cx| {
-            let model_id = model_info.id.clone();
-            let local = Arc::clone(&local);
-            let display_id = model_id.clone();
-            cx.spawn(
-                async move {
-                    local
-                        .remove_model(&model_id)
-                        .await
-                        .map_err(|e| alan_tui::TaskError(e.to_string().into()))?;
-                    Ok::<(), alan_tui::TaskError>(())
-                },
-                move |result, view, _cx| match result {
-                    Ok(()) => {
-                        view.controller
-                            .push_info(format!("Removed local model: {display_id}"));
-                    }
-                    Err(e) => view.controller.push_info(format!("Failed to remove: {e}")),
-                },
-            );
-        }),
+        LocalPick::Remove,
     );
 }
 
@@ -246,33 +223,18 @@ fn open_local_edit_picker(view: &mut ChatView, cx: &mut Context<'_, ChatView, Al
         cx,
         "Edit Local Model",
         "No local models to edit.",
-        Box::new(|local, model_info, cx| {
-            let local = Arc::clone(&local);
-            cx.spawn(
-                async move {
-                    local.find_entry(&model_info.id).ok_or_else(|| {
-                        alan_tui::TaskError(
-                            format!("Local model not found: {}", model_info.id).into(),
-                        )
-                    })
-                },
-                move |result, view, cx| match result {
-                    Ok(entry) => open_local_model_overlay(view, cx, Some(entry)),
-                    Err(e) => view.controller.push_info(e.to_string()),
-                },
-            );
-        }),
+        LocalPick::Edit,
     );
 }
 
 /// Open a `ModelsPicker` over the local catalog and run `on_pick` with the
-/// chosen entry's id. Shared by the remove and edit flows.
+/// chosen entry's index. Shared by the remove and edit flows.
 fn open_local_picker(
     view: &mut ChatView,
     cx: &mut Context<'_, ChatView, AlanAction>,
     title: &str,
     empty_message: &str,
-    on_pick: LocalPickFn,
+    pick: LocalPick,
 ) {
     let Some(local) = view.providers.local() else {
         view.controller.push_info(empty_message.to_owned());
@@ -288,7 +250,7 @@ fn open_local_picker(
         return;
     }
     let picker = cx.open_overlay(ModelsPicker::new(title, models));
-    let local = Arc::clone(local);
+    let local = local.clone();
     cx.subscribe_once::<crate::views::components::ModelPick, ModelsPicker, _>(
         picker,
         move |event, _view, _picker, cx| {
@@ -298,7 +260,45 @@ fn open_local_picker(
             let Some(model_info) = local.models().into_iter().nth(*index) else {
                 return;
             };
-            on_pick(Arc::clone(&local), model_info, cx);
+            match &pick {
+                LocalPick::Remove => {
+                    let local = Arc::clone(&local);
+                    let model_id = model_info.id.clone();
+                    let display_id = model_id.clone();
+                    cx.spawn(
+                        async move {
+                            local
+                                .remove_model(&model_id)
+                                .await
+                                .map_err(|e| alan_tui::TaskError(e.to_string().into()))?;
+                            Ok::<(), alan_tui::TaskError>(())
+                        },
+                        move |result, view, _cx| match result {
+                            Ok(()) => {
+                                view.controller
+                                    .push_info(format!("Removed local model: {display_id}"));
+                            }
+                            Err(e) => view.controller.push_info(format!("Failed to remove: {e}")),
+                        },
+                    );
+                }
+                LocalPick::Edit => {
+                    let local = Arc::clone(&local);
+                    cx.spawn(
+                        async move {
+                            local.find_entry(&model_info.id).ok_or_else(|| {
+                                alan_tui::TaskError(
+                                    format!("Local model not found: {}", model_info.id).into(),
+                                )
+                            })
+                        },
+                        move |result, view, cx| match result {
+                            Ok(entry) => open_local_model_overlay(view, cx, Some(entry)),
+                            Err(e) => view.controller.push_info(e.to_string()),
+                        },
+                    );
+                }
+            }
         },
     );
 }
