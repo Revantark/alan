@@ -97,10 +97,19 @@ The framework receives native terminal events from crossterm. A user-provided
 [`KeyMapper<A>`] converts them into semantic actions. Components must **not**
 depend on raw crossterm events — crossterm types appear only at this boundary.
 
-Actions route synchronously through a hierarchy:
+Actions route synchronously through a hierarchy. Without an overlay, the
+focused entity receives the action first, followed by its parent chain and
+finally the root. An active overlay is modal and receives the action
+exclusively:
 
 ```text
 overlay → focused entity → parent chain → root
+```
+
+When an overlay is active, the route is simply:
+
+```text
+active overlay → overlay only
 ```
 
 If a component returns [`ActionStatus::Handled`], propagation stops. If it

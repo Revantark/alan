@@ -158,6 +158,35 @@ mod tests {
         (state, store, target, source)
     }
 
+    #[tokio::test]
+    async fn spawned_task_delivers_result_callback() {
+        let (sender, mut receiver) = mpsc::unbounded_channel();
+        let mut store = EntityStore::new();
+        let target = store.insert(Probe { hits: 0 });
+        let mut state = RuntimeState::new(sender, Arc::new(TokioExecutor));
+        let _handle = {
+            let mut cx: Context<'_, Probe, ()> = Context::new(&mut state, &store, target.id());
+            cx.spawn(
+                async { Ok::<(), crate::task::TaskError>(()) },
+                |result, probe, _cx| {
+                    assert!(result.is_ok());
+                    probe.hits += 1;
+                },
+            )
+        };
+
+        let delivery = receiver.recv().await.expect("task should deliver a result");
+        let crate::subscription::RuntimeDelivery::Task(delivery) = delivery else {
+            panic!("expected task delivery");
+        };
+        crate::event_loop::deliver_task_for_test(delivery, &mut state, &store);
+
+        assert_eq!(
+            store.typed_read(target.id(), |probe: &Probe| probe.hits),
+            Some(1)
+        );
+    }
+
     #[test]
     fn subscribe_once_fires_without_a_stored_handle() {
         let (mut state, store, target, source) = harness();

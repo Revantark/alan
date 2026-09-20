@@ -144,6 +144,15 @@ fn remove_entity_tree<A: 'static>(
 }
 
 #[cfg(test)]
+pub(crate) fn deliver_task_for_test<A: 'static>(
+    delivery: TaskDelivery,
+    core: &mut RuntimeState<A>,
+    store: &EntityStore<A>,
+) {
+    deliver_task(delivery, core, store);
+}
+
+#[cfg(test)]
 pub(crate) fn deliver_event_for_test<A: 'static>(
     delivery: EventDelivery,
     core: &mut RuntimeState<A>,

@@ -120,7 +120,7 @@ impl TaskExecutor for TokioExecutor {
         let task_active = Arc::clone(&active);
         let task = tokio::spawn(async move {
             let delivery = future.await;
-            if task_active.swap(false, Ordering::AcqRel) {
+            if task_active.load(Ordering::Acquire) {
                 let _ = sender.send(RuntimeDelivery::Task(delivery));
             }
         });
