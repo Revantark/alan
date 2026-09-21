@@ -1,14 +1,14 @@
 //! Entity store with typed, non-owning handles.
 //!
-//! Each component is behind its own lock. Re-entrant access to the current
-//! entity is rejected by `Context`; missing entities are safe no-ops.
+//! Each component is stored in a `RefCell`. Re-entrant access to the
+//! current entity is rejected by `Context`; missing entities are safe
+//! no-ops.
 
 use std::any::Any;
-use std::cell::RefCell;
+use std::cell::{RefCell, RefMut};
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Mutex, MutexGuard};
 
 use ratatui::Frame;
 use ratatui::layout::Rect;
@@ -135,7 +135,7 @@ where
 }
 
 type SlotValue<A> = Option<Box<dyn ComponentSlot<A>>>;
-type Slot<A> = Mutex<SlotValue<A>>;
+type Slot<A> = RefCell<SlotValue<A>>;
 
 pub(crate) struct EntityStore<A> {
     slots: HashMap<EntityId, Slot<A>>,
@@ -163,12 +163,12 @@ impl<A: 'static> EntityStore<A> {
 
     pub(crate) fn insert<T: Component<A>>(&mut self, state: T) -> Entity<T> {
         let id = EntityId::allocate();
-        self.slots.insert(id, Mutex::new(Some(Box::new(state))));
+        self.slots.insert(id, RefCell::new(Some(Box::new(state))));
         Entity::from_id(id)
     }
 
     pub(crate) fn insert_slot(&mut self, id: EntityId, slot: Box<dyn ComponentSlot<A>>) {
-        self.slots.insert(id, Mutex::new(Some(slot)));
+        self.slots.insert(id, RefCell::new(Some(slot)));
     }
 
     pub(crate) fn init_if_needed(&self, id: EntityId, cx: &mut Ctx<'_, A>) {
@@ -210,8 +210,8 @@ impl<A: 'static> EntityStore<A> {
         self.slots.contains_key(&id)
     }
 
-    pub(crate) fn lock(&self, id: EntityId) -> Option<MutexGuard<'_, SlotValue<A>>> {
-        self.slots.get(&id).and_then(|slot| slot.lock().ok())
+    pub(crate) fn lock(&self, id: EntityId) -> Option<RefMut<'_, SlotValue<A>>> {
+        self.slots.get(&id).map(|slot| slot.borrow_mut())
     }
 
     pub(crate) fn dispatch_action(

@@ -355,7 +355,7 @@ impl<'a, T: Component<A>, A: 'static> Context<'a, T, A> {
     /// callbacks run while the event loop holds the entity-store lock, so any
     /// inline call that mutates runtime state (`subscribe_stream`, `dispatch`
     /// to another entity, `update`) would re-enter that non-reentrant
-    /// `std::sync::Mutex` and deadlock the UI. When a callback needs to do such
+    /// entity-store lock and deadlock the UI. When a callback needs to do such
     /// work, wrap it in `spawn` with a trivial future such as
     /// `async { Ok::<(), _>(()) }` — the handler then runs later, after the
     /// lock is released. Do not "simplify" that pattern into a synchronous
