@@ -228,7 +228,6 @@ fn deliver_event<A: 'static>(
                 .insert(id, SubscriptionRecord::Event(event_record));
         } else {
             event_record.active.store(false, Ordering::Release);
-            let _ = event_record.cancellation.send(true);
         }
     }
 }
@@ -271,7 +270,6 @@ fn deliver_observations<A: 'static>(
                 .insert(id, SubscriptionRecord::Observation(record));
         } else {
             record.active.store(false, Ordering::Release);
-            let _ = record.cancellation.send(true);
         }
     }
 }

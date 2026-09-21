@@ -33,20 +33,29 @@ pub enum SubscriptionEvent<T> {
 #[derive(Debug)]
 pub struct Subscription {
     active: Arc<AtomicBool>,
-    cancellation: watch::Sender<bool>,
+    cancellation: Option<watch::Sender<bool>>,
 }
 
 impl Subscription {
-    pub(crate) fn new(active: Arc<AtomicBool>, cancellation: watch::Sender<bool>) -> Self {
+    pub(crate) fn new(active: Arc<AtomicBool>) -> Self {
         Self {
             active,
-            cancellation,
+            cancellation: None,
+        }
+    }
+
+    pub(crate) fn new_stream(active: Arc<AtomicBool>, cancellation: watch::Sender<bool>) -> Self {
+        Self {
+            active,
+            cancellation: Some(cancellation),
         }
     }
 
     pub fn cancel(&self) {
         if self.active.swap(false, Ordering::Release) {
-            let _ = self.cancellation.send(true);
+            if let Some(tx) = &self.cancellation {
+                let _ = tx.send(true);
+            }
         }
     }
 
@@ -111,7 +120,6 @@ pub(crate) struct EventSubscription<A> {
     pub(crate) source: EntityId,
     pub(crate) target: EntityId,
     pub(crate) active: Arc<AtomicBool>,
-    pub(crate) cancellation: watch::Sender<bool>,
     pub(crate) handler: Box<dyn EventHandler<A>>,
 }
 
@@ -119,7 +127,6 @@ pub(crate) struct ObservationSubscription<A> {
     pub(crate) source: EntityId,
     pub(crate) target: EntityId,
     pub(crate) active: Arc<AtomicBool>,
-    pub(crate) cancellation: watch::Sender<bool>,
     pub(crate) handler: Box<dyn ObservationHandler<A>>,
 }
 
