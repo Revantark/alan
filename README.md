@@ -1,9 +1,41 @@
 # Alan
 
-Alan is a minimal coding agent written in Rust. It runs in your terminal and uses an LLM to answer questions, inspect files, edit files, and run shell commands.
+Alan is a minimal coding agent written in Rust that runs in your terminal. It can use an LLM to answer questions, inspect files, edit files, and run shell commands.
 
-**Note:** Alan is currently in an early prototype stage. Some basic features are still missing and will be added soon.
- 
+> Alan is currently an early prototype. Some features are still being developed, and behavior may change between releases.
+
+## Install
+
+Prebuilt binaries are published through GitHub Releases. The installer detects your operating system and CPU architecture, downloads the matching binary, verifies it, and installs `alan` into Cargo's binary directory.
+
+### macOS and Linux
+
+```bash
+curl https://github.com/Revantark/alan/releases/latest/download/alan-installer.sh | sh
+```
+
+Restart your shell or ensure `~/.cargo/bin` is on your `PATH`, then run:
+
+```bash
+alan
+```
+
+### Windows
+
+Run the generated PowerShell installer from a PowerShell prompt:
+
+```powershell
+irm https://github.com/Revantark/alan/releases/latest/download/alan-installer.ps1 | iex
+```
+
+### Updating
+
+Run the same installer command again to install the latest release. To see the installed version:
+
+```bash
+alan --version
+```
+
 ## Features
 
 - Interactive terminal UI built with Ratatui
@@ -82,6 +114,47 @@ All variables are optional:
 
 Files live under `$ALAN_HOME/.alan/`: `auth.json` (credentials),
 `sessions/` (conversation history), and `logs/`.
+
+## Run locally
+
+For development from a checkout:
+
+```bash
+OPENROUTER_API_KEY=... cargo run -p alan
+```
+
+To build and run a release binary locally:
+
+```bash
+cargo build -p alan --release
+./target/release/alan
+```
+
+## Release process
+
+Releases are built for multiple platforms with [`cargo-dist`](https://github.com/axodotdev/cargo-dist) and published as GitHub Release artifacts. The generated workflow is stored at `.github/workflows/release.yml`.
+
+To create a release:
+
+1. Update the version in `crates/alan/Cargo.toml`.
+2. Review and test the changes.
+3. Create and push a version tag from the repository root:
+
+   ```bash
+   git tag v0.1.0
+   git push origin v0.1.0
+   ```
+
+4. GitHub Actions builds the supported targets and publishes the installers and archives to the GitHub Release.
+
+To preview the distribution locally before tagging:
+
+```bash
+cargo dist plan
+cargo dist build
+```
+
+The release workflow requires the repository's GitHub Actions permissions to be allowed to create releases. Do not push a release tag until the version and generated artifacts have been reviewed.
 
 ## Development
 

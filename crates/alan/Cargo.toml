@@ -2,6 +2,14 @@
 name = "alan"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.88"
+description = "A minimal coding agent written in Rust"
+license = "MIT"
+homepage = "https://github.com/Revantark/alan"
+repository = "https://github.com/Revantark/alan"
+documentation = "https://docs.rs/alan"
+readme = "../../README.md"
+exclude = ["Cargo.lock"]
 
 [dependencies]
 agent = { path = "../agent" }
