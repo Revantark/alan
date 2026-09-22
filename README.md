@@ -6,11 +6,25 @@ A minimal coding agent in your terminal.
 
 ## Table of Contents
 
+- [Features](#features)
 - [Installation](#installation)
 - [Providers](#providers)
 - [Usage](#usage)
 - [Local models](#local-models)
+- [Configuration and data locations](#configuration-and-data-locations)
+- [Building from source](#building-from-source)
 - [Requirements](#requirements)
+
+## Features
+
+- **First-class OpenRouter support** — full model catalog, per-model custom provider pinning (`/model-provider`), and reasoning effort control (`/effort`).
+- **Paste images** — drop a screenshot from your clipboard straight into the conversation and ask about it.
+- **Compact with focus** — `/summarize-new "focus hint"` summarizes the context and restarts with just what matters.
+- **Steering** — queue a message mid-run and the agent picks it up without waiting for the response to finish.
+- **Plan and review modes** — cycle through them with `Shift+Tab` when you want the agent to think before it acts.
+- **Local models** — point Alan at any OpenAI-compatible endpoint, no API key required.
+
+> Skills support is implemented at the agent level but not exposed in the UI yet — coming soon.
 
 ## Installation
 
@@ -46,44 +60,70 @@ alan --version
 
 ## Providers
 
+Alan currently supports:
+
 - **OpenRouter**
 - **Google** (beta)
 - **Zai** (beta)
 
-Use the `/login` command to login to any of the available providers.
-For openrouter, per model custom provider can be set via /model-provider "paste name without quotes"
+Use the `/login` command to sign in to any of the available providers.
 
-Eg:
-- /model-provider deepseek
-- /model-provider xiaomi/fp8
+For OpenRouter, you can pin a custom provider for the selected model with `/model-provider`, followed by the provider name (no quotes):
+
+- `/model-provider deepseek`
+- `/model-provider xiaomi/fp8`
 
 ## Usage
 
-- Slash commands:
-  - `/models` — pick a model from the provider catalog
-  - `/plan` — toggle plan mode (also `Shift+Tab`)
-  - `/review` — toggle review mode (also `Shift+Tab`)
-  - `/normal` — turn off plan and review mode
-  - `/login` — sign in to a provider interactively
-  - `/new` — start a fresh session
-  - `/summarize-new [focus]` — summarize and restart; optional quoted focus hint
-    - Eg: `/summarize-new` just take the XYZ details from the context and strip everything else
-  - `/effort` — set reasoning effort (`none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`)
-  - `/fork` — fork session from a checkpoint
-  - `/local` — manage local models (add, remove, edit)
-  - `/help` — list available commands
+| Command | Description |
+| --- | --- |
+| `/models` | Pick a model from the provider catalog |
+| `/plan` | Toggle plan mode (also `Shift+Tab`) |
+| `/review` | Toggle review mode (also `Shift+Tab`) |
+| `/normal` | Turn off plan and review mode |
+| `/login` | Sign in to a provider interactively |
+| `/new` | Start a fresh session |
+| `/summarize-new [focus]` | Summarize the context and restart; optionally pass a quoted focus hint, e.g. `/summarize-new "just take the XYZ details"` |
+| `/effort` | Set reasoning effort (`none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`) |
+| `/fork` | Fork the session from a checkpoint |
+| `/local` | Manage local models (add, remove, edit) |
+| `/model-provider <name>` | Pin a custom provider for the current OpenRouter model |
+| `/help` | List available commands |
 
 ## Local models
 
-Supports openai compatible models only for now.
+Alan supports OpenAI-compatible local models.
 
 ```bash
 /local add
 ```
 
-Opens an overlay with fields: Model ID, URL, API, API Key. Use `/local remove` and `/local edit` to manage. No API key or `/login` needed for local.
+This opens an overlay with fields for Model ID, URL, API, and API Key. Use `/local remove` and `/local edit` to manage your local models. No API key or `/login` is needed for local models.
+
+## Configuration and data locations
+
+Alan stores everything under `~/.alan/` by default:
+
+- `settings.json` — your settings.
+- `sessions/` — conversation history (append-only JSONL, one file per session).
+- `logs/` — daily rotating logs.
+
+All of these locations respect the `ALAN_HOME` environment variable, so you can redirect them if needed. Two other environment variables are useful:
+
+- `ALAN_LOG_DIR` — override the log directory.
+- `ALAN_MODEL` — override the default model on startup, e.g. `ALAN_MODEL=openai/gpt-4o-mini alan`.
+
+## Building from source
+
+You'll need Rust 1.88 or newer (see [Requirements](#requirements)).
+
+```bash
+git clone https://github.com/Revantark/alan
+cd alan
+cargo run -p alan
+```
 
 ## Requirements
 
-- Rust 1.88 or newer (to build from source)
-- An API key for your chosen provider (not needed for local)
+- Rust 1.88 or newer (only for building from source)
+- An API key for your chosen provider (not needed for local models)
