@@ -31,6 +31,11 @@ async fn main() -> anyhow::Result<()> {
     // Saves the passed envs into settings
     let is_save = std::env::args().any(|arg| arg == "--save");
 
+    if std::env::args().any(|arg| arg == "--version") {
+        println!("alan-init {}", env!("CARGO_PKG_VERSION"));
+        return Ok(());
+    }
+
     let _guard = init().unwrap();
 
     let store = SettingsStore::<Settings>::new(settings_path()?);
