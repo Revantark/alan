@@ -19,10 +19,11 @@ pub(crate) fn start_new_session(view: &mut ChatView, cx: &mut Context<'_, ChatVi
                 .await
                 .map_err(|error| alan_tui::TaskError(Box::new(error)))
         },
-        move |result, view, _cx| match result {
+        move |result, view, cx| match result {
             Ok(()) => {
                 view.controller.clear_transcript();
                 view.controller.push_info("Started a new session.");
+                cx.notify();
             }
             Err(error) => view
                 .controller
