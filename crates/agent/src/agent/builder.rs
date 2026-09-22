@@ -1,5 +1,8 @@
 use crate::session::{Session, SessionError, SessionManager};
-use crate::{AgentError, AgentTool, Skill, context::AgentContext};
+use crate::{
+    AgentError, AgentTool, Skill, agent::permissions::AllowAllPermissionManager,
+    context::AgentContext,
+};
 use llm::Usage;
 use providers::Model;
 use std::{
@@ -11,7 +14,7 @@ use std::{
 };
 use tokio::sync::Mutex;
 
-use super::{Agent, Mode, reasoning_to_u8};
+use super::{Agent, Mode, ToolPermissionManager, reasoning_to_u8};
 
 const DEFAULT_SYSTEM_PROMPT: &str = r#"You are Alan, a reliable, pragmatic coding agent running in the user's project in a terminal.
 
@@ -62,6 +65,7 @@ pub struct AgentBuilder {
     pub(super) session_manager: Option<Arc<SessionManager>>,
     pub(super) resumed_session: Option<Session>,
     pub(super) working_directory: Option<PathBuf>,
+    pub(super) permissions: Option<Arc<dyn ToolPermissionManager>>,
 }
 
 impl AgentBuilder {
@@ -118,6 +122,11 @@ impl AgentBuilder {
         self
     }
 
+    pub fn permission_manager(mut self, pm: Arc<dyn ToolPermissionManager>) -> Self {
+        self.permissions = Some(pm);
+        self
+    }
+
     pub fn build(self) -> Result<Agent, AgentError> {
         let mut session_id = uuid::Uuid::new_v4().to_string();
         let mut messages = Vec::new();
@@ -150,6 +159,9 @@ impl AgentBuilder {
 
         let info = self.model.info().clone();
         let reasoning = self.model.reasoning_effort();
+        let permissions = self
+            .permissions
+            .unwrap_or_else(|| Arc::new(AllowAllPermissionManager));
         Ok(Agent {
             model: Mutex::new(self.model),
             context: Mutex::new(context),
@@ -164,6 +176,7 @@ impl AgentBuilder {
             working_directory: self.working_directory,
             model_info: Mutex::new(info),
             reasoning: AtomicU8::new(reasoning_to_u8(reasoning)),
+            permissions,
         })
     }
 }

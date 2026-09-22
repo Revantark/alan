@@ -1,15 +1,15 @@
+use super::event::{AgentEvent, emit_event};
+use super::prompt::PromptCx;
+use super::{Agent, Mode};
 use crate::AgentError;
 use crate::AgentMessage;
+use crate::agent::permissions::PermissionDecision;
 use crate::agent::persistence;
 use crate::agent::prompt;
 use crate::context::AgentContext;
 use llm::LlmResponse;
 use providers::Model;
 use tools::ToolOutput;
-
-use super::event::{AgentEvent, emit_event};
-use super::prompt::PromptCx;
-use super::{Agent, Mode};
 
 /// Core agent loop: stream LLM responses and execute tool calls until the
 /// model produces a final answer or `max_tool_rounds` is reached.
@@ -104,20 +104,6 @@ async fn handle_tool_calls(
     for call in calls {
         cx.check_cancelled()?;
 
-        let tool_index = context
-            .tool_indexes
-            .get(&call.name)
-            .copied()
-            .ok_or_else(|| AgentError::ToolNotFound(call.name.clone()))?;
-
-        // Sole guard against edits in plan/review mode. The full tool list is
-        // always sent to the model (for a stable cache prefix), so this
-        // runtime block is what actually prevents non-read-only tools from
-        // running outside Normal mode.
-        if mode != Mode::Normal && !context.tools[tool_index].read_only && call.name != "bash" {
-            return Err(AgentError::ToolNotFound(call.name.clone()));
-        }
-
         let call_id = call.id.clone();
 
         emit_event(
@@ -130,6 +116,51 @@ async fn handle_tool_calls(
             cx.cancellation,
         )
         .await?;
+
+        let tool_index = context
+            .tool_indexes
+            .get(&call.name)
+            .copied()
+            .ok_or_else(|| AgentError::ToolNotFound(call.name.clone()))?;
+
+        let decision = agent.permissions.has_permission(&call).await;
+        let decision = if decision == PermissionDecision::Ask {
+            agent.permissions.request_permission(&call).await
+        } else {
+            decision
+        };
+
+        if decision == PermissionDecision::Deny {
+            let denial = format!("permission denied for tool \"{}\" by user", call.name);
+            super::persistence::append_context_message(
+                agent,
+                context,
+                AgentMessage::ToolResult {
+                    tool_call_id: call.id.clone(),
+                    content: denial.clone(),
+                    content_parts: vec![],
+                },
+            )
+            .await?;
+            emit_event(
+                cx.events,
+                AgentEvent::ToolCallFailed {
+                    id: call_id,
+                    error: denial,
+                },
+                cx.cancellation,
+            )
+            .await?;
+            continue;
+        }
+
+        // Sole guard against edits in plan/review mode. The full tool list is
+        // always sent to the model (for a stable cache prefix), so this
+        // runtime block is what actually prevents non-read-only tools from
+        // running outside Normal mode.
+        if mode != Mode::Normal && !context.tools[tool_index].read_only && call.name != "bash" {
+            return Err(AgentError::ToolNotFound(call.name.clone()));
+        }
 
         match context.tools[tool_index].executor.execute(&call).await {
             Ok(output) => {

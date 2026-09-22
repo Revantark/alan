@@ -1,6 +1,7 @@
 mod builder;
 mod event;
 mod mode;
+mod permissions;
 mod persistence;
 mod prompt;
 mod prompt_builder;
@@ -8,6 +9,8 @@ mod tool_loop;
 
 #[cfg(test)]
 mod tests;
+
+pub use permissions::{AllowAllPermissionManager, PermissionDecision, ToolPermissionManager};
 
 use crate::session::{Session, SessionManager};
 use crate::{AgentError, AgentMessage};
@@ -86,6 +89,7 @@ pub struct Agent {
     /// index + 1 (see [`reasoning_to_u8`]). Updated in `set_model` and at
     /// construction time.
     reasoning: AtomicU8,
+    permissions: Arc<dyn ToolPermissionManager>,
 }
 
 impl Agent {
@@ -99,8 +103,10 @@ impl Agent {
             session_manager: None,
             resumed_session: None,
             working_directory: None,
+            permissions: None,
         }
     }
+
     /// Start building a prompt request.
     ///
     /// Returns a [`PromptBuilder`] that can be configured with chained

@@ -5,7 +5,10 @@ mod session;
 mod skill;
 mod tool;
 
-pub use agent::{Agent, AgentBuilder, AgentEvent, AgentStream, Mode, PromptBuilder};
+pub use agent::{
+    Agent, AgentBuilder, AgentEvent, AgentStream, AllowAllPermissionManager, Mode,
+    PermissionDecision, PromptBuilder, ToolPermissionManager,
+};
 pub use context::AgentMessage;
 pub use error::AgentError;
 pub use session::{SESSION_SCHEMA_VERSION, Session, SessionError, SessionManager, SessionRecord};
