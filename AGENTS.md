@@ -92,6 +92,17 @@ crates/alan/src/views/
 
 Do not add ratatui/crossterm types to `crates/alan/src/core/`.
 
+## Changelog
+
+`CHANGELOG.md` at the repo root follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
+format. `cargo dist` reads it to generate GitHub Release titles and bodies, and
+auto-includes it in release archives.
+
+- Update the `## [Unreleased]` section before tagging a release.
+- When cutting a release, rename `## [Unreleased]` to `## <version> - <YYYY-MM-DD>`
+  and add a fresh empty `## [Unreleased]` section on top.
+- Use `### Added` / `### Changed` / `### Fixed` / `### Removed` subsections.
+
 ## Current Alan UI
 
 `crates/alan/src/views/mod.rs` provides minimal borderless ratatui UI:
