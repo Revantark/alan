@@ -318,6 +318,7 @@ where
     let mut events = EventStream::new();
     let mut tick = tokio::time::interval(tick_rate);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
     loop {
         {
             let mut store = entity_store.lock().expect("entity store poisoned");
@@ -326,16 +327,20 @@ where
             // requests: an overlay may emit its result and close in the same
             // action callback.
             flush_requests(&mut state, &mut store);
+
             // Snapshot invalidations before callbacks run. Invalidations caused
             // by an observer/event callback belong to the next batch.
             let invalidated = state.take_invalidated();
+
             deliver_deferred_batch(&mut state, &store);
             for source in invalidated {
                 deliver_observations(source, &mut state, &store);
             }
+
             close_overlays(&mut state, &mut store);
             flush_requests(&mut state, &mut store);
             state.cleanup_subscriptions(&store);
+
             if state.take_dirty() {
                 let focused = state.focus.current();
                 guard
@@ -343,10 +348,12 @@ where
                     .draw(|frame| render::draw(root, &state.overlays, &store, frame, focused))?;
             }
         }
+
         let input_context = InputContext {
             overlay_active: state.overlays.is_active(),
             focus_active: state.focus.current().is_some(),
         };
+
         tokio::select! {
             maybe_event = events.next() => {
                 let Some(result) = maybe_event else { break };
@@ -365,6 +372,7 @@ where
                 state.deliveries.push_back(delivery);
             }
         }
+
         if state.should_quit() {
             break;
         }
