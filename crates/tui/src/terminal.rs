@@ -7,9 +7,7 @@
 //! [`TerminalOptions`]); every enabled feature is undone on drop in reverse
 //! order.
 
-use std::io::{self, Stdout, stdout};
-use std::sync::Arc;
-
+use crate::error::RuntimeError;
 use crossterm::cursor::SetCursorStyle;
 use crossterm::event::{
     DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
@@ -21,14 +19,15 @@ use crossterm::terminal::{
     supports_keyboard_enhancement,
 };
 use ratatui::{Terminal, backend};
-
-use crate::error::RuntimeError;
+use std::io::{self, Stdout, stdout};
+use std::sync::Arc;
 
 /// Features a [`TerminalGuard`] sets up on the terminal.
 ///
 /// The default mirrors the setup Alan's binary performs: mouse capture and
-/// bracketed paste enabled, [`KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES`]
-/// and [`KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES`] pushed when
+/// bracketed paste enabled, [`KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES`],
+/// [`KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES`], and
+/// [`KeyboardEnhancementFlags::REPORT_ALTERNATE_KEYS`] pushed when
 /// the terminal supports them, and a steady-bar cursor.
 #[derive(Debug, Clone)]
 pub struct TerminalOptions {
@@ -54,7 +53,8 @@ impl Default for TerminalOptions {
             bracketed_paste: true,
             keyboard_enhancement: Some(
                 KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
-                    | KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES,
+                    | KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES
+                    | KeyboardEnhancementFlags::REPORT_ALTERNATE_KEYS,
             ),
             cursor_style: Some(SetCursorStyle::SteadyBar),
         }
@@ -258,6 +258,7 @@ mod tests {
             Some(
                 KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
                     | KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES
+                    | KeyboardEnhancementFlags::REPORT_ALTERNATE_KEYS
             )
         );
         assert_eq!(options.cursor_style, Some(SetCursorStyle::SteadyBar));
