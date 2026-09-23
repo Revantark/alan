@@ -25,10 +25,9 @@ use std::sync::Arc;
 /// Features a [`TerminalGuard`] sets up on the terminal.
 ///
 /// The default mirrors the setup Alan's binary performs: mouse capture and
-/// bracketed paste enabled, [`KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES`],
-/// [`KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES`], and
-/// [`KeyboardEnhancementFlags::REPORT_ALTERNATE_KEYS`] pushed when
-/// the terminal supports them, and a steady-bar cursor.
+/// bracketed paste enabled, [`KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES`]
+/// and [`KeyboardEnhancementFlags::REPORT_EVENT_TYPES`] pushed when the terminal
+/// supports them, and a steady-bar cursor.
 #[derive(Debug, Clone)]
 pub struct TerminalOptions {
     /// Capture mouse scroll and click events.
@@ -48,14 +47,20 @@ pub struct TerminalOptions {
 impl Default for TerminalOptions {
     /// Defaults matching the terminal configuration Alan's binary performs today.
     fn default() -> Self {
+        // Flags 1 + 2 only (disambiguate + event types), without
+        // REPORT_ALL_KEYS_AS_ESCAPE_CODES: plain-text keys then arrive as
+        // legacy bytes with shift already applied (`@`, `(`, uppercase), which
+        // every kitty-protocol terminal handles uniformly, and special keys
+        // (Enter, Esc, arrows, Ctrl combos) still use CSI-u. The downside is
+        // no press/repeat/release kinds for plain text keys, which this app
+        // does not rely on for typing.
+        let keyboard_enhancement = KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+            | KeyboardEnhancementFlags::REPORT_EVENT_TYPES;
+
         Self {
             mouse_capture: true,
             bracketed_paste: true,
-            keyboard_enhancement: Some(
-                KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
-                    | KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES
-                    | KeyboardEnhancementFlags::REPORT_ALTERNATE_KEYS,
-            ),
+            keyboard_enhancement: Some(keyboard_enhancement),
             cursor_style: Some(SetCursorStyle::SteadyBar),
         }
     }
@@ -257,8 +262,7 @@ mod tests {
             options.keyboard_enhancement,
             Some(
                 KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
-                    | KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES
-                    | KeyboardEnhancementFlags::REPORT_ALTERNATE_KEYS
+                    | KeyboardEnhancementFlags::REPORT_EVENT_TYPES
             )
         );
         assert_eq!(options.cursor_style, Some(SetCursorStyle::SteadyBar));

@@ -154,22 +154,29 @@ impl PromptEditor {
         cx: &mut Context<'_, Self, AlanAction>,
     ) -> ActionStatus {
         let status = match event {
-            Event::Key(key) if key.code == KeyCode::Esc && !self.attachments.is_empty() => {
+            Event::Key(key)
+                if key.kind == KeyEventKind::Press
+                    && key.code == KeyCode::Esc
+                    && !self.attachments.is_empty() =>
+            {
                 self.attachments.pop();
                 ActionStatus::Handled
             }
-            Event::Key(key) if is_multiline_enter(key) => {
+            Event::Key(key) if key.kind == KeyEventKind::Press && is_multiline_enter(key) => {
                 self.editor.insert_newline();
                 ActionStatus::Handled
             }
-            Event::Key(key) if key.code == KeyCode::Enter => {
+            Event::Key(key) if key.kind == KeyEventKind::Press && key.code == KeyCode::Enter => {
                 let text = self.editor.lines().join("\n");
                 self.submit_text(text, cx);
                 ActionStatus::Handled
             }
             Event::Key(key)
-                if key.code == KeyCode::Char('v')
-                    && key.modifiers.contains(KeyModifiers::CONTROL) =>
+                if key.kind == KeyEventKind::Press
+                    && key.code == KeyCode::Char('v')
+                    && key
+                        .modifiers
+                        .intersects(KeyModifiers::CONTROL | KeyModifiers::SUPER) =>
             {
                 if !self.try_clipboard_image() {
                     let text = arboard::Clipboard::new().and_then(|mut c| c.get_text());
@@ -182,28 +189,33 @@ impl PromptEditor {
                 ActionStatus::Handled
             }
             Event::Key(key)
-                if key.code == KeyCode::Char('u')
+                if key.kind == KeyEventKind::Press
+                    && key.code == KeyCode::Char('u')
                     && key.modifiers.contains(KeyModifiers::CONTROL) =>
             {
                 self.editor.delete_line_by_head();
                 ActionStatus::Handled
             }
             Event::Key(key)
-                if key.code == KeyCode::Char('z')
+                if key.kind == KeyEventKind::Press
+                    && key.code == KeyCode::Char('z')
                     && key.modifiers.contains(KeyModifiers::CONTROL) =>
             {
                 self.editor.undo();
                 ActionStatus::Handled
             }
             Event::Key(key)
-                if key.code == KeyCode::Char('r')
+                if key.kind == KeyEventKind::Press
+                    && key.code == KeyCode::Char('r')
                     && key.modifiers.contains(KeyModifiers::CONTROL) =>
             {
                 self.editor.redo();
                 ActionStatus::Handled
             }
             Event::Paste(text) => {
-                self.editor.insert_str(text);
+                if !self.try_clipboard_image() {
+                    self.editor.insert_str(text);
+                }
                 ActionStatus::Handled
             }
             Event::Key(key)
@@ -327,10 +339,12 @@ impl PromptEditor {
                 return false;
             }
         };
+
         if img.width == 0 || img.height == 0 {
             tracing::debug!("clipboard: ignoring zero-size image");
             return false;
         }
+
         let (w, h) = (img.width, img.height);
         let raw = img.into_owned_bytes();
 
@@ -338,6 +352,7 @@ impl PromptEditor {
             tracing::debug!(width = w, height = h, "clipboard: invalid image data");
             return false;
         };
+
         let mut png_buf = std::io::Cursor::new(Vec::new());
         if let Err(error) =
             image::DynamicImage::ImageRgba8(rgba).write_to(&mut png_buf, image::ImageFormat::Png)
@@ -345,18 +360,23 @@ impl PromptEditor {
             tracing::debug!(%error, "clipboard: PNG encoding failed");
             return false;
         }
-        let data = base64::engine::general_purpose::STANDARD.encode(png_buf.get_ref());
 
-        self.attachments.push(ImageAttachment {
-            name: format!("image-{}", self.attachments.len() + 1),
-            mime_type: "image/png".into(),
-            base64_data: data,
-        });
-        tracing::debug!(
-            name = self.attachments.last().unwrap().name,
-            "clipboard: image attached"
+        self.attach_image(
+            format!("image-{}", self.attachments.len() + 1),
+            "image/png",
+            png_buf.get_ref(),
         );
         true
+    }
+
+    /// Base64-encode `bytes` and push the attachment, updating the prompt UI.
+    fn attach_image(&mut self, name: String, mime_type: &str, bytes: &[u8]) {
+        let data = base64::engine::general_purpose::STANDARD.encode(bytes);
+        self.attachments.push(ImageAttachment {
+            name,
+            mime_type: mime_type.to_owned(),
+            base64_data: data,
+        });
     }
 
     pub fn completion_request(&self) -> Option<CompletionRequest> {
