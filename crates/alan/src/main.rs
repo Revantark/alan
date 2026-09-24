@@ -6,6 +6,7 @@ mod login_overlay;
 mod root;
 mod views;
 
+use crate::core::permissions::AlanPermissionManager;
 use crate::core::settings::{DEFAULT_MODEL, PatchSettings, Settings, SettingsStore};
 use crate::core::{ChatController, SlashCommand};
 use crate::local_model_store::JsonLocalModelStore;
@@ -141,6 +142,7 @@ async fn main() -> anyhow::Result<()> {
     let mut agent_builder = Agent::builder(model)
         .with_directory(current_dir)
         .with_tools(default_tools())
+        .permission_manager(Arc::new(AlanPermissionManager))
         .session_manager(session_manager);
     if !is_blank {
         agent_builder = agent_builder.with_default_system_prompt();
