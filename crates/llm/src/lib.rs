@@ -21,5 +21,5 @@ pub use request::{
     PromptCacheTtl, ReasoningEffort, RequestOptions,
 };
 pub use response::{ContentBlock, LlmResponse, LlmResponseBuilder, StopReason, Usage};
-pub use tool::{ServerTool, ToolCall, ToolDefinition, ToolSpec};
+pub use tool::{ServerTool, ToolCall, ToolDefinition, ToolKind, ToolSpec};
 pub use transport::HttpClient;

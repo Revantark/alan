@@ -25,8 +25,28 @@ impl From<ToolDefinition> for ToolSpec {
     }
 }
 
+/// The category of a tool call based on its expected side effects.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolKind {
+    /// Reads data without modifying external state.
+    Read,
+    /// Modifies persistent state without executing an arbitrary command.
+    Write,
+    /// Performs network communication without executing the received or remote data.
+    Network,
+    /// The tool call could not be reliably classified.
+    #[default]
+    Unknown,
+}
+
 /// Tool call issued by model. Arguments are raw JSON from wire protocol.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// This is pure wire data. Side-effect classification (`ToolKind`) is not
+/// part of the call: tools with a statically known kind (read/write/edit)
+/// are classified from the tool itself, while `bash` carries `kind` inside
+/// its arguments and the agent resolves it before authorization.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct ToolCall {
     pub id: String,
     pub name: String,

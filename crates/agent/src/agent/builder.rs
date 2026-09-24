@@ -176,7 +176,7 @@ impl AgentBuilder {
             working_directory: self.working_directory,
             model_info: Mutex::new(info),
             reasoning: AtomicU8::new(reasoning_to_u8(reasoning)),
-            permissions,
+            pm: permissions,
         })
     }
 }

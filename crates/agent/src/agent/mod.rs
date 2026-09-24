@@ -10,7 +10,7 @@ mod tool_loop;
 #[cfg(test)]
 mod tests;
 
-pub use permissions::{AllowAllPermissionManager, PermissionDecision, ToolPermissionManager};
+pub use permissions::{AllowAllPermissionManager, Permission, ToolPermissionManager};
 
 use crate::session::{Session, SessionManager};
 use crate::{AgentError, AgentMessage};
@@ -89,7 +89,8 @@ pub struct Agent {
     /// index + 1 (see [`reasoning_to_u8`]). Updated in `set_model` and at
     /// construction time.
     reasoning: AtomicU8,
-    permissions: Arc<dyn ToolPermissionManager>,
+    /// ToolCall Permission manager for the current agent
+    pm: Arc<dyn ToolPermissionManager>,
 }
 
 impl Agent {

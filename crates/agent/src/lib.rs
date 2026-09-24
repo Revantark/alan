@@ -6,8 +6,8 @@ mod skill;
 mod tool;
 
 pub use agent::{
-    Agent, AgentBuilder, AgentEvent, AgentStream, AllowAllPermissionManager, Mode,
-    PermissionDecision, PromptBuilder, ToolPermissionManager,
+    Agent, AgentBuilder, AgentEvent, AgentStream, AllowAllPermissionManager, Mode, Permission,
+    PromptBuilder, ToolPermissionManager,
 };
 pub use context::AgentMessage;
 pub use error::AgentError;

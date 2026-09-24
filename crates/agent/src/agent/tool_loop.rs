@@ -3,13 +3,13 @@ use super::prompt::PromptCx;
 use super::{Agent, Mode};
 use crate::AgentError;
 use crate::AgentMessage;
-use crate::agent::permissions::PermissionDecision;
+use crate::agent::permissions::Permission;
 use crate::agent::persistence;
 use crate::agent::prompt;
 use crate::context::AgentContext;
 use llm::LlmResponse;
 use providers::Model;
-use tools::ToolOutput;
+use tools::{ToolOutput, parse_kind};
 
 /// Core agent loop: stream LLM responses and execute tool calls until the
 /// model produces a final answer or `max_tool_rounds` is reached.
@@ -52,12 +52,8 @@ pub(super) async fn run_with(
         }
 
         // Persist the assistant message that declares the tool calls.
-        super::persistence::append_context_message(
-            agent,
-            context,
-            AgentMessage::Assistant(response),
-        )
-        .await?;
+        persistence::append_context_message(agent, context, AgentMessage::Assistant(response))
+            .await?;
 
         handle_tool_calls(agent, calls, context, cx, mode).await?;
     }
@@ -123,15 +119,14 @@ async fn handle_tool_calls(
             .copied()
             .ok_or_else(|| AgentError::ToolNotFound(call.name.clone()))?;
 
-        let decision = agent.permissions.has_permission(&call).await;
-        let decision = if decision == PermissionDecision::Ask {
-            agent.permissions.request_permission(&call).await
-        } else {
-            decision
-        };
+        let kind = parse_kind(&call);
+        let decision = agent.pm.authorize(&call).await;
 
-        if decision == PermissionDecision::Deny {
-            let denial = format!("permission denied for tool \"{}\" by user", call.name);
+        if decision == Permission::Denied {
+            let denial = format!(
+                "permission denied for tool \"{}\" (kind: {:?}) by user",
+                call.name, kind
+            );
             super::persistence::append_context_message(
                 agent,
                 context,
