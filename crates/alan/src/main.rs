@@ -7,6 +7,7 @@ mod root;
 mod views;
 
 use crate::core::permissions::AlanPermissionManager;
+use crate::core::permissions::ToolPolicy;
 use crate::core::settings::{DEFAULT_MODEL, PatchSettings, Settings, SettingsStore};
 use crate::core::{ChatController, SlashCommand};
 use crate::local_model_store::JsonLocalModelStore;
@@ -139,8 +140,11 @@ async fn main() -> anyhow::Result<()> {
 
     let was_resumed = resumed_session.is_some();
     let current_dir = std::env::current_dir()?;
-    let permission_manager = AlanPermissionManager::init();
+
+    let policy = ToolPolicy::default();
+    let permission_manager = AlanPermissionManager::init(policy.clone());
     let permission_handler = permission_manager.handler();
+
     let mut agent_builder = Agent::builder(model)
         .with_directory(current_dir)
         .with_tools(default_tools())
@@ -167,6 +171,7 @@ async fn main() -> anyhow::Result<()> {
         registry,
         credential_store,
         permission_handler,
+        policy,
     ))
     .key_mapper(AlanKeyMapper)
     .tick_rate(Duration::from_millis(16))

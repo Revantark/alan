@@ -14,6 +14,7 @@ mod steering;
 use crate::core::chat::ChatController;
 use crate::core::permissions::PermissionHandler;
 use crate::core::permissions::PermissionRequest;
+use crate::core::permissions::{Policy, ToolPolicy};
 use crate::core::settings::{self, Settings, SettingsStore};
 use crate::core::{Activity, Entry};
 use crate::root::{AlanAction, PromptSubmission};
@@ -67,6 +68,7 @@ pub struct ChatView {
 
     providers: Arc<ProviderRegistry>,
     permission_handler: PermissionHandler,
+    policy: ToolPolicy,
     /// Subscription to the permission-request stream.
     permission_subscription: Option<Subscription>,
     model_subscription: Option<alan_tui::Subscription>,
@@ -83,6 +85,7 @@ impl ChatView {
         controller: ChatController,
         providers: Arc<ProviderRegistry>,
         permission_handler: PermissionHandler,
+        policy: ToolPolicy,
     ) -> Self {
         Self {
             controller,
@@ -93,12 +96,20 @@ impl ChatView {
             permission: None,
             providers,
             permission_handler,
+            policy,
             permission_subscription: None,
             model_subscription: None,
             prompt: None,
             stream_repaint: None,
             fork_in_flight: false,
         }
+    }
+
+    fn set_tool_policy(&mut self, policy: Policy, cx: &mut Context<'_, Self, AlanAction>) {
+        self.policy.set_policy(policy);
+        self.controller
+            .push_info(format!("tool permission policy set to {policy}"));
+        cx.notify();
     }
 
     /// Dispatch `action` to the transcript component, if installed.
@@ -153,6 +164,10 @@ impl ChatView {
                 Cmd::SummarizeNew => session::start_summarize_new(self, cx, &submission.text),
                 Cmd::ModelProviders => models::apply_model_provider(self, cx, &submission.text),
                 Cmd::Rename => session::rename_session(self, cx, &submission.text),
+
+                Cmd::ToolFree => self.set_tool_policy(Policy::Free, cx),
+                Cmd::ToolSlip => self.set_tool_policy(Policy::Slip, cx),
+                Cmd::ToolStrict => self.set_tool_policy(Policy::Strict, cx),
 
                 Cmd::Help => controller.push_info(crate::core::SlashCommand::help()),
                 Cmd::New => session::start_new_session(self, cx),

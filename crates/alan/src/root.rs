@@ -23,6 +23,7 @@ use ratatui::layout::Rect;
 use crate::core::ImageAttachment;
 use crate::core::chat::ChatController;
 use crate::core::permissions::PermissionHandler;
+use crate::core::permissions::ToolPolicy;
 use crate::login_overlay::LoginOverlay;
 use crate::views::{ChatView, Header, LoginRequested};
 
@@ -95,6 +96,8 @@ pub struct AlanRoot {
     credentials: Arc<dyn CredentialStore>,
     /// Tool-permission request handler routed to the chat view.
     permission_handler: PermissionHandler,
+    /// Tool-permission policy, shared with the permission manager.
+    policy: ToolPolicy,
     /// The chat controller to install on `init`; taken when inserted.
     chat_source: Option<ChatController>,
     header: Option<Entity<Header>>,
@@ -110,11 +113,13 @@ impl AlanRoot {
         providers: Arc<ProviderRegistry>,
         credentials: Arc<dyn CredentialStore>,
         permission_handler: PermissionHandler,
+        policy: ToolPolicy,
     ) -> Self {
         Self {
             providers,
             credentials,
             permission_handler,
+            policy,
             chat_source: Some(chat),
             header: None,
             view: None,
@@ -142,6 +147,7 @@ impl Component<AlanAction> for AlanRoot {
                 .expect("chat component installed once"),
             Arc::clone(&self.providers),
             self.permission_handler.clone(),
+            self.policy.clone(),
         ));
         self.view = Some(view);
         self.login_subscription = Some(
