@@ -6,6 +6,7 @@
 //! composes the header, transcript, and footer. It also owns the providers and
 //! credentials needed to open the login overlay.
 
+use agent::Permission;
 use providers::{CredentialStore, ProviderRegistry};
 use ratatui::layout::Constraint;
 use ratatui::layout::Layout;
@@ -21,6 +22,7 @@ use ratatui::layout::Rect;
 
 use crate::core::ImageAttachment;
 use crate::core::chat::ChatController;
+use crate::core::permissions::PermissionHandler;
 use crate::login_overlay::LoginOverlay;
 use crate::views::{ChatView, Header, LoginRequested};
 
@@ -41,6 +43,8 @@ pub enum AlanAction {
     SetLoadingDots(bool),
     SetSteering(Option<String>),
     CancelSteer,
+    /// A pending permission request was answered; ChatView restores focus.
+    PermissionAnswered(Permission),
     Raw(Event),
 }
 
@@ -89,6 +93,8 @@ impl KeyMapper<AlanAction> for AlanKeyMapper {
 pub struct AlanRoot {
     providers: Arc<ProviderRegistry>,
     credentials: Arc<dyn CredentialStore>,
+    /// Tool-permission request handler routed to the chat view.
+    permission_handler: PermissionHandler,
     /// The chat controller to install on `init`; taken when inserted.
     chat_source: Option<ChatController>,
     header: Option<Entity<Header>>,
@@ -103,10 +109,12 @@ impl AlanRoot {
         chat: ChatController,
         providers: Arc<ProviderRegistry>,
         credentials: Arc<dyn CredentialStore>,
+        permission_handler: PermissionHandler,
     ) -> Self {
         Self {
             providers,
             credentials,
+            permission_handler,
             chat_source: Some(chat),
             header: None,
             view: None,
@@ -133,6 +141,7 @@ impl Component<AlanAction> for AlanRoot {
                 .take()
                 .expect("chat component installed once"),
             Arc::clone(&self.providers),
+            self.permission_handler.clone(),
         ));
         self.view = Some(view);
         self.login_subscription = Some(

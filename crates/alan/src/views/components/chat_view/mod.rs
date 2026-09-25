@@ -7,10 +7,13 @@
 
 mod attachments;
 mod models;
+mod permissions;
 mod session;
 mod steering;
 
 use crate::core::chat::ChatController;
+use crate::core::permissions::PermissionHandler;
+use crate::core::permissions::PermissionRequest;
 use crate::core::settings::{self, Settings, SettingsStore};
 use crate::core::{Activity, Entry};
 use crate::root::{AlanAction, PromptSubmission};
@@ -57,8 +60,15 @@ pub struct ChatView {
     chat: Option<Entity<ChatHistory>>,
     status: Option<Entity<Status>>,
     editor: Option<Entity<PromptEditor>>,
+    /// Pending tool-authorization request, if any. While set, the
+    /// permission band is shown and focused; `1`/`0` answer it.
+    pending_permission: Option<PermissionRequest>,
+    permission: Option<Entity<permissions::PermissionPrompt>>,
 
     providers: Arc<ProviderRegistry>,
+    permission_handler: PermissionHandler,
+    /// Subscription to the permission-request stream.
+    permission_subscription: Option<Subscription>,
     model_subscription: Option<alan_tui::Subscription>,
     /// Subscription to the in-flight agent stream. Dropping it cancels the run.
     prompt: Option<Subscription>,
@@ -69,13 +79,21 @@ pub struct ChatView {
 }
 
 impl ChatView {
-    pub fn new(controller: ChatController, providers: Arc<ProviderRegistry>) -> Self {
+    pub fn new(
+        controller: ChatController,
+        providers: Arc<ProviderRegistry>,
+        permission_handler: PermissionHandler,
+    ) -> Self {
         Self {
             controller,
             chat: None,
             status: None,
             editor: None,
+            pending_permission: None,
+            permission: None,
             providers,
+            permission_handler,
+            permission_subscription: None,
             model_subscription: None,
             prompt: None,
             stream_repaint: None,
@@ -215,6 +233,25 @@ impl Component<AlanAction> for ChatView {
         let editor_entity = self.editor.expect("editor entity");
         cx.focus_entity(editor_entity);
 
+        self.permission = Some(cx.insert(permissions::PermissionPrompt::new()));
+
+        self.permission_subscription = Some(cx.subscribe_stream(
+            self.permission_handler.subscribe(),
+            |request, view, cx| match request {
+                SubscriptionEvent::Item(request) => {
+                    view.pending_permission = Some(request.clone());
+                    if let Some(prompt) = view.permission {
+                        cx.update(prompt, |p| p.show(request.clone()));
+                        cx.focus_entity(prompt);
+                    }
+                    cx.notify();
+                }
+                SubscriptionEvent::Closed => {
+                    view.permission_subscription = None;
+                }
+            },
+        ));
+
         let providers_for_fetch = Arc::clone(&self.providers);
         let providers_for_lookup = Arc::clone(&self.providers);
         let _ = cx.spawn(
@@ -247,6 +284,16 @@ impl Component<AlanAction> for ChatView {
     where
         Self: Sized,
     {
+        if let Some(request) = self.pending_permission.clone()
+            && let AlanAction::PermissionAnswered(decision) = action
+        {
+            self.pending_permission = None;
+            self.permission_handler
+                .respond(request.id, decision.clone());
+            cx.notify();
+            return ActionStatus::Handled;
+        }
+
         if self.controller.loading().is_some() {
             return ActionStatus::Handled;
         }
@@ -322,10 +369,16 @@ impl Component<AlanAction> for ChatView {
         } else {
             0
         };
+        let permission_height = if self.pending_permission.is_some() {
+            permissions::PERMISSION_HEIGHT
+        } else {
+            0
+        };
 
         let [
             chat_area,
             steer_area,
+            permission_area,
             attachment_area,
             status_area,
             _gap,
@@ -334,6 +387,7 @@ impl Component<AlanAction> for ChatView {
         ] = Layout::vertical([
             Constraint::Min(1),
             Constraint::Length(steer_height),
+            Constraint::Length(permission_height),
             Constraint::Length(attachment_height),
             Constraint::Length(STATUS_HEIGHT),
             Constraint::Length(STATUS_EDITOR_GAP),
@@ -345,6 +399,12 @@ impl Component<AlanAction> for ChatView {
         cx.render_with_state(chat, frame, chat_area, &self.controller);
 
         steering::render_steering(frame, steer_area, steer_text.as_deref());
+
+        if self.pending_permission.is_some()
+            && let Some(prompt) = self.permission
+        {
+            cx.render_entity(prompt, frame, permission_area);
+        }
 
         attachments::render_attachments(frame, attachment_area, editor, cx);
 

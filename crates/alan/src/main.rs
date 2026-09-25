@@ -139,10 +139,12 @@ async fn main() -> anyhow::Result<()> {
 
     let was_resumed = resumed_session.is_some();
     let current_dir = std::env::current_dir()?;
+    let permission_manager = AlanPermissionManager::init();
+    let permission_handler = permission_manager.handler();
     let mut agent_builder = Agent::builder(model)
         .with_directory(current_dir)
         .with_tools(default_tools())
-        .permission_manager(Arc::new(AlanPermissionManager))
+        .permission_manager(Arc::new(permission_manager))
         .session_manager(session_manager);
     if !is_blank {
         agent_builder = agent_builder.with_default_system_prompt();
@@ -160,12 +162,17 @@ async fn main() -> anyhow::Result<()> {
     // `Runtime::run` consumes the root, so keep the agent for the saved-session
     // message printed after the TUI exits.
     let agent = controller.agent();
-    let result = Runtime::builder(AlanRoot::new(controller, registry, credential_store))
-        .key_mapper(AlanKeyMapper)
-        .tick_rate(Duration::from_millis(16))
-        .build()
-        .run()
-        .await;
+    let result = Runtime::builder(AlanRoot::new(
+        controller,
+        registry,
+        credential_store,
+        permission_handler,
+    ))
+    .key_mapper(AlanKeyMapper)
+    .tick_rate(Duration::from_millis(16))
+    .build()
+    .run()
+    .await;
     let result = result.map_err(|error| anyhow::anyhow!("{error}"));
     if let Some(session_id) = agent.session_id().await {
         println!("\nSession saved. Resume it with:\n\nALAN_SESSION={session_id} alan");
