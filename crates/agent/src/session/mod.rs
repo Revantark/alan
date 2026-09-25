@@ -4,6 +4,7 @@ mod manager;
 mod record;
 mod store;
 
+pub use dir::pwd_key;
 pub use error::SessionError;
 pub use manager::SessionManager;
 pub use record::{SESSION_SCHEMA_VERSION, Session, SessionRecord};

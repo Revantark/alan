@@ -8,6 +8,7 @@ mod views;
 
 use crate::core::permissions::AlanPermissionManager;
 use crate::core::permissions::ToolPolicy;
+use crate::core::permissions_store;
 use crate::core::settings::{DEFAULT_MODEL, PatchSettings, Settings, SettingsStore};
 use crate::core::{ChatController, SlashCommand};
 use crate::local_model_store::JsonLocalModelStore;
@@ -141,7 +142,12 @@ async fn main() -> anyhow::Result<()> {
     let was_resumed = resumed_session.is_some();
     let current_dir = std::env::current_dir()?;
 
-    let policy = ToolPolicy::default();
+    let permissions_path = permissions_store::default_permissions_path(&current_dir)
+        .expect("cannot determine permissions path (set ALAN_HOME or HOME)");
+
+    let policy = ToolPolicy::new(Arc::new(permissions_store::PermissionStore::new(
+        permissions_path,
+    )));
     let permission_manager = AlanPermissionManager::init(policy.clone());
     let permission_handler = permission_manager.handler();
 

@@ -144,6 +144,48 @@ impl ChatView {
         cx.notify();
     }
 
+    fn handle_permission(
+        &mut self,
+        action: &AlanAction,
+        cx: &mut Context<'_, Self, AlanAction>,
+    ) -> bool {
+        let Some(request) = self.pending_permission.as_ref() else {
+            return false;
+        };
+
+        let AlanAction::PermissionAnswered(decision) = action else {
+            return false;
+        };
+
+        let request_id = request.id;
+        self.pending_permission = None;
+
+        self.permission_handler
+            .respond(request_id, decision.clone());
+
+        if *decision == crate::core::permissions::Answer::Stop && self.controller.is_busy() {
+            self.stop_stream();
+        }
+
+        cx.notify();
+        true
+    }
+
+    fn handle_quit(&mut self, cx: &mut Context<'_, Self, AlanAction>) {
+        if self.controller.is_busy() {
+            self.stop_stream();
+            cx.notify();
+        } else {
+            cx.quit();
+        }
+    }
+
+    fn stop_stream(&mut self) {
+        self.prompt = None;
+        self.stream_repaint = None;
+        self.controller.finish_stream();
+    }
+
     fn handle_submit(
         &mut self,
         submission: PromptSubmission,
@@ -181,14 +223,8 @@ impl ChatView {
 
         let text = submission.text.trim().to_owned();
 
-        // Steering: a plain prompt submitted while a run streams is queued
-        // for the agent's next LLM round instead of starting a new run.
-        // Slash commands keep executing normally.
         if controller.is_busy() {
             controller.steer(text.clone());
-            // Defer to a task: this callback runs with the entity store
-            // locked, so dispatching to the editor inline would re-enter that
-            // non-reentrant lock and freeze the UI.
             if self.editor.is_some() {
                 cx.spawn(
                     async move { Ok::<String, alan_tui::TaskError>(text) },
@@ -232,33 +268,44 @@ impl ChatView {
             },
         ));
     }
-}
 
-impl Component<AlanAction> for ChatView {
-    fn init(&mut self, cx: &mut Context<'_, Self, AlanAction>)
-    where
-        Self: Sized,
-    {
-        let mut editor = PromptEditor::new();
-        let prompts: Vec<String> = recall_prompts(self.controller.entries());
-        editor.seed_history(prompts);
-        self.chat = Some(cx.insert(ChatHistory::new()));
-        self.status = Some(cx.insert(Status::new()));
-        self.editor = Some(cx.insert(editor));
-        let editor_entity = self.editor.expect("editor entity");
-        cx.focus_entity(editor_entity);
+    fn fetch_models(&mut self, cx: &mut Context<'_, Self, AlanAction>) {
+        let providers = Arc::clone(&self.providers);
 
-        self.permission = Some(cx.insert(permissions::PermissionPrompt::new()));
+        let _ = cx.spawn(
+            async move {
+                models::fetch_all_models(&providers).await;
+                Ok(())
+            },
+            |result, view, cx| {
+                if result.is_err() {
+                    return;
+                }
 
+                let model_id = view.controller.model_name();
+                let max_context = models::all_models(&view.providers)
+                    .into_iter()
+                    .find(|model| model.id == model_id)
+                    .and_then(|model| model.context_length);
+
+                view.controller.set_max_context(max_context);
+                cx.notify();
+            },
+        );
+    }
+
+    fn subscribe_permissions(&mut self, cx: &mut Context<'_, Self, AlanAction>) {
         self.permission_subscription = Some(cx.subscribe_stream(
             self.permission_handler.subscribe(),
-            |request, view, cx| match request {
+            |event, view, cx| match event {
                 SubscriptionEvent::Item(request) => {
                     view.pending_permission = Some(request.clone());
+
                     if let Some(prompt) = view.permission {
-                        cx.update(prompt, |p| p.show(request.clone()));
+                        cx.update(prompt, |prompt| prompt.show(request.clone()));
                         cx.focus_entity(prompt);
                     }
+
                     cx.notify();
                 }
                 SubscriptionEvent::Closed => {
@@ -266,46 +313,31 @@ impl Component<AlanAction> for ChatView {
                 }
             },
         ));
+    }
+}
 
-        let providers_for_fetch = Arc::clone(&self.providers);
-        let providers_for_lookup = Arc::clone(&self.providers);
-        let _ = cx.spawn(
-            async move {
-                models::fetch_all_models(&providers_for_fetch).await;
-                Ok(())
-            },
-            move |result, view, cx| {
-                if result.is_err() {
-                    return;
-                }
-                // Find the model in any provider's catalog
-                if let Some(model_id) = view.controller.model_name().into() {
-                    let max_context = models::all_models(&providers_for_lookup)
-                        .into_iter()
-                        .find(|m| m.id == model_id)
-                        .and_then(|m| m.context_length);
-                    view.controller.set_max_context(max_context);
-                }
-                cx.notify();
-            },
-        );
+impl Component<AlanAction> for ChatView {
+    fn init(&mut self, cx: &mut Context<'_, Self, AlanAction>) {
+        let mut editor = PromptEditor::new();
+        editor.seed_history(recall_prompts(self.controller.entries()));
+
+        self.chat = Some(cx.insert(ChatHistory::new()));
+        self.status = Some(cx.insert(Status::new()));
+        self.editor = Some(cx.insert(editor));
+
+        cx.focus_entity(self.editor.expect("editor entity"));
+
+        self.permission = Some(cx.insert(permissions::PermissionPrompt::new()));
+        self.subscribe_permissions(cx);
+        self.fetch_models(cx);
     }
 
     fn handle_action(
         &mut self,
         action: &AlanAction,
         cx: &mut Context<'_, Self, AlanAction>,
-    ) -> ActionStatus
-    where
-        Self: Sized,
-    {
-        if let Some(request) = self.pending_permission.clone()
-            && let AlanAction::PermissionAnswered(decision) = action
-        {
-            self.pending_permission = None;
-            self.permission_handler
-                .respond(request.id, decision.clone());
-            cx.notify();
+    ) -> ActionStatus {
+        if self.handle_permission(action, cx) {
             return ActionStatus::Handled;
         }
 
@@ -319,11 +351,13 @@ impl Component<AlanAction> for ChatView {
                 self.sync_status(cx);
                 ActionStatus::Handled
             }
+
             AlanAction::ToggleMode => {
                 self.controller.toggle_mode();
                 cx.notify();
                 ActionStatus::Handled
             }
+
             AlanAction::CancelSteer => {
                 if self.controller.take_steering().is_some() {
                     if let Some(editor) = self.editor {
@@ -333,17 +367,12 @@ impl Component<AlanAction> for ChatView {
                 }
                 ActionStatus::Handled
             }
+
             AlanAction::Quit => {
-                if self.controller.is_busy() {
-                    self.prompt = None;
-                    self.stream_repaint = None;
-                    self.controller.finish_stream();
-                    cx.notify();
-                } else {
-                    cx.quit();
-                }
+                self.handle_quit(cx);
                 ActionStatus::Handled
             }
+
             AlanAction::Raw(event) => match event {
                 Event::Key(key)
                     if key.code == KeyCode::Esc
@@ -354,10 +383,9 @@ impl Component<AlanAction> for ChatView {
                 {
                     self.dispatch_chat(action, cx)
                 }
-                // Everything else is editor input, already offered to the
-                // focused editor before it reached this component.
                 _ => ActionStatus::Continue,
             },
+
             _ => ActionStatus::Continue,
         }
     }
@@ -373,17 +401,17 @@ impl Component<AlanAction> for ChatView {
             return;
         };
 
-        // Size the editor and attachment bands from the editor's own state so
-        // they always reflect the current buffer and attached images.
         let editor_width = area.width.saturating_sub(theme::PROMPT_GUTTER);
         let editor_rows = cx.read(editor, |e| e.rows(editor_width)).unwrap_or(1);
         let attachment_height = cx.read(editor, |e| e.attachment_height()).unwrap_or(0);
         let steer_text = self.controller.steering().map(str::to_owned);
+
         let steer_height = if steer_text.is_some() {
             steering::STEER_BAND_HEIGHT
         } else {
             0
         };
+
         let permission_height = if self.pending_permission.is_some() {
             permissions::PERMISSION_HEIGHT
         } else {

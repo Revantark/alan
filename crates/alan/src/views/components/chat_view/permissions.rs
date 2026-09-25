@@ -1,8 +1,7 @@
 //! Tool-permission prompt band shown while an `authorize` call waits.
-use crate::core::permissions::PermissionRequest;
+use crate::core::permissions::{Answer, PermissionRequest};
 use crate::root::AlanAction;
 use crate::views::theme;
-use agent::Permission;
 use alan_tui::ActionStatus;
 use alan_tui::Component;
 use alan_tui::RenderContext;
@@ -19,8 +18,8 @@ use ratatui::widgets::Block;
 use ratatui::widgets::Padding;
 use ratatui::widgets::Paragraph;
 
-/// Height of the permission band (blank, question, command, keys, blank).
-pub const PERMISSION_HEIGHT: u16 = 5;
+/// Height of the permission band (blank, question, command, keys).
+pub const PERMISSION_HEIGHT: u16 = 4;
 
 /// Focused while a tool-authorization request is pending, so `1`/`0` answer
 /// the request instead of typing into the prompt editor.
@@ -58,8 +57,12 @@ impl Component<AlanAction> for PermissionPrompt {
         }
 
         let decision = match key.code {
-            KeyCode::Char('1') => Permission::Allowed,
-            KeyCode::Char('0') => Permission::Denied,
+            KeyCode::Char('1') => Answer::Allowed,
+            KeyCode::Char('2') => Answer::AllowedSession,
+            KeyCode::Char('3') => Answer::AllowedAlways,
+            KeyCode::Char('8') => Answer::Denied,
+            KeyCode::Char('9') => Answer::DeniedSession,
+            KeyCode::Char('0') => Answer::Stop,
             _ => return ActionStatus::Handled,
         };
 
@@ -74,6 +77,7 @@ impl Component<AlanAction> for PermissionPrompt {
         let Some(request) = &self.request else {
             return;
         };
+
         let lines = vec![
             Line::from(""),
             Line::from(Span::styled(
@@ -81,18 +85,19 @@ impl Component<AlanAction> for PermissionPrompt {
                 Style::default().fg(theme::PROMPT_FG).bold(),
             )),
             Line::from(Span::styled(
-                format!("command : {}", request.name),
+                format!("command: {}", request.name),
                 Style::default().fg(theme::EDITOR_FG),
             )),
             Line::from(Span::styled(
-                "Allow[1]    Deny[0]",
+                "Allow[1]  AllowSession[2]  AllowAlways[3]  Deny[8]  DenySession[9]  Stop[0]",
                 Style::default().fg(theme::PROMPT_FG),
             )),
-            Line::from(""),
         ];
+
         let prompt = Paragraph::new(lines)
             .style(Style::default().bg(theme::EDITOR_BG))
             .block(Block::default().padding(Padding::horizontal(4)));
+
         frame.render_widget(prompt, area);
     }
 }

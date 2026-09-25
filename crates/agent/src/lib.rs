@@ -11,6 +11,8 @@ pub use agent::{
 };
 pub use context::AgentMessage;
 pub use error::AgentError;
-pub use session::{SESSION_SCHEMA_VERSION, Session, SessionError, SessionManager, SessionRecord};
+pub use session::{
+    SESSION_SCHEMA_VERSION, Session, SessionError, SessionManager, SessionRecord, pwd_key,
+};
 pub use skill::{Skill, build_system_prompt, format_skills_xml};
 pub use tool::{AgentTool, default_tools};

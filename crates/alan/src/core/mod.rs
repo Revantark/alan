@@ -5,6 +5,7 @@ pub mod chat;
 pub mod command;
 pub mod completion;
 pub mod permissions;
+pub mod permissions_store;
 pub mod settings;
 pub mod store;
 

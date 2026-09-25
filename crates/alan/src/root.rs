@@ -6,7 +6,6 @@
 //! composes the header, transcript, and footer. It also owns the providers and
 //! credentials needed to open the login overlay.
 
-use agent::Permission;
 use providers::{CredentialStore, ProviderRegistry};
 use ratatui::layout::Constraint;
 use ratatui::layout::Layout;
@@ -22,6 +21,7 @@ use ratatui::layout::Rect;
 
 use crate::core::ImageAttachment;
 use crate::core::chat::ChatController;
+use crate::core::permissions::Answer;
 use crate::core::permissions::PermissionHandler;
 use crate::core::permissions::ToolPolicy;
 use crate::login_overlay::LoginOverlay;
@@ -45,7 +45,7 @@ pub enum AlanAction {
     SetSteering(Option<String>),
     CancelSteer,
     /// A pending permission request was answered; ChatView restores focus.
-    PermissionAnswered(Permission),
+    PermissionAnswered(Answer),
     Raw(Event),
 }
 

@@ -1,29 +1,29 @@
 //! Tool-permission gating for the interactive UI.
-//!
-//! Prompting is gated by a [`ToolPolicy`]: a mode (Free/Slip/Strict) plus
-//! the grants the user has approved so far. The permission actor consults
-//! it before showing a request; the UI updates it via `/tfree`, `/tslip`,
-//! and `/tstrict`.
 
 use agent::{Permission, ToolPermissionManager};
 use async_trait::async_trait;
 use futures_util::{Stream, StreamExt};
-use llm::ToolCall;
+use llm::{ToolCall, ToolKind};
+use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::fmt::Display;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::broadcast::error::RecvError;
+use tokio::sync::{broadcast, mpsc, oneshot};
+use tools::parse_kind;
+use tracing::warn;
+
+use crate::core::permissions_store::PermissionStore;
 
 /// Tool-permission mode. Determines which grants [`ToolPolicy`] consults.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Policy {
     /// Allow every tool call without asking.
     Free,
     /// Allow any command whose family (leading command word) was approved.
     Slip,
     /// Allow only the exact command (tool + arguments) already approved.
-    #[default]
     Strict,
 }
 
@@ -57,9 +57,10 @@ fn parse_command(name: &str, arguments: &str) -> (String, Option<String>) {
 
 /// An approved tool call. `args: None` is a family grant (any arguments for
 /// `command`); `Some` is an exact grant for those arguments only.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Grant {
     pub command: String,
+    #[serde(default)]
     pub args: Option<String>,
 }
 
@@ -87,11 +88,51 @@ pub enum Decision {
     Ask,
 }
 
+/// The user's answer to a tool-authorization prompt. Persisted only for
+/// [`Answer::AllowedAlways`]; everything else is session-scoped.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Answer {
+    /// Allow this exact call (recorded in memory, not persisted).
+    Allowed,
+    /// Allow this call and promote it to a family grant (session only).
+    AllowedSession,
+    /// Allow and persist the exact and family grants for this project.
+    AllowedAlways,
+    /// Deny this call; the stream continues without the tool result.
+    Denied,
+    /// Deny this call (session-only scope; deny is never persisted).
+    DeniedSession,
+    /// Abort the stream before the tool call runs.
+    Stop,
+}
+
+impl Answer {
+    /// Whether this answer grants the tool call.
+    fn allows(&self) -> bool {
+        matches!(
+            self,
+            Self::Allowed | Self::AllowedSession | Self::AllowedAlways
+        )
+    }
+}
+
+impl From<Answer> for Permission {
+    fn from(answer: Answer) -> Self {
+        if answer.allows() {
+            Permission::Allowed
+        } else {
+            Permission::Denied
+        }
+    }
+}
+
 /// Pure policy rules over a mode and a grant set. No locks, no async.
-#[derive(Debug, Default)]
+/// `store` is the per-project persistence; consulted lazily on a miss and
+/// never used inside the pure `decide`/`promote` methods.
 pub struct PolicyState {
     pub policy: Policy,
     pub grants: HashSet<Grant>,
+    pub store: Arc<PermissionStore>,
 }
 
 impl PolicyState {
@@ -126,14 +167,73 @@ impl PolicyState {
 
 /// The policy rules plus their shared state. A thin `Arc<Mutex<...>>` over
 /// [`PolicyState`]; the permission actor and the UI both hold a clone.
-#[derive(Debug, Clone, Default)]
+#[derive(Clone)]
 pub struct ToolPolicy(Arc<Mutex<PolicyState>>);
 
 impl ToolPolicy {
-    /// Consult the policy, applying any promotion it prescribes.
-    pub fn check(&self, call: &ToolCall) -> Decision {
-        let state = self.0.lock().expect("policy lock");
-        state.decide(call)
+    pub fn new(store: Arc<PermissionStore>) -> Self {
+        Self(Arc::new(Mutex::new(PolicyState {
+            policy: Policy::Strict,
+            grants: HashSet::new(),
+            store,
+        })))
+    }
+
+    /// Consult the policy: HashSet first, then the store lazily,
+    /// backfilling any store hit into the HashSet. The lock is never held
+    /// across the store read.
+    pub async fn check(&self, call: &ToolCall) -> Decision {
+        let store = {
+            let state = self.0.lock().expect("policy lock");
+            if state.decide(call) == Decision::Allow {
+                return Decision::Allow;
+            }
+            state.store.clone()
+        };
+        // The lock is dropped before the store is read.
+        match store.load_all().await {
+            Ok(persisted) => {
+                let mut state = self.0.lock().expect("policy lock");
+                state.grants.extend(persisted);
+                state.decide(call)
+            }
+            Err(error) => {
+                warn!(%error, "failed to read persisted permissions");
+                Decision::Ask
+            }
+        }
+    }
+
+    /// Answer a pending request: update the session grants, persist when the
+    /// answer is [`Answer::AllowedAlways`], and translate to the agent's
+    /// two-way [`Permission`].
+    pub async fn answer(&self, grant: Grant, answer: Answer) -> Permission {
+        if !answer.allows() {
+            return answer.into();
+        }
+
+        let store = {
+            let mut state = self.0.lock().expect("policy lock");
+            state.promote(grant.clone());
+            state.store.clone()
+        };
+
+        if answer != Answer::AllowedAlways {
+            return answer.into();
+        }
+
+        if let Err(error) = store.insert(&grant).await {
+            warn!(%error, "failed to persist permission grant");
+        }
+        if grant.args.is_some() {
+            let family = grant.family();
+
+            if let Err(error) = store.insert(&family).await {
+                warn!(%error, "failed to persist permission family grant");
+            }
+        }
+
+        answer.into()
     }
 
     pub fn set_policy(&self, policy: Policy) {
@@ -156,7 +256,7 @@ enum Command {
     },
     Respond {
         id: u64,
-        decision: Permission,
+        decision: Answer,
     },
 }
 
@@ -194,15 +294,20 @@ impl AlanPermissionManager {
 #[async_trait]
 impl ToolPermissionManager for AlanPermissionManager {
     async fn authorize(&self, call: &ToolCall) -> Permission {
-        match self.policy.check(call) {
-            Decision::Allow => return Permission::Allowed,
-            Decision::Ask => {}
+        if parse_kind(call) == ToolKind::Read {
+            return Permission::Allowed;
         }
+
+        if let Decision::Allow = self.policy.check(call).await {
+            return Permission::Allowed;
+        }
+
         let request = PermissionRequest {
             id: next_id(),
             name: call.name.clone(),
             arguments: call.arguments.clone(),
         };
+
         let (tx, rx) = oneshot::channel();
         if self
             .tx
@@ -228,14 +333,12 @@ pub struct PermissionHandler {
 impl PermissionHandler {
     /// Stream of pending permission requests.
     pub fn subscribe(&self) -> impl Stream<Item = PermissionRequest> + Send + 'static {
-        let rx = Some(self.requests.subscribe());
-        futures_util::stream::unfold(rx, move |mut rx| async move {
-            let mut rx = rx.take()?;
+        futures_util::stream::unfold(self.requests.subscribe(), move |mut rx| async move {
             loop {
                 match rx.recv().await {
-                    Ok(request) => return Some((request, Some(rx))),
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => return None,
+                    Ok(request) => return Some((request, rx)),
+                    Err(RecvError::Lagged(_)) => continue,
+                    Err(RecvError::Closed) => return None,
                 }
             }
         })
@@ -243,15 +346,17 @@ impl PermissionHandler {
     }
 
     /// Answer a pending request; ignored if it was already answered.
-    pub fn respond(&self, id: u64, decision: Permission) {
+    pub fn respond(&self, id: u64, decision: Answer) {
         let _ = self.commands.try_send(Command::Respond { id, decision });
     }
 }
 
+type PendingMap = HashMap<u64, (oneshot::Sender<Permission>, Grant)>;
+
 async fn listen(
     mut cmd_rx: mpsc::Receiver<Command>,
-    request_tx: tokio::sync::broadcast::Sender<PermissionRequest>,
-    pending: Arc<Mutex<HashMap<u64, (oneshot::Sender<Permission>, Grant)>>>,
+    request_tx: broadcast::Sender<PermissionRequest>,
+    pending: Arc<Mutex<PendingMap>>,
     policy: ToolPolicy,
 ) {
     while let Some(command) = cmd_rx.recv().await {
@@ -275,11 +380,8 @@ async fn listen(
                 else {
                     continue;
                 };
-                let _ = respond.send(decision.clone());
-                if decision == Permission::Allowed {
-                    let mut state = policy.0.lock().expect("policy lock");
-                    state.promote(grant);
-                }
+                let permission = policy.answer(grant, decision).await;
+                let _ = respond.send(permission);
             }
         }
     }
@@ -292,6 +394,7 @@ fn next_id() -> u64 {
 
 #[cfg(test)]
 mod tests {
+    use std::path::{Path, PathBuf};
     use std::time::Duration;
 
     use super::*;
@@ -316,26 +419,42 @@ mod tests {
         }
     }
 
+    fn state_of(policy: Policy, grants: &[(&str, Option<&str>)]) -> PolicyState {
+        let dir = std::env::temp_dir().join(format!("alan-policy-state-{}", std::process::id()));
+        PolicyState {
+            store: Arc::new(PermissionStore::new(dir.join("permissions.json"))),
+            policy,
+            grants: grants
+                .iter()
+                .map(|(command, args)| Grant {
+                    command: (*command).into(),
+                    args: args.map(|args| args.into()),
+                })
+                .collect(),
+        }
+    }
+
     #[tokio::test]
     async fn respond_unblocks_authorize() {
-        let manager = AlanPermissionManager::init(ToolPolicy::default());
+        let policy = session_policy("respond");
+        let manager = AlanPermissionManager::init(policy);
         let handler = manager.handler();
         let handle = tokio::spawn(async move { manager.authorize(&call("bash")).await });
         let request = handler.subscribe().next().await.expect("request");
-        handler.respond(request.id, Permission::Allowed);
+        handler.respond(request.id, Answer::Allowed);
         assert_eq!(handle.await.expect("task"), Permission::Allowed);
     }
 
     #[tokio::test]
     async fn strict_allows_after_approval() {
-        let policy = ToolPolicy::default();
+        let (policy, _path) = temp_policy("strict");
         let manager1 = AlanPermissionManager::init(policy.clone());
         let handler1 = manager1.handler();
 
         // First call: strict mode asks, user approves.
         let handle = tokio::spawn(async move { manager1.authorize(&shell("bun dev")).await });
         let request = handler1.subscribe().next().await.expect("request");
-        handler1.respond(request.id, Permission::Allowed);
+        handler1.respond(request.id, Answer::Allowed);
         assert_eq!(handle.await.expect("task"), Permission::Allowed);
 
         // Second manager shares the same policy state; same call should be allowed.
@@ -353,7 +472,8 @@ mod tests {
 
     #[tokio::test]
     async fn denied_without_ui() {
-        let manager = AlanPermissionManager::init(ToolPolicy::default());
+        let policy = session_policy("denied");
+        let manager = AlanPermissionManager::init(policy);
         // Never subscribe: the actor finds no listeners and drops the
         // responder, so authorize denies instead of hanging.
         assert_eq!(manager.authorize(&call("bash")).await, Permission::Denied);
@@ -361,37 +481,25 @@ mod tests {
 
     #[tokio::test]
     async fn stale_respond_is_ignored() {
-        let manager = AlanPermissionManager::init(ToolPolicy::default());
+        let policy = session_policy("stale");
+        let manager = AlanPermissionManager::init(policy);
         let handler = manager.handler();
         let handle = tokio::spawn(async move { manager.authorize(&call("bash")).await });
         let request = handler.subscribe().next().await.expect("request");
-        handler.respond(request.id + 999, Permission::Denied);
-        handler.respond(request.id, Permission::Allowed);
+        handler.respond(request.id + 999, Answer::Denied);
+        handler.respond(request.id, Answer::Allowed);
         assert_eq!(handle.await.expect("task"), Permission::Allowed);
     }
 
     #[tokio::test]
     async fn free_policy_allows_without_prompting() {
-        let policy = ToolPolicy::default();
+        let (policy, _path) = temp_policy("free");
         policy.set_policy(Policy::Free);
         let manager = AlanPermissionManager::init(policy);
         assert_eq!(
             manager.authorize(&shell("bun dev --host")).await,
             Permission::Allowed
         );
-    }
-
-    fn state_of(policy: Policy, grants: &[(&str, Option<&str>)]) -> PolicyState {
-        PolicyState {
-            policy,
-            grants: grants
-                .iter()
-                .map(|(command, args)| Grant {
-                    command: (*command).into(),
-                    args: args.map(|args| args.into()),
-                })
-                .collect(),
-        }
     }
 
     #[test]
@@ -422,5 +530,120 @@ mod tests {
                 args: None
             }
         );
+    }
+
+    fn temp_policy(name: &str) -> (ToolPolicy, PathBuf) {
+        let dir =
+            std::env::temp_dir().join(format!("alan-policy-test-{}-{name}", std::process::id()));
+        let path = dir.join("permissions.json");
+        (ToolPolicy::new(Arc::new(PermissionStore::new(&path))), path)
+    }
+
+    /// A policy whose store is never written to; for session-only tests.
+    fn session_policy(name: &str) -> ToolPolicy {
+        let dir =
+            std::env::temp_dir().join(format!("alan-policy-session-{}-{name}", std::process::id()));
+        ToolPolicy::new(Arc::new(PermissionStore::new(dir.join("permissions.json"))))
+    }
+
+    fn temp_dir_of(path: &Path) -> PathBuf {
+        path.parent().unwrap().parent().unwrap().to_owned()
+    }
+
+    #[tokio::test]
+    async fn allowed_always_persists_and_survives_reload() {
+        let (policy, path) = temp_policy("always");
+        let grant = Grant::of(&shell("bun dev --host"));
+        let _ = policy.answer(grant.clone(), Answer::AllowedAlways).await;
+
+        let reloaded = ToolPolicy::new(Arc::new(PermissionStore::new(&path)));
+        assert_eq!(
+            reloaded.check(&shell("bun dev --host")).await,
+            Decision::Allow
+        );
+        dbg!(&reloaded.0.lock().expect("lock").policy);
+        assert_eq!(reloaded.check(&shell("bun test")).await, Decision::Ask);
+        let _ = std::fs::remove_dir_all(temp_dir_of(&path));
+    }
+
+    #[tokio::test]
+    async fn allowed_session_does_not_persist() {
+        let (policy, path) = temp_policy("session");
+        let grant = Grant::of(&shell("bun dev"));
+        let _ = policy.answer(grant.clone(), Answer::AllowedSession).await;
+        assert!(!path.exists(), "session grants must not touch the store");
+        // Still allowed in memory for this policy instance.
+        assert_eq!(policy.check(&shell("bun dev")).await, Decision::Allow);
+        let _ = std::fs::remove_dir_all(temp_dir_of(&path));
+    }
+
+    #[tokio::test]
+    async fn hashset_is_consulted_before_store() {
+        let (policy, path) = temp_policy("lazy");
+        // Seed only the in-memory set; the file must never be read/created.
+        policy
+            .0
+            .lock()
+            .expect("policy lock")
+            .grants
+            .insert(Grant::of(&shell("bun dev")));
+        assert_eq!(policy.check(&shell("bun dev")).await, Decision::Allow);
+        assert!(!path.exists(), "HashSet hit must not consult the store");
+        let _ = std::fs::remove_dir_all(temp_dir_of(&path));
+    }
+
+    #[tokio::test]
+    async fn store_hit_backfills_hashset() {
+        let (policy, path) = temp_policy("backfill");
+        policy
+            .answer(Grant::of(&shell("cargo test")), Answer::AllowedAlways)
+            .await;
+
+        // Same grants but a fresh policy whose in-memory set was backfilled
+        // by the earlier store hit. Slip mode so the family grant ("cargo",
+        // any args) is consulted.
+        let (detached, _detached_path) = temp_policy("detached");
+        detached
+            .0
+            .lock()
+            .expect("policy lock")
+            .grants
+            .extend(policy.0.lock().expect("policy lock").grants.clone());
+        detached.set_policy(Policy::Slip);
+        assert_eq!(detached.check(&shell("cargo test")).await, Decision::Allow);
+        assert_eq!(detached.check(&cargo_other()).await, Decision::Allow);
+        let _ = std::fs::remove_dir_all(temp_dir_of(&path));
+    }
+
+    fn cargo_other() -> ToolCall {
+        ToolCall {
+            id: "call-2".into(),
+            name: "bash".into(),
+            arguments: "cargo clippy".into(),
+            signature: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn deny_and_stop_never_persist() {
+        for answer in [Answer::Denied, Answer::DeniedSession, Answer::Stop] {
+            let (policy, path) = temp_policy("deny-stop");
+            let grant = Grant::of(&shell("bun dev"));
+            let permission = policy.answer(grant, answer.clone()).await;
+            assert_eq!(permission, Permission::Denied);
+            assert!(!path.exists(), "{answer:?} must not touch the store");
+            let _ = std::fs::remove_dir_all(temp_dir_of(&path));
+        }
+    }
+
+    #[tokio::test]
+    async fn stop_unblocks_authorize_with_denied() {
+        let policy = session_policy("stop");
+        let manager = AlanPermissionManager::init(policy);
+        let handler = manager.handler();
+        let handle = tokio::spawn(async move { manager.authorize(&shell("bun dev")).await });
+        let request = handler.subscribe().next().await.expect("request");
+        handler.respond(request.id, Answer::Stop);
+        assert_eq!(handle.await.expect("task"), Permission::Denied);
     }
 }
