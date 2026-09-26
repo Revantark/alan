@@ -66,6 +66,10 @@ pub struct Grant {
 }
 
 impl Grant {
+    pub fn new(command: String, args: Option<String>) -> Self {
+        Self { command, args }
+    }
+
     pub fn of(call: &ToolCall) -> Self {
         let parsed = parse_command(&call.name, &call.arguments);
         Self {
@@ -142,10 +146,18 @@ impl PolicyState {
             Policy::Free => Decision::Allow,
             Policy::Strict => {
                 if self.grants.contains(&Grant::of(call)) {
-                    Decision::Allow
-                } else {
-                    Decision::Ask
+                    return Decision::Allow;
                 }
+                // One edit-tool approval unlocks all edit tools for the
+                // session, regardless of arguments.
+                if matches!(call.name.as_str(), "edit" | "write")
+                    && (self.grants.contains(&Grant::new("edit".to_string(), None))
+                        || self.grants.contains(&Grant::new("write".to_string(), None)))
+                {
+                    return Decision::Allow;
+                }
+
+                Decision::Ask
             }
             Policy::Slip => {
                 let grant = Grant::of(call);
@@ -516,6 +528,29 @@ mod tests {
         // A family grant is not consulted in strict mode.
         assert_eq!(state.decide(&shell("cargo test")), Decision::Ask);
         assert_eq!(state.decide(&shell("node -v")), Decision::Ask);
+    }
+
+    #[test]
+    fn strict_unlocks_all_edit_tools_after_one_approval() {
+        // One edit approval unlocks any edit/write call, args ignored.
+        let state = state_of(
+            Policy::Strict,
+            &[("edit", Some("{\"path\":\"a.rs\"}")), ("edit", None)],
+        );
+        assert_eq!(state.decide(&call("edit")), Decision::Allow);
+        assert_eq!(state.decide(&call("write")), Decision::Allow);
+        // Non-edit tools are unaffected.
+        assert_eq!(state.decide(&shell("bun dev")), Decision::Ask);
+
+        let state = state_of(Policy::Strict, &[("write", None)]);
+        assert_eq!(state.decide(&call("edit")), Decision::Allow);
+    }
+
+    #[test]
+    fn strict_still_asks_for_edit_tools_without_grants() {
+        let state = state_of(Policy::Strict, &[("bash", Some("ls"))]);
+        assert_eq!(state.decide(&call("edit")), Decision::Ask);
+        assert_eq!(state.decide(&call("write")), Decision::Ask);
     }
 
     #[test]
