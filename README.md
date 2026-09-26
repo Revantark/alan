@@ -45,11 +45,7 @@ alan
 
 ### Windows
 
-Run the generated PowerShell installer from a PowerShell prompt:
-
-```powershell
-irm https://github.com/Revantark/alan/releases/latest/download/alan-installer.ps1 | iex
-```
+Not supported yet.
 
 ### Updating
 
