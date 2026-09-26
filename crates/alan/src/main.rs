@@ -12,166 +12,75 @@ use crate::core::permissions_store;
 use crate::core::settings::{DEFAULT_MODEL, PatchSettings, Settings, SettingsStore};
 use crate::core::{ChatController, SlashCommand};
 use crate::local_model_store::JsonLocalModelStore;
-use llm::ServerTool;
-use std::time::Duration;
-
+use crate::logging::init;
+use crate::root::{AlanKeyMapper, AlanRoot};
 use agent::{Agent, SessionManager, default_tools};
 use alan_tui::Runtime;
-use llm::ReasoningEffort;
+use llm::{ReasoningEffort, ServerTool};
 use providers::{
     FileCredentialStore, GoogleProvider, LocalProvider, ModelOptions, OpenRouterProvider, Provider,
     ProviderRegistry, ZaiProvider, bind_model,
 };
 use std::path::PathBuf;
 use std::sync::Arc;
-
-use crate::logging::init;
-use crate::root::{AlanKeyMapper, AlanRoot};
+use std::time::Duration;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let is_blank = std::env::args().any(|arg| arg == "--blank");
-    // Saves the passed envs into settings
-    let is_save = std::env::args().any(|arg| arg == "--save");
+    let is_blank = has_flag("--blank");
+    let is_save = has_flag("--save");
 
-    if std::env::args().any(|arg| arg == "--version") {
+    if has_flag("--version") {
         println!("alan-init {}", env!("CARGO_PKG_VERSION"));
         return Ok(());
     }
 
-    let _guard = init().unwrap();
+    let _guard = init()?;
 
     let store = SettingsStore::<Settings>::new(settings_path()?);
-    let persisted = match store.load().await? {
-        Some(settings) => settings,
-        None => {
-            let settings = Settings::with_defaults();
-            store.save(&settings).await?;
-            settings
-        }
-    };
-
+    let persisted = load_or_create_settings(&store).await?;
     let persisted_model = persisted.model.clone();
     let mut settings = persisted;
     settings.apply_patch(build_env_patch_settings(persisted_model)?);
 
     if is_save {
-        store
-            .save(&settings)
-            .await
-            .expect("failed to save settings");
+        store.save(&settings).await?;
     }
 
     let credential_store = Arc::new(FileCredentialStore::new(auth_path()?));
-    let local_store = Arc::new(JsonLocalModelStore::new(
-        alan_data_dir()?.join("local_models.json"),
-    ));
-    let local_provider = Arc::new(LocalProvider::new(local_store));
-    if let Err(e) = local_provider.load().await {
-        tracing::warn!("failed to load local models: {e}");
-    }
-    let providers: Vec<Arc<dyn Provider>> = vec![
-        Arc::new(ZaiProvider::from_store(credential_store.clone()).build()?),
-        Arc::new(GoogleProvider::from_store(credential_store.clone()).build()?),
-        Arc::new(OpenRouterProvider::from_store(credential_store.clone()).build()?),
-        Arc::clone(&local_provider) as Arc<dyn Provider>,
-    ];
-
+    let credential_store_for_providers =
+        credential_store.clone() as Arc<dyn providers::CredentialStore>;
+    let local_provider = load_local_provider().await?;
+    let providers = build_providers(&credential_store_for_providers, &local_provider)?;
     let session_manager = Arc::new(SessionManager::new(sessions_path()?));
-    let resumed_session = if let Some(session_id) = configured_session_id()? {
-        let cwd = std::env::current_dir()?;
-        Some(session_manager.get_session(&session_id, &cwd).await?)
-    } else {
-        None
-    };
-
-    let (_, _, _, model) = if let Some(ref session) = resumed_session {
-        let provider_id = &session.provider;
-        let provider = providers
-            .iter()
-            .find(|p| p.id().0 == provider_id.as_str())
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "Session was created for provider {} but that provider is not available",
-                    provider_id
-                )
-            })?;
-        let model_id = session.model.clone();
-        let server_tools = enabled_server_tools(provider.as_ref(), &settings)?;
-        let reasoning_effort = settings.reasoning;
-        let model = bind_model(
-            provider.as_ref(),
-            &model_id,
-            ModelOptions {
-                server_tools,
-                reasoning_effort: reasoning_effort.unwrap_or_default(),
-                provider_order: settings.provider_order(&model_id),
-            },
-        )?;
-        (provider_id.as_str(), provider.as_ref(), model_id, model)
-    } else {
-        let selected_provider_id = settings.provider.as_deref().unwrap_or("openrouter");
-        let provider = providers
-            .iter()
-            .find(|p| p.id().0 == selected_provider_id)
-            .ok_or_else(|| anyhow::anyhow!("Provider not found: {selected_provider_id}"))?
-            .as_ref();
-        let model_id = settings
-            .model
-            .clone()
-            .unwrap_or_else(|| DEFAULT_MODEL.into());
-        let server_tools = enabled_server_tools(provider, &settings)?;
-        let reasoning_effort = settings.reasoning;
-        let model = bind_model(
-            provider,
-            &model_id,
-            ModelOptions {
-                server_tools,
-                reasoning_effort: reasoning_effort.unwrap_or_default(),
-                provider_order: settings.provider_order(&model_id),
-            },
-        )?;
-        (selected_provider_id, provider, model_id, model)
-    };
-
+    let resumed_session = load_resumed_session(&session_manager).await?;
+    let model = select_model(&providers, &settings, resumed_session.as_ref())?;
     let registry = Arc::new(ProviderRegistry::with_local_provider(
         providers,
         Arc::clone(&local_provider),
     ));
 
-    let was_resumed = resumed_session.is_some();
     let current_dir = std::env::current_dir()?;
-
-    let permissions_path = permissions_store::default_permissions_path(&current_dir)
-        .expect("cannot determine permissions path (set ALAN_HOME or HOME)");
-
-    let policy = ToolPolicy::new(Arc::new(permissions_store::PermissionStore::new(
-        permissions_path,
-    )));
-    if let Some(saved) = settings.tool_policy {
-        policy.set_policy(saved);
-    }
+    let policy = build_tool_policy(&settings, &current_dir)?;
     let permission_manager = AlanPermissionManager::init(policy.clone());
     let permission_handler = permission_manager.handler();
+    let was_resumed = resumed_session.is_some();
 
-    let mut agent_builder = Agent::builder(model)
-        .with_directory(current_dir)
-        .with_tools(default_tools())
-        .permission_manager(Arc::new(permission_manager))
-        .session_manager(session_manager);
-    if !is_blank {
-        agent_builder = agent_builder.with_default_system_prompt();
-    }
+    let agent = build_agent(
+        model,
+        current_dir,
+        session_manager,
+        resumed_session,
+        is_blank,
+    )?;
 
-    if let Some(session) = resumed_session {
-        agent_builder = agent_builder.resume_session(session);
-    }
-    let agent = agent_builder.build()?;
     let model_name = agent.info().await.name;
     let mut controller = ChatController::new(agent, model_name);
+
     if was_resumed {
         controller.restore_session_history().await;
     }
+
     // `Runtime::run` consumes the root, so keep the agent for the saved-session
     // message printed after the TUI exits.
     let agent = controller.agent();
@@ -188,10 +97,127 @@ async fn main() -> anyhow::Result<()> {
     .run()
     .await;
     let result = result.map_err(|error| anyhow::anyhow!("{error}"));
+
     if let Some(session_id) = agent.session_id().await {
         println!("\nSession saved. Resume it with:\n\nALAN_SESSION={session_id} alan");
     }
+
     result
+}
+
+fn has_flag(flag: &str) -> bool {
+    std::env::args().any(|arg| arg == flag)
+}
+
+async fn load_or_create_settings(store: &SettingsStore<Settings>) -> anyhow::Result<Settings> {
+    match store.load().await? {
+        Some(settings) => Ok(settings),
+        None => {
+            let settings = Settings::with_defaults();
+            store.save(&settings).await?;
+            Ok(settings)
+        }
+    }
+}
+
+async fn load_local_provider() -> anyhow::Result<Arc<LocalProvider>> {
+    let store = Arc::new(JsonLocalModelStore::new(
+        alan_data_dir()?.join("local_models.json"),
+    ));
+    let provider = Arc::new(LocalProvider::new(store));
+    if let Err(error) = provider.load().await {
+        tracing::warn!("failed to load local models: {error}");
+    }
+    Ok(provider)
+}
+
+fn build_providers(
+    credential_store: &Arc<dyn providers::CredentialStore>,
+    local_provider: &Arc<LocalProvider>,
+) -> anyhow::Result<Vec<Arc<dyn Provider>>> {
+    Ok(vec![
+        Arc::new(ZaiProvider::from_store(Arc::clone(credential_store)).build()?),
+        Arc::new(GoogleProvider::from_store(Arc::clone(credential_store)).build()?),
+        Arc::new(OpenRouterProvider::from_store(Arc::clone(credential_store)).build()?),
+        Arc::clone(local_provider) as Arc<dyn Provider>,
+    ])
+}
+
+async fn load_resumed_session(
+    session_manager: &SessionManager,
+) -> anyhow::Result<Option<agent::Session>> {
+    let Some(session_id) = configured_session_id()? else {
+        return Ok(None);
+    };
+    let cwd = std::env::current_dir()?;
+    Ok(Some(session_manager.get_session(&session_id, &cwd).await?))
+}
+
+fn select_model(
+    providers: &[Arc<dyn Provider>],
+    settings: &Settings,
+    resumed_session: Option<&agent::Session>,
+) -> anyhow::Result<providers::Model> {
+    let (provider_id, model_id) = match resumed_session {
+        Some(session) => (session.provider.as_str(), session.model.clone()),
+        None => (
+            settings.provider.as_deref().unwrap_or("openrouter"),
+            settings
+                .model
+                .clone()
+                .unwrap_or_else(|| DEFAULT_MODEL.into()),
+        ),
+    };
+    let provider = providers
+        .iter()
+        .find(|provider| provider.id().0 == provider_id)
+        .ok_or_else(|| anyhow::anyhow!("Provider not found: {provider_id}"))?;
+    let server_tools = enabled_server_tools(provider.as_ref(), settings)?;
+
+    Ok(bind_model(
+        provider.as_ref(),
+        &model_id,
+        ModelOptions {
+            server_tools,
+            reasoning_effort: settings.reasoning.unwrap_or_default(),
+            provider_order: settings.provider_order(&model_id),
+        },
+    )?)
+}
+
+fn build_tool_policy(
+    settings: &Settings,
+    current_dir: &std::path::Path,
+) -> anyhow::Result<ToolPolicy> {
+    let permissions_path = permissions_store::default_permissions_path(current_dir)
+        .expect("cannot determine permissions path (set ALAN_HOME or HOME)");
+    let policy = ToolPolicy::new(Arc::new(permissions_store::PermissionStore::new(
+        permissions_path,
+    )));
+    if let Some(saved) = settings.tool_policy {
+        policy.set_policy(saved);
+    }
+    Ok(policy)
+}
+
+fn build_agent(
+    model: providers::Model,
+    current_dir: PathBuf,
+    session_manager: Arc<SessionManager>,
+    resumed_session: Option<agent::Session>,
+    is_blank: bool,
+) -> anyhow::Result<Agent> {
+    let mut builder = Agent::builder(model)
+        .with_directory(current_dir)
+        .with_tools(default_tools())
+        .session_manager(session_manager);
+    if !is_blank {
+        builder = builder.with_default_system_prompt();
+    }
+    if let Some(session) = resumed_session {
+        builder = builder.resume_session(session);
+    }
+    Ok(builder.build()?)
 }
 
 fn settings_path() -> anyhow::Result<PathBuf> {
