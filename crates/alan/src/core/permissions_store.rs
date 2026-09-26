@@ -96,12 +96,18 @@ pub fn default_permissions_path(cwd: &Path) -> Result<PathBuf> {
 mod tests {
     use super::*;
 
+    static TEMP_DIR_ID: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
     fn temp_dir(name: &str) -> PathBuf {
         let path = std::env::temp_dir().join(format!(
             "alan-permissions-test-{}-{name}",
             std::process::id()
         ));
-        let _ = std::fs::remove_dir_all(&path);
+
+        let path = path.join(format!(
+            "{}",
+            TEMP_DIR_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
         std::fs::create_dir_all(&path).unwrap();
         path
     }
@@ -187,7 +193,7 @@ mod tests {
 
         let loaded = store.load_all().await.unwrap();
         assert_eq!(loaded, HashSet::from([grant("cargo", None)]));
-        let _ = std::fs::remove_dir_all(path.parent().unwrap().parent().unwrap());
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 
     #[tokio::test]
