@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Add permission manager with tool policies, interactive prompt, per-project grant persistence, and policy glyph in the status line.
+- Strict policy: approving an edit tool once allows all subsequent edit tool calls without asking (persisted across sessions with "always allow").
+
 ## 0.1.1 - 2026-09-23
 
 ### Added

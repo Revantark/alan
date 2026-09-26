@@ -10,6 +10,7 @@ A minimal coding agent in your terminal.
 - [Installation](#installation)
 - [Providers](#providers)
 - [Usage](#usage)
+- [Permissions](#permissions)
 - [Local models](#local-models)
 - [Configuration and data locations](#configuration-and-data-locations)
 - [Building from source](#building-from-source)
@@ -86,9 +87,26 @@ For OpenRouter, you can pin a custom provider for the selected model with `/mode
 | `/summarize-new [focus]` | Summarize the context and restart; optionally pass a quoted focus hint, e.g. `/summarize-new "just take the XYZ details"` |
 | `/effort` | Set reasoning effort (`none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`) |
 | `/fork` | Fork the session from a checkpoint |
+| `/tool-free` | Allow all tool calls without asking |
+| `/tool-slip` | Approve a command family once, allow its siblings |
+| `/tool-strict` | Allow only exact commands already approved |
 | `/local` | Manage local models (add, remove, edit) |
 | `/model-provider <name>` | Pin a custom provider for the current OpenRouter model |
 | `/help` | List available commands |
+
+## Permissions
+
+Alan provides three policies to handle tool call permissions.
+
+- **◌ Free** — allow every tool call without asking.
+- **⟐ Slip** — once a command family (e.g. `bun`) is approved, siblings run without asking.
+- **# Strict** — only exact previously-approved commands are allowed; approving an edit tool once unlocks all edit tools (file edits only, not commands).
+
+Grants persist per-project at `~/.alan/projects/<slug>/permissions.json` (base directory respects `ALAN_HOME`). The current policy is shown as a glyph in the status line.
+
+Alan starts in strict policy. Switch with:
+  - `/tool-slip`
+  - `/tool-free`
 
 ## Local models
 

@@ -12,6 +12,7 @@ use crate::entity::EntityId;
 
 /// An error produced by background work.
 pub struct TaskError(pub Box<dyn Error + Send + Sync>);
+
 impl std::fmt::Debug for TaskError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         self.0.fmt(f)

@@ -6,6 +6,9 @@ mod login_overlay;
 mod root;
 mod views;
 
+use crate::core::permissions::AlanPermissionManager;
+use crate::core::permissions::ToolPolicy;
+use crate::core::permissions_store;
 use crate::core::settings::{DEFAULT_MODEL, PatchSettings, Settings, SettingsStore};
 use crate::core::{ChatController, SlashCommand};
 use crate::local_model_store::JsonLocalModelStore;
@@ -138,9 +141,23 @@ async fn main() -> anyhow::Result<()> {
 
     let was_resumed = resumed_session.is_some();
     let current_dir = std::env::current_dir()?;
+
+    let permissions_path = permissions_store::default_permissions_path(&current_dir)
+        .expect("cannot determine permissions path (set ALAN_HOME or HOME)");
+
+    let policy = ToolPolicy::new(Arc::new(permissions_store::PermissionStore::new(
+        permissions_path,
+    )));
+    if let Some(saved) = settings.tool_policy {
+        policy.set_policy(saved);
+    }
+    let permission_manager = AlanPermissionManager::init(policy.clone());
+    let permission_handler = permission_manager.handler();
+
     let mut agent_builder = Agent::builder(model)
         .with_directory(current_dir)
         .with_tools(default_tools())
+        .permission_manager(Arc::new(permission_manager))
         .session_manager(session_manager);
     if !is_blank {
         agent_builder = agent_builder.with_default_system_prompt();
@@ -158,12 +175,18 @@ async fn main() -> anyhow::Result<()> {
     // `Runtime::run` consumes the root, so keep the agent for the saved-session
     // message printed after the TUI exits.
     let agent = controller.agent();
-    let result = Runtime::builder(AlanRoot::new(controller, registry, credential_store))
-        .key_mapper(AlanKeyMapper)
-        .tick_rate(Duration::from_millis(16))
-        .build()
-        .run()
-        .await;
+    let result = Runtime::builder(AlanRoot::new(
+        controller,
+        registry,
+        credential_store,
+        permission_handler,
+        policy,
+    ))
+    .key_mapper(AlanKeyMapper)
+    .tick_rate(Duration::from_millis(16))
+    .build()
+    .run()
+    .await;
     let result = result.map_err(|error| anyhow::anyhow!("{error}"));
     if let Some(session_id) = agent.session_id().await {
         println!("\nSession saved. Resume it with:\n\nALAN_SESSION={session_id} alan");

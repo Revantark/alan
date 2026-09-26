@@ -8,6 +8,7 @@ use std::fs::OpenOptions;
 use std::path::{Path, PathBuf};
 
 /// A flat JSON object persisted at `path`.
+#[derive(Debug)]
 pub struct JsonStore {
     path: PathBuf,
 }

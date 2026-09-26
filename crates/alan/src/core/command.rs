@@ -26,6 +26,10 @@ pub enum SlashCommand {
     Help,
     // Rename the current session.
     Rename,
+    // Tool-permission policy modes.
+    ToolFree,
+    ToolSlip,
+    ToolStrict,
     // Manage local models (add, remove, edit).
     Local,
     Quit,
@@ -94,6 +98,9 @@ impl SlashCommand {
             Self::Help => "list the available commands",
             Self::ModelProviders => "pick a provider from openrouter for the selected model",
             Self::Rename => "rename the current session",
+            Self::ToolFree => "allow all tool calls without asking",
+            Self::ToolSlip => "approve a command family once, allow its siblings",
+            Self::ToolStrict => "allow only exact commands already approved",
             Self::Local => "manage local models (add, remove, edit)",
             Self::Quit => "abort and quit",
         }

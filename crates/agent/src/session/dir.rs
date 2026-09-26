@@ -12,7 +12,7 @@ pub(crate) fn fnv1a64(data: &[u8]) -> u64 {
     hash
 }
 
-pub(crate) fn pwd_key(pwd: &Path) -> String {
+pub fn pwd_key(pwd: &Path) -> String {
     format!("{:016x}", fnv1a64(pwd.to_string_lossy().as_bytes()))
 }
 
