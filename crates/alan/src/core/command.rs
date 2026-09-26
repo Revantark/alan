@@ -98,9 +98,9 @@ impl SlashCommand {
             Self::Help => "list the available commands",
             Self::ModelProviders => "pick a provider from openrouter for the selected model",
             Self::Rename => "rename the current session",
-            Self::ToolFree => "allow all tool calls without asking (/tfree)",
-            Self::ToolSlip => "approve a command family once, allow its siblings (/tslip)",
-            Self::ToolStrict => "allow only exact commands already approved (/tstrict)",
+            Self::ToolFree => "allow all tool calls without asking",
+            Self::ToolSlip => "approve a command family once, allow its siblings",
+            Self::ToolStrict => "allow only exact commands already approved",
             Self::Local => "manage local models (add, remove, edit)",
             Self::Quit => "abort and quit",
         }
