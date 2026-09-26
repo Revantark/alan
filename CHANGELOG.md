@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## 0.1.2 - 2026-09-26
+
 ### Added
 
 - Add permission manager with tool policies, interactive prompt, per-project grant persistence, and policy glyph in the status line.
