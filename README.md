@@ -4,6 +4,8 @@ A minimal coding agent in your terminal.
 
 > Alan is currently an early prototype. Some features are still being developed, and behavior may change between releases.
 
+ ![Alan running in a terminal](assets/alan.png)
+
 ## Table of Contents
 
 - [Features](#features)
