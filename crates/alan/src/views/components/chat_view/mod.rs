@@ -20,6 +20,7 @@ use crate::core::{Activity, Entry};
 use crate::root::{AlanAction, PromptSubmission};
 use crate::views::theme;
 use agent::{AgentError, AgentEvent, AgentStream};
+use alan_tui::TaskError;
 use alan_tui::component::{ActionStatus, Component, RenderContext};
 use alan_tui::context::Context;
 use alan_tui::entity::Entity;
@@ -107,9 +108,29 @@ impl ChatView {
 
     fn set_tool_policy(&mut self, policy: Policy, cx: &mut Context<'_, Self, AlanAction>) {
         self.policy.set_policy(policy);
-        self.controller
-            .push_info(format!("tool permission policy set to {policy}"));
-        cx.notify();
+
+        cx.spawn(
+            async move {
+                persist_tool_policy(policy)
+                    .await
+                    .map(|()| policy)
+                    .map_err(|e| TaskError(e.into()))
+            },
+            |result, view, cx| {
+                match result {
+                    Ok(policy) => {
+                        view.controller
+                            .push_info(format!("tool permission policy set to {policy}"));
+                    }
+                    Err(error) => {
+                        view.controller
+                            .push_info(format!("unable to persist policy: {error}"));
+                    }
+                }
+
+                cx.notify();
+            },
+        );
     }
 
     /// Dispatch `action` to the transcript component, if installed.
@@ -586,4 +607,12 @@ fn recall_prompts(entries: &[Entry]) -> Vec<String> {
             _ => None,
         })
         .collect()
+}
+
+async fn persist_tool_policy(policy: crate::core::permissions::Policy) -> anyhow::Result<()> {
+    let store = SettingsStore::<Settings>::new(settings::default_settings_path()?);
+    let mut settings = store.load().await?.unwrap_or_default();
+    settings.tool_policy = Some(policy);
+
+    store.save(&settings).await
 }

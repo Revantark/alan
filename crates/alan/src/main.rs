@@ -148,6 +148,9 @@ async fn main() -> anyhow::Result<()> {
     let policy = ToolPolicy::new(Arc::new(permissions_store::PermissionStore::new(
         permissions_path,
     )));
+    if let Some(saved) = settings.tool_policy {
+        policy.set_policy(saved);
+    }
     let permission_manager = AlanPermissionManager::init(policy.clone());
     let permission_handler = permission_manager.handler();
 

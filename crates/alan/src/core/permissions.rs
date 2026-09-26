@@ -17,7 +17,8 @@ use tracing::warn;
 use crate::core::permissions_store::PermissionStore;
 
 /// Tool-permission mode. Determines which grants [`ToolPolicy`] consults.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Policy {
     /// Allow every tool call without asking.
     Free,

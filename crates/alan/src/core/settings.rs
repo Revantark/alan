@@ -15,6 +15,7 @@
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
+use crate::core::permissions;
 use crate::core::store::JsonStore;
 use llm::ReasoningEffort;
 use std::collections::BTreeMap;
@@ -35,6 +36,10 @@ pub struct Settings {
     #[serde(default)]
     pub provider_orders: BTreeMap<String, Vec<String>>,
     pub provider: Option<String>,
+    /// Tool-permission policy persisted across runs. Absent means the
+    /// default (Strict).
+    #[serde(default)]
+    pub tool_policy: Option<permissions::Policy>,
 }
 
 /// A patch type used to update only selected fields of Settings without replacing
@@ -48,6 +53,7 @@ pub struct PatchSettings {
     /// Per-model provider order overrides, merged per key on apply.
     pub provider_orders: Option<BTreeMap<String, Vec<String>>>,
     pub provider: Option<String>,
+    pub tool_policy: Option<permissions::Policy>,
 }
 
 /// SettingsStore provides load/save access to application settings stored in a
@@ -148,6 +154,9 @@ impl Settings {
         }
         if let Some(v) = patch.provider {
             self.provider = Some(v);
+        }
+        if let Some(v) = patch.tool_policy {
+            self.tool_policy = Some(v);
         }
     }
 }
