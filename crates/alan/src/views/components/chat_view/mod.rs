@@ -465,6 +465,7 @@ impl Component<AlanAction> for ChatView {
         let inputs = StatusInputs {
             activity: self.activity(),
             mode: self.controller.mode(),
+            policy: self.policy.policy(),
             usage: self.controller.usage(),
             model_name: self.controller.model_name(),
             max_context: self.controller.max_context(),

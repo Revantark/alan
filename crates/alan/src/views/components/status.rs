@@ -1,4 +1,5 @@
 use crate::core::Activity;
+use crate::core::permissions::Policy;
 use crate::root::AlanAction;
 use crate::views::theme;
 use agent::Mode;
@@ -20,6 +21,7 @@ const LOADING_DOT_INTERVAL: std::time::Duration = std::time::Duration::from_mill
 pub(crate) struct StatusInputs {
     pub activity: Activity,
     pub mode: Mode,
+    pub policy: Policy,
     pub usage: Usage,
     pub model_name: String,
     pub max_context: Option<u64>,
@@ -92,24 +94,33 @@ impl Component<AlanAction> for Status {
 
 struct StatusStyle {
     style: Style,
-    label: &'static str,
+    label: String,
 }
 
-impl From<&Activity> for StatusStyle {
-    fn from(activity: &Activity) -> Self {
+/// Indicator glyph for the current tool-permission policy mode.
+fn dot(policy: Policy) -> &'static str {
+    match policy {
+        Policy::Free => "◌",
+        Policy::Slip => "⟐",
+        Policy::Strict => "#",
+    }
+}
+
+impl StatusStyle {
+    fn new(activity: &Activity, policy: Policy) -> Self {
         match activity {
             Activity::Thinking => StatusStyle {
-                label: "  ● thinking",
+                label: format!("  {} thinking", dot(policy)),
                 style: Style::default().italic().fg(Color::Yellow),
             },
             Activity::Idle => StatusStyle {
-                label: "  ● idle",
+                label: format!("  {} idle", dot(policy)),
                 style: Style::default().fg(Color::Green),
             },
             // Loading is rendered separately (it carries a label and a live dot
             // count); this arm is never used via the `From` path.
             Activity::Loading(_) => StatusStyle {
-                label: "  ●",
+                label: format!("  {}", dot(policy)),
                 style: Style::default().fg(Color::Cyan),
             },
         }
@@ -179,12 +190,12 @@ fn context_badge(snap: &StatusInputs) -> Option<Span<'static>> {
 fn status_line(snap: &StatusInputs, loading_dots: usize) -> Line<'static> {
     if let Activity::Loading(text) = &snap.activity {
         return Line::from(Span::styled(
-            format!("  ● {text} {}", ".".repeat(loading_dots)),
+            format!("  {} {text} {}", dot(snap.policy), ".".repeat(loading_dots)),
             Style::default().fg(Color::Cyan),
         ));
     }
-    let status = StatusStyle::from(&snap.activity);
-    let mut spans = vec![Span::styled(status.label.to_owned(), status.style)];
+    let status = StatusStyle::new(&snap.activity, snap.policy);
+    let mut spans = vec![Span::styled(status.label, status.style)];
     spans.extend(badges(snap));
     spans.push(Span::styled(
         format!(" · {}", snap.model_name),

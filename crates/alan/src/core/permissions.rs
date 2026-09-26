@@ -239,6 +239,11 @@ impl ToolPolicy {
     pub fn set_policy(&self, policy: Policy) {
         self.0.lock().expect("policy lock").policy = policy;
     }
+
+    /// The currently active policy mode.
+    pub fn policy(&self) -> Policy {
+        self.0.lock().expect("policy lock").policy
+    }
 }
 
 /// A pending tool-authorization request shown to the user.
