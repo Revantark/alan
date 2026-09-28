@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Kill the whole process group when a bash tool command times out or is aborted, so descendants like `cargo run`'s child no longer leak as orphaned processes.
+
 ## 0.1.2 - 2026-09-26
 
 ### Added

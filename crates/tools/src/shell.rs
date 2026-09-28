@@ -9,7 +9,12 @@ use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::process::Command;
 
 const DEFAULT_TIMEOUT_SECONDS: u64 = 30;
+const MAX_TIMEOUT_SECONDS: u64 = 30 * 60;
 const MAX_OUTPUT_BYTES: usize = 512 * 1000;
+
+fn effective_timeout(requested: u64) -> u64 {
+    requested.min(MAX_TIMEOUT_SECONDS)
+}
 
 pub fn bash_definition() -> ToolDefinition {
     ToolDefinition {
@@ -46,12 +51,33 @@ struct CommandOutput {
     stderr: Vec<u8>,
 }
 
+/// Kills the spawned process group when dropped while still armed.
+///
+/// `kill_on_drop` only reaches the direct `sh` child; descendants of the
+/// command (e.g. `cargo run`'s binary) must be signalled through the group.
+/// Covers timeouts and aborts, where the `execute` future is dropped
+/// mid-flight, as well as errors that return before normal completion.
+struct GroupKillGuard(Option<u32>);
+
+impl GroupKillGuard {
+    fn disarm(&mut self) {
+        self.0 = None;
+    }
+}
+
+impl Drop for GroupKillGuard {
+    fn drop(&mut self) {
+        kill_process_group(self.0);
+    }
+}
+
 #[async_trait]
 impl ToolExecutor for BashExecutor {
     async fn execute(&self, call: &ToolCall) -> Result<ToolOutput, ToolError> {
         let args = parse(call)?;
         let command = required_string(&args, "command")?;
-        let timeout_seconds = optional_u64(&args, "timeout_seconds", DEFAULT_TIMEOUT_SECONDS)?;
+        let requested_timeout = optional_u64(&args, "timeout_seconds", DEFAULT_TIMEOUT_SECONDS)?;
+        let timeout_seconds = effective_timeout(requested_timeout);
 
         let mut child = Command::new("sh")
             .arg("-c")
@@ -59,6 +85,9 @@ impl ToolExecutor for BashExecutor {
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
+            // Own process group so aborts/timeouts can signal the whole
+            // command tree, not only the `sh` wrapper.
+            .process_group(0)
             .kill_on_drop(true)
             .spawn()
             .map_err(|error| ToolError(format!("failed to execute command: {error}")))?;
@@ -71,6 +100,9 @@ impl ToolExecutor for BashExecutor {
             .stderr
             .take()
             .ok_or_else(|| ToolError("failed to capture command stderr".into()))?;
+
+        let child_pid = child.id();
+        let mut guard = GroupKillGuard(child_pid);
 
         let result = tokio::time::timeout(Duration::from_secs(timeout_seconds), async {
             let (stdout, stderr) = tokio::join!(read_limited(stdout), read_limited(stderr));
@@ -91,6 +123,7 @@ impl ToolExecutor for BashExecutor {
                 .wait()
                 .await
                 .map_err(|error| ToolError(format!("failed to wait for command: {error}")))?;
+            guard.disarm();
             Ok(CommandOutput {
                 status,
                 stdout,
@@ -135,6 +168,20 @@ where
         .read_to_end(&mut bytes)
         .await?;
     Ok(bytes)
+}
+
+/// Signal `pid`'s whole process group with SIGKILL.
+///
+/// Tool commands spawn descendants (e.g. `cargo run` → binary) that survive
+/// when only the direct `sh` child is killed, so the group is targeted instead
+/// of the single process. Errors are ignored because the direct child is
+/// already covered by `kill_on_drop` and a child may already be reaped.
+fn kill_process_group(pid: Option<u32>) {
+    if let Some(pid) = pid {
+        // SAFETY: `execute` starts the shell with `.process_group(0)`, making
+        // its PID the process-group ID. A negative PID targets that group.
+        unsafe { libc::kill(-(pid as i32), libc::SIGKILL) };
+    }
 }
 
 #[cfg(test)]

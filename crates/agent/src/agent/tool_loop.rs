@@ -157,7 +157,19 @@ async fn handle_tool_calls(
             return Err(AgentError::ToolNotFound(call.name.clone()));
         }
 
-        match context.tools[tool_index].executor.execute(&call).await {
+        let result = {
+            tokio::select! {
+                biased;
+                changed = cx.cancellation.changed() => {
+                    report_cancelled_tool_call(cx.events, &call_id).await;
+                    changed.map_err(|_| AgentError::Aborted)?;
+                    return Err(AgentError::Aborted);
+                }
+                result = context.tools[tool_index].executor.execute(&call) => result,
+            }
+        };
+
+        match result {
             Ok(output) => {
                 let (output_text, content_parts) = match output {
                     ToolOutput::Text(text) => (text, vec![]),
@@ -192,7 +204,7 @@ async fn handle_tool_calls(
             }
             Err(error) => {
                 let error = error.to_string();
-                super::persistence::append_context_message(
+                persistence::append_context_message(
                     agent,
                     context,
                     AgentMessage::ToolResult {
@@ -216,6 +228,20 @@ async fn handle_tool_calls(
     }
 
     Ok(())
+}
+
+async fn report_cancelled_tool_call(
+    events: Option<&tokio::sync::mpsc::Sender<Result<AgentEvent, AgentError>>>,
+    call_id: &str,
+) {
+    if let Some(events) = events {
+        let _ = events
+            .send(Ok(AgentEvent::ToolCallFailed {
+                id: call_id.to_owned(),
+                error: "tool execution cancelled".into(),
+            }))
+            .await;
+    }
 }
 
 fn tail_lines(output: &str, count: usize) -> String {

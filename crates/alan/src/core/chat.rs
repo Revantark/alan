@@ -375,7 +375,10 @@ impl ChatController {
             Err(error) => {
                 self.busy = false;
                 // An aborted run (the stream was dropped) carries no message.
-                if !matches!(error, agent::AgentError::Aborted) {
+                if matches!(error, agent::AgentError::Aborted) {
+                    Self::fail_running_tool_calls(&mut self.entries);
+                    changed = true;
+                } else {
                     let message = match error {
                         agent::AgentError::Model(ModelError::Auth(AuthError::Missing)) => {
                             "Please login to use the model".to_string()
@@ -400,7 +403,18 @@ impl ChatController {
     pub fn finish_stream(&mut self) {
         if self.busy {
             self.busy = false;
+            Self::fail_running_tool_calls(&mut self.entries);
             self.revision = self.revision.wrapping_add(1);
+        }
+    }
+
+    fn fail_running_tool_calls(entries: &mut [Entry]) {
+        for entry in entries {
+            if let Entry::ToolCall { status, .. } = entry
+                && *status == ToolStatus::Running
+            {
+                *status = ToolStatus::Failed("cancelled".into());
+            }
         }
     }
 
@@ -535,6 +549,28 @@ mod tests {
     fn make_controller(name: &str) -> ChatController {
         let agent = Agent::builder(test_model()).build().unwrap();
         ChatController::new(agent, name.to_string())
+    }
+
+    #[test]
+    fn cancelling_stream_marks_running_tool_calls_failed() {
+        let mut controller = make_controller("m");
+        controller.busy = true;
+        controller.apply_event(Ok(AgentEvent::ToolCallStarted {
+            id: "call-1".into(),
+            name: "bash".into(),
+            arguments: "{}".into(),
+        }));
+
+        controller.finish_stream();
+
+        assert!(!controller.is_busy());
+        assert!(matches!(
+            controller.entries().last(),
+            Some(Entry::ToolCall {
+                status: ToolStatus::Failed(error),
+                ..
+            }) if error == "cancelled"
+        ));
     }
 
     #[test]

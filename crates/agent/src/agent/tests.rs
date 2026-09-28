@@ -437,9 +437,111 @@ async fn abort_preserves_partial_assistant_output() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// Tool calling
-// ---------------------------------------------------------------------------
+struct BlockingToolApi {
+    calls: AtomicUsize,
+}
+
+#[async_trait]
+impl LlmApi for BlockingToolApi {
+    async fn stream(&self, request: llm::LlmRequest<'_>) -> Result<llm::LlmStream, LlmError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        Ok(Box::pin(futures_util::stream::iter([
+            Ok(LlmEvent::ToolCallDelta {
+                index: 0,
+                id: Some("call-blocking".into()),
+                name: Some("wait".into()),
+                arguments: "{}".into(),
+                signature: None,
+            }),
+            Ok(LlmEvent::Done {
+                stop_reason: StopReason::ToolUse,
+                usage: None,
+                model: Some(request.model_id.to_owned()),
+            }),
+        ])))
+    }
+}
+
+struct BlockingToolExecutor {
+    started: Arc<tokio::sync::Notify>,
+    dropped: Arc<std::sync::atomic::AtomicBool>,
+}
+
+#[async_trait]
+impl tools::ToolExecutor for BlockingToolExecutor {
+    async fn execute(&self, _call: &llm::ToolCall) -> Result<tools::ToolOutput, tools::ToolError> {
+        struct ExecutionGuard(Arc<std::sync::atomic::AtomicBool>);
+
+        impl Drop for ExecutionGuard {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+
+        self.started.notify_one();
+        let _guard = ExecutionGuard(self.dropped.clone());
+        std::future::pending::<Result<tools::ToolOutput, tools::ToolError>>().await
+    }
+}
+
+#[tokio::test]
+async fn abort_cancels_an_in_flight_tool_execution() {
+    let api = Arc::new(BlockingToolApi {
+        calls: AtomicUsize::new(0),
+    });
+    let started = Arc::new(tokio::sync::Notify::new());
+    let dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let a = Arc::new(
+        Agent::builder(model_with_api(api.clone()))
+            .tool(AgentTool::new(
+                llm::ToolDefinition {
+                    name: "wait".into(),
+                    description: "Wait indefinitely".into(),
+                    parameters: serde_json::json!({"type": "object"}),
+                },
+                BlockingToolExecutor {
+                    started: started.clone(),
+                    dropped: dropped.clone(),
+                },
+            ))
+            .build()
+            .unwrap(),
+    );
+
+    let mut stream = a.ask(a.prompt().content("run the wait tool")).unwrap();
+    assert!(matches!(
+        stream.recv().await,
+        Some(Ok(AgentEvent::ToolCallStarted { name, .. })) if name == "wait"
+    ));
+
+    // Synchronize on the executor itself instead of relying on a timing delay.
+    tokio::time::timeout(std::time::Duration::from_secs(5), started.notified())
+        .await
+        .expect("tool should start");
+
+    stream.abort();
+    let failure = tokio::time::timeout(std::time::Duration::from_secs(5), stream.recv())
+        .await
+        .expect("cancellation should report the tool failure");
+    assert!(matches!(
+        failure,
+        Some(Ok(AgentEvent::ToolCallFailed { id, error }))
+            if id == "call-blocking" && error == "tool execution cancelled"
+    ));
+    let result = tokio::time::timeout(std::time::Duration::from_secs(5), stream.recv())
+        .await
+        .expect("cancellation should stop the in-flight tool");
+    assert!(matches!(result, Some(Err(AgentError::Aborted))));
+    assert!(
+        dropped.load(Ordering::SeqCst),
+        "tool future should be cancelled"
+    );
+    assert_eq!(api.calls.load(Ordering::SeqCst), 1);
+
+    let messages = a.messages().await;
+    assert_eq!(messages.len(), 2, "no tool result should be recorded");
+    assert!(matches!(&messages[1], AgentMessage::Assistant(_)));
+}
 
 struct ToolCallingApi {
     calls: AtomicUsize,
