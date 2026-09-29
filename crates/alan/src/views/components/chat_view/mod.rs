@@ -2,12 +2,13 @@
 //!
 //! `ChatView` owns the agent stream, the model/provider state, and the
 //! prompt editor. Sub-modules handle session lifecycle ([`session`]),
-//! model/provider management ([`models`]), attachments ([`attachments`]),
-//! and steering ([`steering`]).
+//! model/provider management ([`models`]), profiles ([`profiles`]),
+//! attachments ([`attachments`]), and steering ([`steering`]).
 
 mod attachments;
 mod models;
 mod permissions;
+mod profiles;
 mod session;
 mod steering;
 
@@ -15,7 +16,7 @@ use crate::core::chat::ChatController;
 use crate::core::permissions::PermissionHandler;
 use crate::core::permissions::PermissionRequest;
 use crate::core::permissions::{Policy, ToolPolicy};
-use crate::core::settings::{self, Settings, SettingsStore};
+use crate::core::settings::{self, PatchSettings, SettingsStore};
 use crate::core::{Activity, Entry};
 use crate::root::{AlanAction, PromptSubmission};
 use crate::views::theme;
@@ -107,27 +108,26 @@ impl ChatView {
     }
 
     fn set_tool_policy(&mut self, policy: Policy, cx: &mut Context<'_, Self, AlanAction>) {
-        self.policy.set_policy(policy);
-
+        let policy_changed = self.policy.policy() != policy;
         cx.spawn(
             async move {
                 persist_tool_policy(policy)
                     .await
-                    .map(|()| policy)
                     .map_err(|e| TaskError(e.into()))
             },
-            |result, view, cx| {
+            move |result, view, cx| {
                 match result {
-                    Ok(policy) => {
-                        view.controller
-                            .push_info(format!("tool permission policy set to {policy}"));
+                    Ok(()) => {
+                        view.policy.set_policy(policy);
+                        if policy_changed {
+                            view.controller
+                                .push_info(format!("tool permission policy set to {policy}"));
+                        }
                     }
-                    Err(error) => {
-                        view.controller
-                            .push_info(format!("unable to persist policy: {error}"));
-                    }
+                    Err(error) => view
+                        .controller
+                        .push_info(format!("unable to persist policy: {error}")),
                 }
-
                 cx.notify();
             },
         );
@@ -236,6 +236,7 @@ impl ChatView {
                 Cmd::New => session::start_new_session(self, cx),
                 Cmd::Models => models::open_models_picker(self, cx),
                 Cmd::Local => models::handle_local_command(self, &submission.text, cx),
+                Cmd::Profile => profiles::handle_profile_command(self, &submission.text, cx),
                 Cmd::Quit => cx.quit(),
             }
             cx.notify();
@@ -359,6 +360,13 @@ impl Component<AlanAction> for ChatView {
         cx: &mut Context<'_, Self, AlanAction>,
     ) -> ActionStatus {
         if self.handle_permission(action, cx) {
+            return ActionStatus::Handled;
+        }
+
+        if matches!(action, AlanAction::ToggleProfiles) {
+            if !profiles::reject_while_busy(self) {
+                profiles::open_profile_picker(cx, profiles::ProfileOperation::Apply);
+            }
             return ActionStatus::Handled;
         }
 
@@ -577,23 +585,61 @@ fn parse_provider_order(value: &str) -> anyhow::Result<Vec<String>> {
 }
 
 async fn persist_reasoning_effort(effort: llm::ReasoningEffort) -> anyhow::Result<()> {
-    let store = SettingsStore::<Settings>::new(settings::default_settings_path()?);
-    let mut settings = store.load().await?.unwrap_or_default();
-    settings.reasoning = Some(effort);
-    store.save(&settings).await
+    let store = settings_store()?;
+    store
+        .update(move |mut settings| {
+            settings.apply_patch(PatchSettings {
+                reasoning: Some(effort),
+                ..PatchSettings::default()
+            });
+            settings
+        })
+        .await
 }
 
 async fn persist_provider_order(model: &str, provider_order: &[String]) -> anyhow::Result<()> {
-    let store = SettingsStore::<Settings>::new(settings::default_settings_path()?);
-    let mut settings = store.load().await?.unwrap_or_default();
-    if provider_order.is_empty() {
-        settings.provider_orders.remove(model);
-    } else {
-        settings
-            .provider_orders
-            .insert(model.to_owned(), provider_order.to_vec());
-    }
-    store.save(&settings).await
+    let store = settings_store()?;
+    let model = model.to_owned();
+    let provider_order = provider_order.to_vec();
+    store
+        .update(move |mut settings| {
+            let changed = if provider_order.is_empty() {
+                settings.provider_orders.remove(&model).is_some()
+            } else {
+                settings
+                    .provider_orders
+                    .insert(model.clone(), provider_order.clone())
+                    .as_deref()
+                    != Some(provider_order.as_slice())
+            };
+            if changed {
+                settings.active_profile = None;
+            }
+            settings
+        })
+        .await
+}
+
+pub(super) fn to_task(error: anyhow::Error) -> TaskError {
+    TaskError(error.into())
+}
+
+/// The settings store at the default location.
+pub(super) fn settings_store() -> Result<SettingsStore, TaskError> {
+    Ok(SettingsStore::new(
+        settings::default_settings_path().map_err(to_task)?,
+    ))
+}
+
+/// Apply a settings patch atomically, clearing the active-profile marker when
+/// the patch actually changes something.
+pub(super) async fn apply_settings_patch(patch: PatchSettings) -> anyhow::Result<()> {
+    settings_store()?
+        .update(move |mut settings| {
+            settings.apply_patch(patch);
+            settings
+        })
+        .await
 }
 
 fn recall_prompts(entries: &[Entry]) -> Vec<String> {
@@ -610,9 +656,14 @@ fn recall_prompts(entries: &[Entry]) -> Vec<String> {
 }
 
 async fn persist_tool_policy(policy: crate::core::permissions::Policy) -> anyhow::Result<()> {
-    let store = SettingsStore::<Settings>::new(settings::default_settings_path()?);
-    let mut settings = store.load().await?.unwrap_or_default();
-    settings.tool_policy = Some(policy);
-
-    store.save(&settings).await
+    let store = settings_store()?;
+    store
+        .update(move |mut settings| {
+            settings.apply_patch(PatchSettings {
+                tool_policy: Some(policy),
+                ..PatchSettings::default()
+            });
+            settings
+        })
+        .await
 }

@@ -13,9 +13,8 @@ use std::sync::Arc;
 
 use alan_tui::context::Context;
 use alan_tui::entity::Entity;
-use alan_tui::keymap::{InputContext, KeyMapper};
 use alan_tui::{ActionStatus, Component, RenderContext, Subscription};
-use crossterm::event::{Event, KeyCode, KeyModifiers};
+use crossterm::event::Event;
 use ratatui::Frame;
 use ratatui::layout::Rect;
 
@@ -30,11 +29,13 @@ use crate::views::{ChatView, Header, LoginRequested};
 /// Semantic input for the Alan frontend.
 ///
 /// Context-free inputs (resize, mouse wheel, bracketed paste) are semantic
-/// variants decoded in [`AlanKeyMapper`]; everything else stays a 1:1
-/// [`AlanAction::Raw`] wrapper until a later slice moves it over.
+/// variants decoded in [`AlanKeyMapper`](crate::keymap::AlanKeyMapper);
+/// everything else stays a 1:1 [`AlanAction::Raw`] wrapper until a later
+/// slice moves it over.
 #[derive(Debug, Clone)]
 pub enum AlanAction {
     ToggleMode,
+    ToggleProfiles,
     Paste(String),
     Submit(PromptSubmission),
     Quit,
@@ -54,39 +55,6 @@ pub enum AlanAction {
 pub struct PromptSubmission {
     pub images: Vec<ImageAttachment>,
     pub text: String,
-}
-
-/// Passes terminal events through as [`AlanAction::Raw`], except for the
-/// context-free inputs decoded above.
-///
-/// Owns the `KeyMapper` seam so future refinements happen here, at the
-/// runtime boundary, and components never depend on raw crossterm mapping.
-#[derive(Debug, Default, Clone, Copy)]
-pub struct AlanKeyMapper;
-
-impl KeyMapper<AlanAction> for AlanKeyMapper {
-    fn map(&self, event: &Event, _context: &InputContext) -> Option<AlanAction> {
-        match event {
-            Event::Resize(..) => Some(AlanAction::Resize),
-            Event::Paste(data) => Some(AlanAction::Paste(data.clone())),
-            // Shift+Tab toggles the agent mode (plan/review/normal) before the
-            // editor sees it, so the popup never consumes it as tab-completion.
-            Event::Key(key)
-                if key.code == KeyCode::BackTab
-                    || (key.code == KeyCode::Tab
-                        && key.modifiers.contains(KeyModifiers::SHIFT)) =>
-            {
-                Some(AlanAction::ToggleMode)
-            }
-            Event::Key(key)
-                if key.code == KeyCode::Char('c')
-                    && key.modifiers.contains(KeyModifiers::CONTROL) =>
-            {
-                Some(AlanAction::Quit)
-            }
-            event => Some(AlanAction::Raw(event.clone())),
-        }
-    }
 }
 
 /// Owns the whole Alan frontend as one `tui` component, plus the

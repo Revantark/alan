@@ -41,8 +41,5 @@ fn log_directory() -> Result<PathBuf> {
         return Ok(PathBuf::from(path));
     }
 
-    let home = std::env::var_os("ALAN_HOME")
-        .or_else(|| std::env::var_os("HOME"))
-        .context("cannot determine Alan home directory for logs")?;
-    Ok(PathBuf::from(home).join(".alan").join("logs"))
+    crate::core::paths::alan_data_dir().map(|dir| dir.join("logs"))
 }

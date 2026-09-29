@@ -40,6 +40,37 @@ impl JsonStore {
         self.write(&values).await
     }
 
+    /// Atomically update a value while holding the store's exclusive lock.
+    ///
+    /// The callback receives the previous value and returns the replacement
+    /// (or `None` to remove the key) together with a result for the caller.
+    /// Writes only when the replacement differs from the previous value.
+    pub async fn update<R>(
+        &self,
+        key: &str,
+        update: impl FnOnce(Option<Value>) -> Result<(Option<Value>, R)>,
+    ) -> Result<R> {
+        let _lock = self.acquire_lock()?;
+        let mut values = self.read().await?;
+        let previous = values.get(key).cloned();
+
+        let (value, result) = update(previous.clone())?;
+        if value == previous {
+            return Ok(result);
+        }
+
+        match value {
+            Some(value) => {
+                values.insert(key.to_owned(), value);
+            }
+            None => {
+                values.remove(key);
+            }
+        }
+        self.write(&values).await?;
+        Ok(result)
+    }
+
     /// Remove `key`.
     ///
     /// Returns `true` when the key existed. Writes only when something changed.
@@ -180,6 +211,91 @@ mod tests {
         assert_eq!(reloaded.get("model").await.unwrap(), None);
 
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn update_reads_modifies_and_writes_atomically() {
+        let path = temp_path("update");
+        let store = JsonStore::new(&path);
+
+        // Missing key: the callback sees None and its value is stored.
+        let seen = store
+            .update("model", |value| Ok((Some(json!("gpt-4o-mini")), value)))
+            .await
+            .unwrap();
+        assert_eq!(seen, None);
+        assert_eq!(
+            store.get("model").await.unwrap(),
+            Some(json!("gpt-4o-mini"))
+        );
+
+        // The callback sees the previously stored value, not None.
+        let seen = store
+            .update("model", |value| Ok((Some(json!("o3")), value)))
+            .await
+            .unwrap();
+        assert_eq!(seen, Some(json!("gpt-4o-mini")));
+        assert_eq!(store.get("model").await.unwrap(), Some(json!("o3")));
+
+        // `None` removes the key and reports the previous value.
+        let seen = store
+            .update("model", |value| Ok((None, value)))
+            .await
+            .unwrap();
+        assert_eq!(seen, Some(json!("o3")));
+        assert_eq!(store.get("model").await.unwrap(), None);
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(format!("{}.lock", path.display()));
+    }
+
+    #[tokio::test]
+    async fn unchanged_update_skips_the_write() {
+        let path = temp_path("update-noop");
+        let store = JsonStore::new(&path);
+
+        store.set("model", json!("gpt-4o-mini")).await.unwrap();
+
+        // Replacing a key with an identical value must not rewrite the file.
+        // A write bumps the modification time, so sleep past the filesystem's
+        // timestamp granularity before and after the no-op update.
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        let before = std::fs::metadata(&path).unwrap().modified().unwrap();
+
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        let seen = store
+            .update("model", |value| Ok((Some(json!("gpt-4o-mini")), value)))
+            .await
+            .unwrap();
+        assert_eq!(seen, Some(json!("gpt-4o-mini")));
+
+        let after = std::fs::metadata(&path).unwrap().modified().unwrap();
+        assert_eq!(before, after, "no-op update must not touch the file");
+
+        // A real change still persists.
+        store
+            .update("model", |value| Ok((Some(json!("o3")), value)))
+            .await
+            .unwrap();
+        assert_eq!(store.get("model").await.unwrap(), Some(json!("o3")));
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(format!("{}.lock", path.display()));
+    }
+
+    #[tokio::test]
+    async fn removing_an_absent_key_creates_no_file() {
+        let path = temp_path("update-remove-absent");
+        let store = JsonStore::new(&path);
+
+        let seen = store
+            .update("model", |value| Ok((None, value)))
+            .await
+            .unwrap();
+        assert_eq!(seen, None);
+        assert!(!path.exists(), "a no-op remove must not create the file");
+
+        let _ = std::fs::remove_file(format!("{}.lock", path.display()));
     }
 
     #[tokio::test]

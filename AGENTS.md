@@ -46,6 +46,12 @@ Run formatting and checks after Rust code changes. Do not run release or destruc
 is fetched on first use and cached; selecting a model switches the active
 conversation model and updates the session header.
 
+Profiles save the current provider/model, reasoning effort, and web-fetch/search
+settings. Use `/profile save <name>` to create one, `/profile` to switch, and
+`/profile delete` to remove one. `Ctrl+P` opens the picker while idle. Applying a profile persists its
+settings for future launches; manual settings changes clear its active-profile
+marker. Profiles are stored separately in `<data dir>/profiles.json`. See
+`core::paths` for how the data directory is resolved.
 
 Alan currently uses OpenRouter:
 
@@ -144,7 +150,8 @@ Keep UI simple. Avoid borders, unnecessary widgets, and premature abstraction.
 - Executes tool calls in rounds.
 - Limits tool rounds with `max_tool_rounds`.
 - Streams events, supports abort, and persists sessions under
-  `$ALAN_HOME/.alan/sessions` (append-only JSONL).
+  `<data dir>/sessions` (append-only JSONL), where the data dir is
+  `$ALAN_HOME/.alan` or `$HOME/.alan`.
 - `/new` resets the in-memory conversation and starts a new session file; the
   old file stays on disk and remains resumable by its id. `/summarize-new
   [focus]` runs one tool-less summarization round and restarts into a fresh

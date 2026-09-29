@@ -1,4 +1,5 @@
 mod core;
+mod keymap;
 mod local_model_overlay;
 mod local_model_store;
 mod logging;
@@ -9,14 +10,16 @@ mod views;
 use crate::core::permissions::AlanPermissionManager;
 use crate::core::permissions::ToolPolicy;
 use crate::core::permissions_store;
+use crate::core::server_tools::server_tools;
 use crate::core::settings::{DEFAULT_MODEL, PatchSettings, Settings, SettingsStore};
 use crate::core::{ChatController, SlashCommand};
+use crate::keymap::AlanKeyMapper;
 use crate::local_model_store::JsonLocalModelStore;
 use crate::logging::init;
-use crate::root::{AlanKeyMapper, AlanRoot};
+use crate::root::AlanRoot;
 use agent::{Agent, SessionManager, default_tools};
 use alan_tui::Runtime;
-use llm::{ReasoningEffort, ServerTool};
+use llm::ReasoningEffort;
 use providers::{
     FileCredentialStore, GoogleProvider, LocalProvider, ModelOptions, OpenRouterProvider, Provider,
     ProviderRegistry, ZaiProvider, bind_model,
@@ -37,7 +40,7 @@ async fn main() -> anyhow::Result<()> {
 
     let _guard = init()?;
 
-    let store = SettingsStore::<Settings>::new(settings_path()?);
+    let store = SettingsStore::new(settings_path()?);
     let persisted = load_or_create_settings(&store).await?;
     let persisted_model = persisted.model.clone();
     let mut settings = persisted;
@@ -109,7 +112,7 @@ fn has_flag(flag: &str) -> bool {
     std::env::args().any(|arg| arg == flag)
 }
 
-async fn load_or_create_settings(store: &SettingsStore<Settings>) -> anyhow::Result<Settings> {
+async fn load_or_create_settings(store: &SettingsStore) -> anyhow::Result<Settings> {
     match store.load().await? {
         Some(settings) => Ok(settings),
         None => {
@@ -122,7 +125,7 @@ async fn load_or_create_settings(store: &SettingsStore<Settings>) -> anyhow::Res
 
 async fn load_local_provider() -> anyhow::Result<Arc<LocalProvider>> {
     let store = Arc::new(JsonLocalModelStore::new(
-        alan_data_dir()?.join("local_models.json"),
+        core::paths::alan_data_dir()?.join("local_models.json"),
     ));
     let provider = Arc::new(LocalProvider::new(store));
     if let Err(error) = provider.load().await {
@@ -172,8 +175,11 @@ fn select_model(
         .iter()
         .find(|provider| provider.id().0 == provider_id)
         .ok_or_else(|| anyhow::anyhow!("Provider not found: {provider_id}"))?;
-    let server_tools = enabled_server_tools(provider.as_ref(), settings)?;
-
+    let server_tools = server_tools(
+        provider.server_tools(),
+        settings.web_fetch == Some(true),
+        settings.web_search == Some(true),
+    );
     Ok(bind_model(
         provider.as_ref(),
         &model_id,
@@ -221,7 +227,7 @@ fn build_agent(
 }
 
 fn settings_path() -> anyhow::Result<PathBuf> {
-    Ok(alan_data_dir()?.join("settings.json"))
+    core::settings::default_settings_path()
 }
 
 fn build_env_patch_settings(persisted_model: Option<String>) -> anyhow::Result<PatchSettings> {
@@ -278,26 +284,6 @@ fn parse_provider_order(value: &std::ffi::OsStr) -> anyhow::Result<Vec<String>> 
     Ok(order)
 }
 
-fn enabled_server_tools(
-    provider: &dyn Provider,
-    settings: &Settings,
-) -> anyhow::Result<Vec<ServerTool>> {
-    let mut enabled = Vec::new();
-    for tool in provider.server_tools() {
-        let enabled_for_tool = match tool.id.as_str() {
-            "openrouter:web_fetch" => settings.web_fetch,
-            "openrouter:web_search" => settings.web_search,
-            _ => continue,
-        };
-        if enabled_for_tool == Some(true) {
-            enabled.push(ServerTool {
-                kind: tool.id.clone(),
-            });
-        }
-    }
-    Ok(enabled)
-}
-
 fn parse_bool_env(name: &str) -> anyhow::Result<bool> {
     let Some(value) = std::env::var_os(name) else {
         return Ok(false);
@@ -312,18 +298,11 @@ fn parse_bool_env(name: &str) -> anyhow::Result<bool> {
 }
 
 fn auth_path() -> anyhow::Result<PathBuf> {
-    Ok(alan_data_dir()?.join("auth.json"))
+    Ok(core::paths::alan_data_dir()?.join("auth.json"))
 }
 
 fn sessions_path() -> anyhow::Result<PathBuf> {
-    Ok(alan_data_dir()?.join("sessions"))
-}
-
-fn alan_data_dir() -> anyhow::Result<PathBuf> {
-    let home = std::env::var_os("ALAN_HOME")
-        .or_else(|| std::env::var_os("HOME"))
-        .ok_or_else(|| anyhow::anyhow!("cannot determine Alan home directory"))?;
-    Ok(PathBuf::from(home).join(".alan"))
+    Ok(core::paths::alan_data_dir()?.join("sessions"))
 }
 
 fn configured_session_id() -> anyhow::Result<Option<String>> {

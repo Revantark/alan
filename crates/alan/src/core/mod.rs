@@ -4,8 +4,11 @@ pub mod action;
 pub mod chat;
 pub mod command;
 pub mod completion;
+pub mod paths;
 pub mod permissions;
 pub mod permissions_store;
+pub mod profile;
+pub mod server_tools;
 pub mod settings;
 pub mod store;
 
