@@ -77,6 +77,9 @@ For OpenRouter, you can pin a custom provider for the selected model with `/mode
 | Command | Description |
 | --- | --- |
 | `/models` | Pick a model from the provider catalog |
+| `/profile` | Open the profile picker to switch profiles (`Ctrl+P`, or `Cmd+Option+P` where the terminal passes it through) |
+| `/profile save <name>` | Save current model/provider, reasoning, and web settings as a new profile |
+| `/profile delete` | Pick a saved profile to delete |
 | `/plan` | Toggle plan mode (also `Shift+Tab`) |
 | `/review` | Toggle review mode (also `Shift+Tab`) |
 | `/normal` | Turn off plan and review mode |
@@ -100,7 +103,7 @@ Alan provides three policies to handle tool call permissions.
 - **⟐ Slip** — once a command family (e.g. `bun`) is approved, siblings run without asking.
 - **# Strict** — only exact previously-approved commands are allowed; approving an edit tool once unlocks all edit tools (file edits only, not commands).
 
-Grants persist per-project at `~/.alan/projects/<slug>/permissions.json` (base directory respects `ALAN_HOME`). The current policy is shown as a glyph in the status line.
+Grants persist per-project at `<data dir>/projects/<slug>/permissions.json`. The current policy is shown as a glyph in the status line.
 
 Alan starts in strict policy. Switch with:
   - `/tool-slip`
@@ -120,11 +123,12 @@ This opens an overlay with fields for Model ID, URL, API, and API Key. Use `/loc
 
 Alan stores everything under `~/.alan/` by default:
 
-- `settings.json` — your settings.
+- `settings.json` — your current settings and active-profile marker.
+- `profiles.json` — saved named model/reasoning/web settings profiles.
 - `sessions/` — conversation history (append-only JSONL, one file per session).
 - `logs/` — daily rotating logs.
 
-All of these locations respect the `ALAN_HOME` environment variable, so you can redirect them if needed. Two other environment variables are useful:
+All of these live in the data directory (`~/.alan` by default). `ALAN_HOME` selects the *parent* of that directory, so `ALAN_HOME=/tmp/x` puts everything in `/tmp/x/.alan`. Two other environment variables are useful:
 
 - `ALAN_LOG_DIR` — override the log directory.
 - `ALAN_MODEL` — override the default model on startup, e.g. `ALAN_MODEL=openai/gpt-4o-mini alan`.

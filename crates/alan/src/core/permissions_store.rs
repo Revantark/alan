@@ -1,3 +1,4 @@
+use crate::core::paths;
 use crate::core::permissions::Grant;
 use crate::core::store::JsonStore;
 use agent::pwd_key;
@@ -79,14 +80,9 @@ impl PermissionStore {
 }
 
 /// Default location for the current project's permission file:
-/// `$ALAN_HOME/projects/<slug(cwd)>/permissions.json`, falling back to `$HOME`.
+/// `<data dir>/projects/<slug(cwd)>/permissions.json`.
 pub fn default_permissions_path(cwd: &Path) -> Result<PathBuf> {
-    let home = std::env::var_os("ALAN_HOME")
-        .or_else(|| std::env::var_os("HOME"))
-        .ok_or_else(|| anyhow::anyhow!("cannot determine Alan home directory"))?;
-
-    Ok(PathBuf::from(home)
-        .join(".alan")
+    Ok(paths::alan_data_dir()?
         .join("projects")
         .join(pwd_key(cwd))
         .join("permissions.json"))

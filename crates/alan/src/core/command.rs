@@ -32,6 +32,7 @@ pub enum SlashCommand {
     ToolStrict,
     // Manage local models (add, remove, edit).
     Local,
+    Profile,
     Quit,
 }
 
@@ -80,7 +81,12 @@ impl SlashCommand {
     pub fn takes_args(self) -> bool {
         matches!(
             self,
-            Self::Effort | Self::ModelProviders | Self::SummarizeNew | Self::Rename | Self::Local
+            Self::Effort
+                | Self::ModelProviders
+                | Self::SummarizeNew
+                | Self::Rename
+                | Self::Local
+                | Self::Profile
         )
     }
 
@@ -102,6 +108,7 @@ impl SlashCommand {
             Self::ToolSlip => "approve a command family once, allow its siblings",
             Self::ToolStrict => "allow only exact commands already approved",
             Self::Local => "manage local models (add, remove, edit)",
+            Self::Profile => "save and switch named model profiles",
             Self::Quit => "abort and quit",
         }
     }
@@ -328,6 +335,20 @@ mod tests {
         assert!(SlashCommand::ModelProviders.takes_args());
         assert!(SlashCommand::SummarizeNew.takes_args());
         assert!(SlashCommand::Rename.takes_args());
+    }
+
+    #[test]
+    fn parses_profile_commands() {
+        assert_eq!(SlashCommand::parse("/profile"), Some(SlashCommand::Profile));
+        assert_eq!(
+            SlashCommand::parse_with_args("/profile save Deep Reasoning"),
+            Some((SlashCommand::Profile, "save Deep Reasoning"))
+        );
+        assert_eq!(
+            SlashCommand::parse_with_args("/profile replace"),
+            Some((SlashCommand::Profile, "replace"))
+        );
+        assert!(SlashCommand::Profile.takes_args());
     }
 
     #[test]

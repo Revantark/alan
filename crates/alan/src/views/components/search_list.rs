@@ -20,6 +20,7 @@ pub enum SearchListEvent {
 
 pub struct SearchListOverlay {
     title: String,
+    empty_message: String,
     items: Vec<String>,
     filtered: Vec<usize>,
     query: String,
@@ -31,11 +32,16 @@ impl SearchListOverlay {
         let filtered = (0..items.len()).collect();
         Self {
             title: title.into(),
+            empty_message: "No matches".into(),
             items,
             filtered,
             query: String::new(),
             selected: 0,
         }
+    }
+
+    pub fn set_empty_message(&mut self, message: impl Into<String>) {
+        self.empty_message = message.into();
     }
 
     pub fn set_items(&mut self, items: Vec<String>) {
@@ -62,6 +68,15 @@ impl SearchListOverlay {
         let max = self.filtered.len() as isize - 1;
         self.selected = (self.selected as isize + delta).clamp(0, max) as usize;
     }
+
+    /// Like [`Self::move_selection`] but wraps around at both ends.
+    fn cycle_selection(&mut self, delta: isize) {
+        if self.filtered.is_empty() {
+            return;
+        }
+        let len = self.filtered.len() as isize;
+        self.selected = (self.selected as isize + delta).rem_euclid(len) as usize;
+    }
 }
 
 impl Component<AlanAction> for SearchListOverlay {
@@ -85,8 +100,10 @@ impl Component<AlanAction> for SearchListOverlay {
                 cx.emit(SearchListEvent::Cancelled);
                 cx.close_overlay();
             }
-            KeyCode::Char('p') if key.modifiers == KeyModifiers::CONTROL => self.move_selection(-1),
-            KeyCode::Char('n') if key.modifiers == KeyModifiers::CONTROL => self.move_selection(1),
+            KeyCode::Char('p') if key.modifiers == KeyModifiers::CONTROL => self.cycle_selection(1),
+            KeyCode::Char('n') if key.modifiers == KeyModifiers::CONTROL => {
+                self.cycle_selection(-1)
+            }
             KeyCode::Up => self.move_selection(-1),
             KeyCode::Down => self.move_selection(1),
             KeyCode::Enter | KeyCode::Tab if key.modifiers.is_empty() => {
@@ -181,7 +198,7 @@ impl SearchListOverlay {
         let prompt = if self.query.is_empty() {
             Line::from(vec![
                 Span::styled("❯ ", accent),
-                Span::styled("Search models…", muted),
+                Span::styled("Search…", muted),
             ])
         } else {
             Line::from(vec![Span::styled("❯ ", accent), Span::raw(suffix)])
@@ -200,7 +217,7 @@ impl SearchListOverlay {
         let list_area = Rect::new(inner.x, inner.y + 2, inner.width, rows as u16);
         if self.filtered.is_empty() {
             frame.render_widget(
-                Paragraph::new("  No matching models").style(muted),
+                Paragraph::new(format!("  {}", self.empty_message)).style(muted),
                 list_area,
             );
         } else {
@@ -235,12 +252,5 @@ impl SearchListOverlay {
                 .collect();
             frame.render_widget(Paragraph::new(lines), list_area);
         }
-        // frame.render_widget(
-        //     Paragraph::new(" ".repeat(inner.width as usize)).style(muted),
-        //     Rect::new(inner.x, inner.bottom() - 2, inner.width, 1),
-        // );
     }
 }
-
-pub type ModelPick = SearchListEvent;
-pub type ModelsPicker = SearchListOverlay;

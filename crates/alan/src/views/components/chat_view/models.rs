@@ -2,23 +2,34 @@
 //! `/local`, and the model picker overlays.
 
 use crate::core::SlashCommand;
-use crate::core::settings::{self, Settings, SettingsStore};
+use crate::core::server_tools::server_tools;
+use crate::core::settings::{self, PatchSettings};
 use crate::root::AlanAction;
+use alan_tui::TaskError;
 use alan_tui::context::Context;
-use providers::{ModelInfo, Provider, ProviderId, ProviderRegistry, bind_local_model, bind_model};
+use providers::{
+    Model, ModelInfo, ModelOptions, Provider, ProviderId, ProviderRegistry, bind_local_model,
+    bind_model,
+};
 use std::sync::Arc;
 
 use super::LocalPick;
-use crate::views::components::{ModelPick, ModelsPicker};
+use crate::views::components::{SearchListEvent, SearchListOverlay};
 
 use super::{ChatView, parse_provider_order, persist_provider_order};
 
 use crate::local_model_overlay::LocalModelOverlay;
 
+/// Provider id reserved for locally-hosted models.
+const LOCAL_PROVIDER_ID: &str = "local";
+
 /// `/models`: open the model picker overlay.
 pub(crate) fn open_models_picker(view: &mut ChatView, cx: &mut Context<'_, ChatView, AlanAction>) {
     let providers = Arc::clone(&view.providers);
-    let picker = cx.open_overlay(ModelsPicker::new("Select Model", model_labels(&providers)));
+    let picker = cx.open_overlay(SearchListOverlay::new(
+        "Select Model",
+        model_labels(&providers),
+    ));
 
     let providers_for_fetch = Arc::clone(&providers);
     let providers_for_items = Arc::clone(&providers);
@@ -35,85 +46,53 @@ pub(crate) fn open_models_picker(view: &mut ChatView, cx: &mut Context<'_, ChatV
         },
     );
 
-    let providers = Arc::clone(&view.providers);
-    let local_provider = view.providers.local();
-    view.model_subscription = Some(
-        cx.subscribe::<crate::views::components::ModelPick, ModelsPicker, _>(
-            picker,
-            move |event, view, _picker, cx| {
-                let ModelPick::Chosen(index) = event else {
-                    return;
-                };
-                let Some(model_info) = all_models(&providers).into_iter().nth(*index) else {
-                    return;
-                };
-                let Some(agent) = Some(view.controller.agent()) else {
-                    return;
-                };
-                let providers = Arc::clone(&providers);
-                let local_provider = local_provider.clone();
-                let _ = cx.spawn(
-                    async move {
-                        let mut options = agent.model_options().await;
-                        let settings = settings::get_settings()
-                            .await
-                            .map_err(|e| alan_tui::TaskError(e.into()))?;
-                        options.provider_order = settings.provider_order(&model_info.id);
+    view.model_subscription = Some(cx.subscribe::<SearchListEvent, SearchListOverlay, _>(
+        picker,
+        move |event, view, _picker, cx| {
+            let SearchListEvent::Chosen(index) = event else {
+                return;
+            };
+            let Some(model_info) = all_models(&providers).into_iter().nth(*index) else {
+                return;
+            };
+            let agent = view.controller.agent();
+            let providers = Arc::clone(&providers);
+            let _ = cx.spawn(
+                async move {
+                    let mut options = agent.model_options().await;
+                    let settings = settings::get_settings()
+                        .await
+                        .map_err(|e| TaskError(e.into()))?;
+                    options.provider_order = settings.provider_order(&model_info.id);
 
-                        let model = if model_info.provider == ProviderId::new("local") {
-                            // Local models bind per-entry from the local store.
-                            let Some(local_provider) = local_provider else {
-                                return Err(alan_tui::TaskError(
-                                    "local provider not available".into(),
-                                ));
-                            };
-                            let entry =
-                                local_provider.find_entry(&model_info.id).ok_or_else(|| {
-                                    alan_tui::TaskError(
-                                        format!("local model not found: {}", model_info.id).into(),
-                                    )
-                                })?;
-                            bind_local_model(&entry, options)
-                                .map_err(|e| alan_tui::TaskError(e.into()))?
-                        } else {
-                            let provider = providers
-                                .providers()
-                                .iter()
-                                .find(|p| p.id() == model_info.provider)
-                                .ok_or_else(|| {
-                                    alan_tui::TaskError("selected provider is unavailable".into())
-                                })?;
-                            bind_model(provider.as_ref(), &model_info.id, options)
-                                .map_err(|e| alan_tui::TaskError(e.into()))?
-                        };
-                        let name = model_info.name.clone();
-                        let max_context = model_info.context_length;
-                        let reasoning_effort = model.reasoning_effort();
+                    let model = bind_model_info(&providers, &model_info, options)?;
+                    let name = model_info.name.clone();
+                    let max_context = model_info.context_length;
+                    let reasoning_effort = model.reasoning_effort();
 
-                        agent
-                            .set_model(model)
-                            .await
-                            .map_err(|e| alan_tui::TaskError(e.into()))?;
-                        persist_model(&model_info.id, &model_info.provider)
-                            .await
-                            .map_err(|e| alan_tui::TaskError(e.into()))?;
-                        Ok((name, max_context, reasoning_effort))
-                    },
-                    move |result, view, cx| {
-                        match result {
-                            Ok((name, max_context, reasoning_effort)) => {
-                                view.controller.set_max_context(max_context);
-                                view.controller.set_reasoning_effort(reasoning_effort);
-                                view.controller.apply_model_switch(name);
-                            }
-                            Err(e) => view.controller.apply_model_switch_failed(e.to_string()),
+                    agent
+                        .set_model(model)
+                        .await
+                        .map_err(|e| TaskError(e.into()))?;
+                    persist_model(&model_info.id, &model_info.provider)
+                        .await
+                        .map_err(|e| TaskError(e.into()))?;
+                    Ok((name, max_context, reasoning_effort))
+                },
+                move |result, view, cx| {
+                    match result {
+                        Ok((name, max_context, reasoning_effort)) => {
+                            view.controller.set_max_context(max_context);
+                            view.controller.set_reasoning_effort(reasoning_effort);
+                            view.controller.apply_model_switch(name);
                         }
-                        cx.notify();
-                    },
-                );
-            },
-        ),
-    );
+                        Err(e) => view.controller.apply_model_switch_failed(e.to_string()),
+                    }
+                    cx.notify();
+                },
+            );
+        },
+    ));
 }
 
 /// `/providers`: apply a provider order.
@@ -148,13 +127,13 @@ pub(crate) fn apply_model_provider(
             agent
                 .set_provider_order(provider_order.clone())
                 .await
-                .map_err(|error| alan_tui::TaskError(Box::new(error)))?;
+                .map_err(|error| TaskError(Box::new(error)))?;
 
             persist_provider_order(&model_id, &provider_order)
                 .await
-                .map_err(|error| alan_tui::TaskError(error.into()))?;
+                .map_err(|error| TaskError(error.into()))?;
 
-            Ok::<_, alan_tui::TaskError>(if provider_order.is_empty() {
+            Ok::<_, TaskError>(if provider_order.is_empty() {
                 "provider order cleared (using default)".to_owned()
             } else {
                 format!("provider order set to {}", provider_order.join(", "))
@@ -227,7 +206,7 @@ fn open_local_edit_picker(view: &mut ChatView, cx: &mut Context<'_, ChatView, Al
     );
 }
 
-/// Open a `ModelsPicker` over the local catalog and run `on_pick` with the
+/// Open a `SearchListOverlay` over the local catalog and run `on_pick` with the
 /// chosen entry's index. Shared by the remove and edit flows.
 fn open_local_picker(
     view: &mut ChatView,
@@ -249,12 +228,12 @@ fn open_local_picker(
         view.controller.push_info(empty_message.to_owned());
         return;
     }
-    let picker = cx.open_overlay(ModelsPicker::new(title, models));
+    let picker = cx.open_overlay(SearchListOverlay::new(title, models));
     let local = local.clone();
-    cx.subscribe_once::<crate::views::components::ModelPick, ModelsPicker, _>(
+    cx.subscribe_once::<SearchListEvent, SearchListOverlay, _>(
         picker,
         move |event, _view, _picker, cx| {
-            let ModelPick::Chosen(index) = event else {
+            let SearchListEvent::Chosen(index) = event else {
                 return;
             };
             let Some(model_info) = local.models().into_iter().nth(*index) else {
@@ -270,8 +249,8 @@ fn open_local_picker(
                             local
                                 .remove_model(&model_id)
                                 .await
-                                .map_err(|e| alan_tui::TaskError(e.to_string().into()))?;
-                            Ok::<(), alan_tui::TaskError>(())
+                                .map_err(|e| TaskError(e.to_string().into()))?;
+                            Ok::<(), TaskError>(())
                         },
                         move |result, view, _cx| match result {
                             Ok(()) => {
@@ -287,7 +266,7 @@ fn open_local_picker(
                     cx.spawn(
                         async move {
                             local.find_entry(&model_info.id).ok_or_else(|| {
-                                alan_tui::TaskError(
+                                TaskError(
                                     format!("Local model not found: {}", model_info.id).into(),
                                 )
                             })
@@ -330,11 +309,47 @@ pub(crate) fn model_labels(providers: &ProviderRegistry) -> Vec<String> {
         .collect()
 }
 
-pub(crate) async fn persist_model(model_id: &str, provider_id: &ProviderId) -> anyhow::Result<()> {
-    let store = SettingsStore::<Settings>::new(settings::default_settings_path()?);
-    let mut settings = store.load().await?.unwrap_or_default();
-    settings.model = Some(model_id.to_string());
-    settings.provider = Some(provider_id.to_string());
+pub(crate) fn server_tools_for_provider(
+    providers: &ProviderRegistry,
+    provider_id: &str,
+    web_fetch: bool,
+    web_search: bool,
+) -> Vec<llm::ServerTool> {
+    providers
+        .get(&ProviderId::new(provider_id))
+        .map_or_else(Vec::new, |provider| {
+            server_tools(provider.server_tools(), web_fetch, web_search)
+        })
+}
 
-    store.save(&settings).await
+/// Bind a catalog entry to a live model. Local entries bind through the
+/// registry's local provider; everything else through the named provider.
+pub(crate) fn bind_model_info(
+    providers: &ProviderRegistry,
+    model_info: &ModelInfo,
+    options: ModelOptions,
+) -> Result<Model, TaskError> {
+    if model_info.provider.0 == LOCAL_PROVIDER_ID {
+        let local = providers
+            .local()
+            .ok_or_else(|| TaskError("local provider not available".into()))?;
+        let entry = local
+            .find_entry(&model_info.id)
+            .ok_or_else(|| TaskError(format!("local model not found: {}", model_info.id).into()))?;
+        return bind_local_model(&entry, options).map_err(|e| TaskError(e.into()));
+    }
+
+    let provider = providers
+        .get(&model_info.provider)
+        .ok_or_else(|| TaskError(format!("provider not found: {}", model_info.provider).into()))?;
+    bind_model(provider.as_ref(), &model_info.id, options).map_err(|e| TaskError(e.into()))
+}
+
+pub(crate) async fn persist_model(model_id: &str, provider_id: &ProviderId) -> anyhow::Result<()> {
+    super::apply_settings_patch(PatchSettings {
+        model: Some(model_id.to_owned()),
+        provider: Some(provider_id.to_string()),
+        ..PatchSettings::default()
+    })
+    .await
 }
