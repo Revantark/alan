@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `/profile` command family to save, apply, and delete named model profiles capturing provider/model, reasoning effort, and web fetch/search settings.
+- `Ctrl+P` to open the profile picker while idle.
+- Profiles persisted in `profiles.json`; the active profile is recorded in `settings.json` and cleared by manual settings changes.
+
 ### Fixed
 
 - Kill the whole process group when a bash tool command times out or is aborted, so descendants like `cargo run`'s child no longer leak as orphaned processes.
