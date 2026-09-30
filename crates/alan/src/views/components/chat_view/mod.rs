@@ -398,9 +398,11 @@ impl Component<AlanAction> for ChatView {
 
             AlanAction::CancelSteer => {
                 if self.controller.take_steering().is_some() {
-                    if let Some(editor) = self.editor {
-                        cx.dispatch(editor, &AlanAction::SetSteering(None));
-                    }
+                    // The editor clears its own `pending_steer` mirror before
+                    // dispatching here, so do not push `SetSteering(None)`
+                    // back into it: that would re-enter the editor's slot
+                    // while the event loop still holds it mutably borrowed
+                    // for this dispatch, panicking with "already borrowed".
                     cx.notify();
                 }
                 ActionStatus::Handled
