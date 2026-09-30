@@ -17,6 +17,7 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::Style;
 use ratatui::widgets::{Paragraph, Widget};
+use std::cell::RefCell;
 use std::collections::VecDeque;
 use strum::IntoEnumIterator;
 use tui_textarea::{CursorMove, CursorRenderMode, TextArea, WrapMode};
@@ -50,6 +51,18 @@ pub struct PromptEditor {
     /// Mirror of the controller's pending steering message. Up recalls it
     /// into the editor (taking priority over history recall); Esc cancels it.
     pending_steer: Option<String>,
+    /// Cached result of [`Self::rows`], keyed by the editor text and width it
+    /// was measured for. `TextArea::measure` needs `&mut` while render only
+    /// has `&self`, so measuring means cloning the widget; caching keeps that
+    /// clone off the per-frame path.
+    measured: RefCell<Option<Measured>>,
+}
+
+/// A [`TextArea::measure`] result together with what it was measured from.
+struct Measured {
+    lines: Vec<String>,
+    width: u16,
+    rows: u16,
 }
 
 impl PromptEditor {
@@ -78,6 +91,7 @@ impl PromptEditor {
             history: VecDeque::new(),
             history_index: None,
             pending_steer: None,
+            measured: RefCell::new(None),
         }
     }
 
@@ -86,10 +100,28 @@ impl PromptEditor {
         self.history_index = None;
     }
 
-    /// Rows the prompt needs at `width`, accounting for soft wrapping. Mutable
-    /// because `TextArea::measure` caches the result.
+    /// Rows the prompt needs at `width`, accounting for soft wrapping.
+    ///
+    /// `TextArea::measure` takes `&mut self` and render only has `&self`, so
+    /// the measurement runs against a clone of the widget. The result is
+    /// cached against the buffer contents and width, so a frame that neither
+    /// changes the prompt nor resizes the editor reuses the previous answer
+    /// instead of cloning the undo history and rendering state again.
     pub fn rows(&self, width: u16) -> u16 {
-        self.editor.clone().measure(width.max(1)).preferred_rows
+        let width = width.max(1);
+        if let Some(measured) = self.measured.borrow().as_ref()
+            && measured.width == width
+            && measured.lines.as_slice() == self.editor.lines()
+        {
+            return measured.rows;
+        }
+        let rows = self.editor.clone().measure(width).preferred_rows;
+        *self.measured.borrow_mut() = Some(Measured {
+            lines: self.editor.lines().to_vec(),
+            width,
+            rows,
+        });
+        rows
     }
 
     pub fn attachments(&self) -> &[ImageAttachment] {
@@ -859,5 +891,20 @@ mod tests {
     fn down_is_noop_when_not_recalling() {
         let history = hist(&["hello", "hi"]);
         assert!(recall_down(&history, None).is_none());
+    }
+
+    #[test]
+    fn rows_are_cached_per_width_and_content() {
+        let mut editor = PromptEditor::new();
+        assert_eq!(editor.rows(20), 1);
+        // Same content, same width: the cached answer is reused unchanged.
+        assert_eq!(editor.rows(20), 1);
+        // A narrower width wraps and must be re-measured, not served from the
+        // cache.
+        editor.load_text("hello world");
+        assert!(editor.rows(1) > editor.rows(20));
+        // Editing the buffer invalidates the cache as well.
+        editor.load_text("hi");
+        assert_eq!(editor.rows(20), 1);
     }
 }

@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- The prompt editor caches its row measurement, so rendering no longer deep-clones the editor widget (buffer, undo history, search state) on every frame just to measure its wrapped height.
+
 ## 0.1.3 - 2026-09-30
 
 ### Added
