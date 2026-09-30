@@ -103,7 +103,9 @@ Alan provides three policies to handle tool call permissions.
 - **⟐ Slip** — once a command family (e.g. `bun`) is approved, siblings run without asking.
 - **# Strict** — only exact previously-approved commands are allowed; approving an edit tool once unlocks all edit tools (file edits only, not commands).
 
-Grants persist per-project at `<data dir>/projects/<slug>/permissions.json`. The current policy is shown as a glyph in the status line.
+A single tool call may chain several commands (`cargo test && cargo run`, or with `||`, `;`, `|`). Each chained command is granted and checked separately, and the call runs only if every one of them is allowed, so approving `cargo test && cargo run` stores two grants and the next call runs without prompting. Splitting is deliberately shallow: subshells, redirections and `$(...)` are not parsed, so such a command stays one opaque grant rather than being partly authorized.
+
+Grants persist per-project at `<data dir>/projects/<pwd-hash>/permissions.json`. The current policy is shown as a glyph in the status line.
 
 Alan starts in strict policy. Switch with:
   - `/tool-slip`

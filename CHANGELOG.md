@@ -15,6 +15,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Compound bash commands are split on `&&`, `||`, `;` and `|`; each chained command is granted and checked separately and the call runs only if all are allowed, so approving a chained call stores a grant per command.
+- Permission requests resolve asynchronously in the agent loop, so the chat view no longer blocks while waiting on an answer.
 - Kill the whole process group when a bash tool command times out or is aborted, so descendants like `cargo run`'s child no longer leak as orphaned processes.
 
 ## 0.1.2 - 2026-09-26

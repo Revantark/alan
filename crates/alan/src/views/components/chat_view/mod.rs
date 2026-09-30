@@ -15,7 +15,7 @@ mod steering;
 use crate::core::chat::ChatController;
 use crate::core::permissions::PermissionHandler;
 use crate::core::permissions::PermissionRequest;
-use crate::core::permissions::{Policy, ToolPolicy};
+use crate::core::permissions::{Answer, Policy, ToolPolicy};
 use crate::core::settings::{self, PatchSettings, SettingsStore};
 use crate::core::{Activity, Entry};
 use crate::root::{AlanAction, PromptSubmission};
@@ -179,12 +179,21 @@ impl ChatView {
         };
 
         let request_id = request.id;
+        let handler = self.permission_handler.clone();
+
+        let decision = decision.clone();
+        let is_stop = decision == Answer::Stop;
         self.pending_permission = None;
 
-        self.permission_handler
-            .respond(request_id, decision.clone());
+        cx.spawn(
+            async move {
+                handler.respond(request_id, decision).await;
+                Ok(())
+            },
+            |_, _, _| {},
+        );
 
-        if *decision == crate::core::permissions::Answer::Stop && self.controller.is_busy() {
+        if is_stop && self.controller.is_busy() {
             self.stop_stream();
         }
 

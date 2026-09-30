@@ -9,7 +9,7 @@ use crate::agent::prompt;
 use crate::context::AgentContext;
 use llm::LlmResponse;
 use providers::Model;
-use tools::{ToolOutput, parse_kind};
+use tools::ToolOutput;
 
 /// Core agent loop: stream LLM responses and execute tool calls until the
 /// model produces a final answer or `max_tool_rounds` is reached.
@@ -119,14 +119,10 @@ async fn handle_tool_calls(
             .copied()
             .ok_or_else(|| AgentError::ToolNotFound(call.name.clone()))?;
 
-        let kind = parse_kind(&call);
         let decision = agent.pm.authorize(&call).await;
 
         if decision == Permission::Denied {
-            let denial = format!(
-                "permission denied for tool \"{}\" (kind: {:?}) by user",
-                call.name, kind
-            );
+            let denial = format!("permission denied for tool \"{}\" by user", call.name);
             super::persistence::append_context_message(
                 agent,
                 context,

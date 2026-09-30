@@ -547,6 +547,115 @@ struct ToolCallingApi {
     calls: AtomicUsize,
 }
 
+/// Records every call it authorizes, so tests can assert the hook saw it.
+#[derive(Default)]
+struct RecordingPermissionManager {
+    seen: std::sync::Mutex<Vec<(String, String)>>,
+    allow: bool,
+}
+
+#[async_trait]
+impl ToolPermissionManager for RecordingPermissionManager {
+    async fn authorize(&self, call: &llm::ToolCall) -> Permission {
+        self.seen
+            .lock()
+            .unwrap()
+            .push((call.name.clone(), call.arguments.clone()));
+        if self.allow {
+            Permission::Allowed
+        } else {
+            Permission::Denied
+        }
+    }
+}
+
+fn bash_tool() -> AgentTool {
+    AgentTool::new(
+        llm::ToolDefinition {
+            name: "bash".into(),
+            description: "Run a shell command".into(),
+            parameters: serde_json::json!({}),
+        },
+        tools::BashExecutor,
+    )
+}
+
+#[tokio::test]
+async fn permission_manager_denial_blocks_the_tool_and_is_reported() {
+    // Regression: the alan binary built an `AlanPermissionManager` but never
+    // passed it to the agent, so tools ran unchecked.
+    let root = std::env::temp_dir().join(format!("alan-perm-deny-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&root).unwrap();
+    let manager = Arc::new(SessionManager::new(&root));
+    let pm = Arc::new(RecordingPermissionManager::default());
+    let a = Arc::new(
+        Agent::builder(model_with_api(Arc::new(ToolCallingApi {
+            calls: AtomicUsize::new(0),
+        })))
+        .session_manager(manager)
+        .with_tools([bash_tool()])
+        .permission_manager(pm.clone())
+        .build()
+        .unwrap(),
+    );
+
+    a.ask(a.prompt().content("run echo hi"))
+        .unwrap()
+        .into_response()
+        .await
+        .unwrap();
+
+    // The hook saw the call as the model issued it.
+    let seen = pm.seen.lock().unwrap().clone();
+    assert_eq!(seen.len(), 1, "authorize must be called once");
+    assert_eq!(seen[0].0, "bash");
+    assert!(seen[0].1.contains("echo hi"), "arguments reach the hook");
+
+    // The denial reaches the model as a tool result and the stream still
+    // completes normally.
+    let messages = a.messages().await;
+    let denial = messages
+        .iter()
+        .find_map(|m| match m {
+            AgentMessage::ToolResult { content, .. } => Some(content.clone()),
+            _ => None,
+        })
+        .expect("denial recorded as a tool result");
+    assert!(denial.contains("permission denied"), "got: {denial}");
+}
+
+#[tokio::test]
+async fn allow_all_is_the_default_when_no_manager_is_supplied() {
+    // With no manager wired the tool runs and nothing is injected.
+    let root = std::env::temp_dir().join(format!("alan-perm-default-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&root).unwrap();
+    let manager = Arc::new(SessionManager::new(&root));
+    let a = Arc::new(
+        Agent::builder(model_with_api(Arc::new(ToolCallingApi {
+            calls: AtomicUsize::new(0),
+        })))
+        .session_manager(manager)
+        .with_tools([bash_tool()])
+        .build()
+        .unwrap(),
+    );
+
+    a.ask(a.prompt().content("run echo hi"))
+        .unwrap()
+        .into_response()
+        .await
+        .unwrap();
+
+    let messages = a.messages().await;
+    assert!(
+        !messages.iter().any(|m| matches!(
+            m,
+            AgentMessage::ToolResult { content, .. } if content.contains("permission denied")
+        )),
+        "default manager must not deny"
+    );
+}
+
 #[async_trait]
 impl LlmApi for ToolCallingApi {
     async fn stream(&self, request: llm::LlmRequest<'_>) -> Result<llm::LlmStream, LlmError> {

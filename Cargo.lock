@@ -54,6 +54,7 @@ dependencies = [
  "ratatui",
  "serde",
  "serde_json",
+ "shlex",
  "strum",
  "tokio",
  "tools",

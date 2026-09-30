@@ -17,7 +17,7 @@ use crate::keymap::AlanKeyMapper;
 use crate::local_model_store::JsonLocalModelStore;
 use crate::logging::init;
 use crate::root::AlanRoot;
-use agent::{Agent, SessionManager, default_tools};
+use agent::{Agent, SessionManager, ToolPermissionManager, default_tools};
 use alan_tui::Runtime;
 use llm::ReasoningEffort;
 use providers::{
@@ -75,6 +75,7 @@ async fn main() -> anyhow::Result<()> {
         session_manager,
         resumed_session,
         is_blank,
+        Arc::new(permission_manager),
     )?;
 
     let model_name = agent.info().await.name;
@@ -212,11 +213,13 @@ fn build_agent(
     session_manager: Arc<SessionManager>,
     resumed_session: Option<agent::Session>,
     is_blank: bool,
+    permission_manager: Arc<dyn ToolPermissionManager>,
 ) -> anyhow::Result<Agent> {
     let mut builder = Agent::builder(model)
         .with_directory(current_dir)
         .with_tools(default_tools())
-        .session_manager(session_manager);
+        .session_manager(session_manager)
+        .permission_manager(permission_manager);
     if !is_blank {
         builder = builder.with_default_system_prompt();
     }

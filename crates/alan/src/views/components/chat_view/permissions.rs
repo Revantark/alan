@@ -89,7 +89,7 @@ impl Component<AlanAction> for PermissionPrompt {
                 Style::default().fg(theme::EDITOR_FG),
             )),
             Line::from(Span::styled(
-                "Allow[1]  AllowSession[2]  AllowAlways[3]  Deny[8]  DenySession[9]  Stop[0]",
+                "Allow once[1]  Allow session[2]  Allow always[3]  Deny[8]  Deny session[9]  Stop[0]",
                 Style::default().fg(theme::PROMPT_FG),
             )),
         ];

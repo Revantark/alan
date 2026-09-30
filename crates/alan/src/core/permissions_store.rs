@@ -34,12 +34,18 @@ impl PermissionStore {
         Ok(grants.into_iter().collect())
     }
 
-    /// Append `grant` to the persisted allow list. Re-inserting an existing
-    /// grant is a no-op.
-    pub async fn insert(&self, grant: &Grant) -> Result<()> {
-        self.modify(|grants| grants.insert(grant.clone()))
-            .await
-            .map(|_| ())
+    /// Append every grant in one read-modify-write, so a compound approval
+    /// costs one lock, read, parse and write. Duplicates collapse.
+    pub async fn insert_all(&self, grants: &[Grant]) -> Result<()> {
+        self.modify(|set| {
+            let mut added = false;
+            for grant in grants {
+                added |= set.insert(grant.clone());
+            }
+            added
+        })
+        .await
+        .map(|_| ())
     }
 
     /// Remove `grant` from the persisted allow list. Returns `true` when the
@@ -49,33 +55,35 @@ impl PermissionStore {
         self.modify(|grants| grants.remove(grant)).await
     }
 
-    /// Read-modify-write the allow list; writes only when `f` changed it.
+    /// Read-modify-write the allow list under a single store lock.
     async fn modify<F>(&self, f: F) -> Result<bool>
     where
         F: FnOnce(&mut HashSet<Grant>) -> bool,
     {
-        let mut grants: HashSet<Grant> = match self.store.get(ALLOW_KEY).await? {
-            Some(value) => serde_json::from_value::<Vec<Grant>>(value)
-                .with_context(|| {
-                    format!("failed to parse grants in {}", self.store.path().display())
-                })?
-                .into_iter()
-                .collect(),
-            None => HashSet::new(),
-        };
-
-        if !f(&mut grants) {
-            return Ok(false);
-        }
-
-        let mut grants: Vec<_> = grants.into_iter().collect();
-        grants.sort_by(|a, b| (&a.command, &a.args).cmp(&(&b.command, &b.args)));
-
         self.store
-            .set(ALLOW_KEY, serde_json::to_value(grants)?)
-            .await?;
+            .update(ALLOW_KEY, |previous| {
+                let mut grants: HashSet<Grant> = match previous.clone() {
+                    Some(value) => serde_json::from_value::<Vec<Grant>>(value)
+                        .with_context(|| {
+                            format!("failed to parse grants in {}", self.store.path().display())
+                        })?
+                        .into_iter()
+                        .collect(),
+                    None => HashSet::new(),
+                };
 
-        Ok(true)
+                // `update` reads an unchanged value as "nothing to write";
+                // `None` would ask it to drop the key.
+                if !f(&mut grants) {
+                    return Ok((previous, false));
+                }
+
+                let mut grants: Vec<_> = grants.into_iter().collect();
+                grants.sort_by(|a, b| (&a.command, &a.args).cmp(&(&b.command, &b.args)));
+
+                Ok((Some(serde_json::to_value(grants)?), true))
+            })
+            .await
     }
 }
 
@@ -134,7 +142,10 @@ mod tests {
     #[tokio::test]
     async fn insert_creates_file_and_dirs() {
         let (store, path) = temp_store("create");
-        store.insert(&grant("bun", Some("dev"))).await.unwrap();
+        store
+            .insert_all(&[grant("bun", Some("dev"))])
+            .await
+            .unwrap();
         assert!(path.exists());
         let loaded = store.load_all().await.unwrap();
         assert_eq!(loaded, HashSet::from([grant("bun", Some("dev"))]));
@@ -144,8 +155,11 @@ mod tests {
     #[tokio::test]
     async fn round_trips_family_and_exact_grants() {
         let (store, path) = temp_store("roundtrip");
-        store.insert(&grant("cargo", None)).await.unwrap();
-        store.insert(&grant("bun", Some("dev"))).await.unwrap();
+        store.insert_all(&[grant("cargo", None)]).await.unwrap();
+        store
+            .insert_all(&[grant("bun", Some("dev"))])
+            .await
+            .unwrap();
         let loaded = store.load_all().await.unwrap();
         assert_eq!(
             loaded,
@@ -158,8 +172,8 @@ mod tests {
     async fn reinsert_is_a_noop() {
         let (store, path) = temp_store("dedup");
         let g = grant("bun", Some("dev"));
-        store.insert(&g).await.unwrap();
-        store.insert(&g).await.unwrap();
+        store.insert_all(std::slice::from_ref(&g)).await.unwrap();
+        store.insert_all(std::slice::from_ref(&g)).await.unwrap();
         let raw: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(raw["allow"].as_array().unwrap().len(), 1);
@@ -167,10 +181,48 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn insert_all_writes_the_whole_set_once() {
+        // One batch is one write: no intermediate state on disk.
+        let (store, path) = temp_store("batch");
+        store
+            .insert_all(&[
+                grant("rg", Some("x")),
+                grant("cargo", Some("test")),
+                grant("cargo", Some("test")),
+            ])
+            .await
+            .unwrap();
+        let raw: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        // The duplicate in the batch collapsed.
+        assert_eq!(raw["allow"].as_array().unwrap().len(), 2);
+        assert_eq!(
+            store.load_all().await.unwrap(),
+            HashSet::from([grant("rg", Some("x")), grant("cargo", Some("test"))])
+        );
+        let _ = std::fs::remove_dir_all(path.parent().unwrap().parent().unwrap());
+    }
+
+    #[tokio::test]
+    async fn insert_all_appends_to_existing_entries() {
+        let (store, path) = temp_store("batch-append");
+        store.insert_all(&[grant("bun", None)]).await.unwrap();
+        store
+            .insert_all(&[grant("bun", None), grant("cargo", None)])
+            .await
+            .unwrap();
+        assert_eq!(
+            store.load_all().await.unwrap(),
+            HashSet::from([grant("bun", None), grant("cargo", None)])
+        );
+        let _ = std::fs::remove_dir_all(path.parent().unwrap().parent().unwrap());
+    }
+
+    #[tokio::test]
     async fn insert_appends_without_touching_others() {
         let (store, path) = temp_store("append");
-        store.insert(&grant("bun", None)).await.unwrap();
-        store.insert(&grant("cargo", None)).await.unwrap();
+        store.insert_all(&[grant("bun", None)]).await.unwrap();
+        store.insert_all(&[grant("cargo", None)]).await.unwrap();
         let loaded = store.load_all().await.unwrap();
         assert!(loaded.contains(&grant("bun", None)));
         assert!(loaded.contains(&grant("cargo", None)));
@@ -180,8 +232,8 @@ mod tests {
     #[tokio::test]
     async fn remove_deletes_only_target() {
         let (store, path) = temp_store("remove");
-        store.insert(&grant("bun", None)).await.unwrap();
-        store.insert(&grant("cargo", None)).await.unwrap();
+        store.insert_all(&[grant("bun", None)]).await.unwrap();
+        store.insert_all(&[grant("cargo", None)]).await.unwrap();
 
         assert!(store.remove(&grant("bun", None)).await.unwrap());
         // Removing again reports false.
@@ -195,7 +247,7 @@ mod tests {
     #[tokio::test]
     async fn removing_last_grant_leaves_empty_allow_list() {
         let (store, path) = temp_store("remove-last");
-        store.insert(&grant("bun", None)).await.unwrap();
+        store.insert_all(&[grant("bun", None)]).await.unwrap();
         assert!(store.remove(&grant("bun", None)).await.unwrap());
         let raw: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
@@ -210,7 +262,7 @@ mod tests {
         tokio::fs::write(&path, "not json at all").await.unwrap();
         let store = PermissionStore::new(&path);
         assert!(store.load_all().await.is_err());
-        assert!(store.insert(&grant("bun", None)).await.is_err());
+        assert!(store.insert_all(&[grant("bun", None)]).await.is_err());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -233,7 +285,7 @@ mod tests {
         // JsonStore's lock is try-based, so contended writers retry.
         let insert_with_retry = |store: std::sync::Arc<PermissionStore>, grant: Grant| async move {
             loop {
-                match store.insert(&grant).await {
+                match store.insert_all(std::slice::from_ref(&grant)).await {
                     Ok(()) => return,
                     Err(_) => tokio::time::sleep(std::time::Duration::from_millis(5)).await,
                 }
