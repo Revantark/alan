@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Permission tests no longer delete the shared temp root on cleanup, fixing an intermittent `cargo test --workspace` failure where a concurrent test's directory was removed mid-run.
+
 ## 0.1.3 - 2026-09-30
 
 ### Added
