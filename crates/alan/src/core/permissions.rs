@@ -977,8 +977,9 @@ mod tests {
         ToolPolicy::new(Arc::new(PermissionStore::new(dir.join("permissions.json"))))
     }
 
+    /// The test's own directory, so cleanup never reaches a sibling's.
     fn temp_dir_of(path: &Path) -> PathBuf {
-        path.parent().unwrap().parent().unwrap().to_owned()
+        path.parent().unwrap().to_owned()
     }
 
     #[tokio::test]
