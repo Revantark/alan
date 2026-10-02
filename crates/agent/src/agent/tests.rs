@@ -1,5 +1,6 @@
 use super::*;
 use crate::AgentTool;
+use crate::Skill;
 use crate::session::{SessionManager, SessionRecord};
 use async_trait::async_trait;
 use llm::{ContentBlock, LlmApi, LlmError, LlmEvent, LlmResponse, ReasoningEffort, StopReason};
@@ -173,6 +174,101 @@ fn agent_with_manager(model: Model, manager: Arc<SessionManager>) -> Arc<Agent> 
 // ---------------------------------------------------------------------------
 // PromptBuilder API tests
 // ---------------------------------------------------------------------------
+
+/// A skill with the fields a prompt test cares about.
+fn skill(name: &str, instructions: &str) -> Skill {
+    Skill {
+        name: name.to_owned(),
+        description: format!("{name} description"),
+        instructions: instructions.to_owned(),
+        disable_model_invocation: false,
+        file_path: Some(format!("/tmp/{name}/SKILL.md")),
+    }
+}
+
+#[tokio::test]
+async fn an_attached_skill_is_inlined_into_the_user_message() {
+    let a = agent(model());
+    let deploy = skill("deploy", "Run the release checklist.");
+
+    a.ask(a.prompt().content("ship it").skills([deploy]))
+        .unwrap()
+        .into_response()
+        .await
+        .unwrap();
+
+    let text = first_user_text(&a).await;
+    assert!(text.starts_with("ship it"));
+    assert!(text.contains("<attached_skills>"));
+    assert!(text.contains("Run the release checklist."));
+    assert!(text.contains("<name>deploy</name>"));
+}
+
+#[tokio::test]
+async fn a_prompt_without_skills_is_unchanged() {
+    let a = agent(model());
+
+    // Guards the regression: attaching the feature must not alter a prompt
+    // that uses none of it. Covers both omitting `.skills` and passing an
+    // empty list, which are the two ways a caller says "no skills".
+    for prompt in [
+        a.prompt().content("plain question"),
+        a.prompt().content("plain question").skills(Vec::new()),
+    ] {
+        a.ask(prompt).unwrap().into_response().await.unwrap();
+    }
+
+    let messages = a.messages().await;
+    let texts: Vec<&str> = messages
+        .iter()
+        .filter_map(|message| match message {
+            AgentMessage::User { text, .. } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+
+    assert_eq!(texts, ["plain question", "plain question"]);
+}
+
+#[tokio::test]
+async fn a_steered_message_carries_its_own_skills() {
+    let a = agent(model());
+
+    // A steer and a prompt can name different skills; each gets its own.
+    a.steer(
+        "also #review".into(),
+        vec![skill("review", "Check the diff.")],
+    );
+    a.ask(
+        a.prompt()
+            .content("ship it")
+            .skills([skill("deploy", "Run the release checklist.")]),
+    )
+    .unwrap()
+    .into_response()
+    .await
+    .unwrap();
+
+    let messages = a.messages().await;
+    let texts: Vec<&str> = messages
+        .iter()
+        .filter_map(|message| match message {
+            AgentMessage::User { text, .. } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+
+    assert!(
+        texts
+            .iter()
+            .any(|text| text.contains("Run the release checklist.")),
+        "prompt skill missing from {texts:?}"
+    );
+    assert!(
+        texts.iter().any(|text| text.contains("Check the diff.")),
+        "steer skill missing from {texts:?}"
+    );
+}
 
 #[tokio::test]
 async fn prompt_owns_history_and_system_prompt() {
@@ -737,7 +833,7 @@ impl LlmApi for SteeringApi {
         match self.calls.fetch_add(1, Ordering::SeqCst) {
             0 => {
                 if let Some(agent) = self.agent.get() {
-                    agent.steer("steer: prefer ripgrep".into());
+                    agent.steer("steer: prefer ripgrep".into(), Vec::new());
                 }
                 Ok(Box::pin(futures_util::stream::iter([
                     Ok(LlmEvent::ToolCallDelta {
@@ -813,19 +909,22 @@ async fn steer_joins_the_next_llm_round_exactly_once() {
         )
     );
     // Slot drained: a later peek sees nothing.
-    assert_eq!(a.take_pending_steer(), None);
+    assert!(a.take_pending_steer().is_none());
 }
 
 #[tokio::test]
 async fn steer_replaces_previous_and_rejects_blank() {
     let a = agent(model());
-    a.steer("first".into());
-    a.steer("second".into());
-    assert_eq!(a.take_pending_steer(), Some("second".into()));
-    assert_eq!(a.take_pending_steer(), None);
+    a.steer("first".into(), Vec::new());
+    a.steer("second".into(), Vec::new());
+    assert_eq!(
+        a.take_pending_steer().map(|steer| steer.text),
+        Some("second".into())
+    );
+    assert!(a.take_pending_steer().is_none());
 
-    a.steer("   ".into());
-    assert_eq!(a.take_pending_steer(), None);
+    a.steer("   ".into(), Vec::new());
+    assert!(a.take_pending_steer().is_none());
 }
 
 #[tokio::test]

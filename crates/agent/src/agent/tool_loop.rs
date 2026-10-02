@@ -24,14 +24,17 @@ pub(super) async fn run_with(
     for _ in 0..agent.max_tool_rounds {
         cx.check_cancelled()?;
 
-        if let Some(text) = agent.take_pending_steer() {
+        if let Some(steer) = agent.take_pending_steer() {
             emit_event(
                 cx.events,
-                AgentEvent::SteerConsumed { text: text.clone() },
+                AgentEvent::SteerConsumed {
+                    text: steer.text.clone(),
+                },
                 cx.cancellation,
             )
             .await?;
-            persistence::append_context_message(agent, context, AgentMessage::user(text)).await?;
+            let message = prompt::build_steer_message(steer.text, steer.skills);
+            persistence::append_context_message(agent, context, message).await?;
         }
 
         let session_id = agent.session_id.lock().await.clone();

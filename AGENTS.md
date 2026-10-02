@@ -161,6 +161,25 @@ Keep UI simple. Avoid borders, unnecessary widgets, and premature abstraction.
 
 When converting assistant messages to LLM messages, omit `tool_calls` when list empty. OpenAI-compatible APIs reject `"tool_calls": []`.
 
+## Skills
+
+Alan loads skills from `<project>/.alan/skills/<name>/SKILL.md` and
+`<data dir>/skills/<name>/SKILL.md`, project first, so a project skill shadows
+a personal one of the same name. The directory name is what the user types:
+`#name` in the prompt attaches that skill's body to the message.
+
+Discovery lives in `core::skills`; the `agent` crate only formats skills it is
+given and never reads from disk. `core::completion::SkillCompleterBackend`
+offers names on `#`, and `PromptEditor` highlights tokens that match a loaded
+skill. The catalog loads once at startup, so editing a `SKILL.md` takes effect
+on the next launch.
+
+`core::skills::description_of` parses frontmatter by hand rather than with a
+YAML dependency. Only `description` is interpreted, inline or as a block
+scalar; other keys are skipped along with their indented children. A skill
+with no description is rejected, since the description is what the user
+chooses from.
+
 ## Code Style
 
 - Rust edition 2024.

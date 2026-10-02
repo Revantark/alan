@@ -1,6 +1,7 @@
 use super::event::{AgentEvent, emit_event};
 use super::{Agent, Mode};
 use crate::AgentMessage;
+use crate::Skill;
 use crate::agent::persistence;
 use crate::context::AgentContext;
 use crate::{AgentError, AgentStream};
@@ -39,6 +40,7 @@ pub(super) fn spawn_prompt_task(
     agent: &std::sync::Arc<Agent>,
     content: String,
     images: Vec<llm::ImageUrl>,
+    skills: Vec<Skill>,
     stream: bool,
 ) -> AgentStream {
     let (tx, receiver) = tokio::sync::mpsc::channel(super::AGENT_EVENT_CAPACITY);
@@ -49,7 +51,7 @@ pub(super) fn spawn_prompt_task(
         let mode = agent.mode();
         let review_intro = mode == Mode::Review && agent.take_review_intro();
         let plan_intro = mode == Mode::Plan && agent.take_plan_intro();
-        let user_msg = build_user_message(content, images, mode, review_intro, plan_intro);
+        let user_msg = build_user_message(content, images, skills, mode, review_intro, plan_intro);
         let mut partial = String::new();
         let mut cx = PromptCx {
             events: Some(&tx),
@@ -319,19 +321,41 @@ fn build_messages(context: &AgentContext) -> Vec<Message> {
 
 /// Build a user message, applying the plan-mode intro/reminder, the
 /// review-mode guidelines, and optional images.
+///
+/// Attached skills are appended after the message text, so the user's own
+/// wording stays at the front and the skill block reads as supporting material.
 pub(super) fn build_user_message(
     content: String,
     images: Vec<llm::ImageUrl>,
+    skills: Vec<Skill>,
     mode: Mode,
     review_intro: bool,
     plan_intro: bool,
 ) -> AgentMessage {
-    let text = prompt_content(content, mode, review_intro, plan_intro);
+    let text = with_skills(
+        prompt_content(content, mode, review_intro, plan_intro),
+        &skills,
+    );
     if images.is_empty() {
         AgentMessage::user(text)
     } else {
         AgentMessage::user_with_images(text, images)
     }
+}
+
+/// Append the attached-skill block to `text`, or leave it alone when no
+/// skills were attached.
+fn with_skills(text: String, skills: &[Skill]) -> String {
+    match crate::format_inline_skills(skills) {
+        Some(block) => format!("{text}\n\n{block}"),
+        None => text,
+    }
+}
+
+/// Build the user message for a steering message queued mid-run. A steer gets
+/// no plan/review treatment, only its attached skills.
+pub(super) fn build_steer_message(text: String, skills: Vec<Skill>) -> AgentMessage {
+    AgentMessage::user(with_skills(text, &skills))
 }
 
 fn prompt_content(

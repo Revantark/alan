@@ -6,7 +6,12 @@
 //! it without holding a separate copy of the prompt.
 
 use crate::core::completion::token;
-use crate::core::{Completer, CompletionRequest, ImageAttachment, PathsContext, SlashCommand};
+use crate::core::skills;
+use crate::core::{
+    Completer, CompletionRequest, CompletionStatus, ImageAttachment, PathsContext, SkillsContext,
+    SlashCommand,
+};
+use agent::Skill;
 use alan_tui::context::Context;
 use alan_tui::entity::Entity;
 use alan_tui::subscription::Subscription;
@@ -50,6 +55,10 @@ pub struct PromptEditor {
     /// Mirror of the controller's pending steering message. Up recalls it
     /// into the editor (taking priority over history recall); Esc cancels it.
     pending_steer: Option<String>,
+    /// Skills available to `#` completion. Names only — the bodies are
+    /// resolved from the catalog at submit time, so the text stays the single
+    /// source of truth for what is attached.
+    skills: Vec<String>,
 }
 
 impl PromptEditor {
@@ -74,11 +83,38 @@ impl PromptEditor {
                         paths: Vec::new(),
                         status: crate::core::CompletionStatus::Loading,
                     }),
+                )
+                .with_backend(
+                    Box::new(crate::core::SkillCompleterBackend),
+                    // The catalog loads asynchronously at startup, so the
+                    // popup opens empty until it lands.
+                    Box::new(SkillsContext {
+                        skills: Vec::new(),
+                        status: CompletionStatus::Loading,
+                    }),
                 ),
             history: VecDeque::new(),
             history_index: None,
             pending_steer: None,
+            skills: Vec::new(),
         }
+    }
+
+    /// Install the skill catalog loaded at startup, filling the `#` popup and
+    /// enabling `#name` highlighting.
+    pub fn set_skills(&mut self, skills: Vec<Skill>) {
+        let names: Vec<String> = skills.iter().map(|skill| skill.name.clone()).collect();
+        self.completer.set_context(
+            '#',
+            Box::new(SkillsContext {
+                skills,
+                status: CompletionStatus::Ready,
+            }),
+        );
+        // The popup takes ownership of the catalog, so highlighting works off
+        // the names rather than a second copy of the whole skill.
+        self.skills = names;
+        self.sync_highlights();
     }
 
     pub fn seed_history(&mut self, prompts: Vec<String>) {
@@ -141,11 +177,14 @@ impl PromptEditor {
 
     /// Replace the editor buffer with `text`, cursor at the end. Shared by
     /// history recall and steering recall.
+    ///
+    /// Highlights are re-derived because the buffer was replaced wholesale.
     fn load_text(&mut self, text: &str) {
         self.editor.clear();
         self.editor.move_cursor(CursorMove::Jump(0, 0));
         self.editor.insert_str(text);
         self.editor.move_cursor(CursorMove::End);
+        self.sync_highlights();
     }
 
     fn handle_event(
@@ -284,7 +323,7 @@ impl PromptEditor {
             }
             event => self.handle_input_and_refresh(event, cx),
         };
-        self.sync_command_highlight();
+        self.sync_highlights();
         status
     }
 
@@ -313,20 +352,58 @@ impl PromptEditor {
         }
     }
 
-    fn sync_command_highlight(&mut self) {
+    /// Recompute every custom highlight for the current buffer: a line that is
+    /// entirely a slash command, and each `#name` token naming a known skill.
+    /// Both are reapplied from scratch because `clear_custom_highlight` drops
+    /// them all, so ranges must be re-derived rather than adjusted.
+    fn sync_highlights(&mut self) {
         self.editor.clear_custom_highlight();
-        let [line] = self.editor.lines() else {
-            return;
+        let line = match self.editor.lines() {
+            [line] => line,
+            _ => return,
         };
-        if SlashCommand::parse(line).is_none() {
-            return;
+        // The ranges are collected before any highlight is pushed: the line
+        // borrows the editor immutably while `custom_highlight` needs it
+        // mutably.
+        let command = command_highlight_range(line);
+        let skills = self.skill_highlight_ranges(line);
+
+        if let Some(range) = command {
+            self.editor
+                .custom_highlight(range, Style::default().fg(theme::COMMAND_FG), 1);
         }
-        let end = line.find(char::is_whitespace).unwrap_or(line.len());
-        self.editor.custom_highlight(
-            ((0, 0), (0, end)),
-            Style::default().fg(theme::COMMAND_FG),
-            1,
-        );
+        for range in skills {
+            self.editor
+                .custom_highlight(range, Style::default().fg(theme::SKILL_FG), 1);
+        }
+    }
+
+    /// Character-column ranges of every `#name` token naming a loaded skill.
+    ///
+    /// Tokens matching nothing are left alone: they may be prose, an issue
+    /// reference, or a skill the user has not installed, and none of those
+    /// should look like an editor error.
+    fn skill_highlight_ranges(&self, line: &str) -> Vec<((usize, usize), (usize, usize))> {
+        if self.skills.is_empty() {
+            return Vec::new();
+        }
+
+        // Only the word boundaries are computed here; what counts as a token
+        // is `skills::token_name`, the same rule the resolver attaches by, so
+        // a highlighted token is always one that will attach.
+        word_offsets(line)
+            .into_iter()
+            .filter(|(_, word)| {
+                skills::token_name(word).is_some_and(|name| self.skills.iter().any(|s| s == name))
+            })
+            // Byte offsets become character columns, which is what
+            // `custom_highlight` takes.
+            .map(|(start, word)| {
+                let column = line[..start].chars().count();
+                let end = column + word.chars().count();
+                ((0, column), (0, end))
+            })
+            .collect()
     }
 
     /// Check the system clipboard for an image and add it as an attachment.
@@ -509,6 +586,35 @@ fn char_offset(line: &str, col: usize) -> usize {
         .nth(col)
         .map(|(i, _)| i)
         .unwrap_or(line.len())
+}
+
+/// The range covering a whole-line slash command, if the line is one.
+fn command_highlight_range(line: &str) -> Option<((usize, usize), (usize, usize))> {
+    SlashCommand::parse(line)?;
+    let end = line.find(char::is_whitespace).unwrap_or(line.len());
+    Some(((0, 0), (0, end)))
+}
+
+/// Every whitespace-delimited word in `line`, paired with its byte offset.
+/// Highlighting works in character columns while `str` works in bytes, so the
+/// caller converts.
+fn word_offsets(line: &str) -> Vec<(usize, &str)> {
+    let mut words = Vec::new();
+    let mut start = 0;
+    for (index, character) in line.char_indices() {
+        if !character.is_whitespace() {
+            continue;
+        }
+        if start < index {
+            words.push((start, &line[start..index]));
+        }
+        // Skip the whole whitespace run, so the next word starts after it.
+        start = index + character.len_utf8();
+    }
+    if start < line.len() {
+        words.push((start, &line[start..]));
+    }
+    words
 }
 
 fn refresh_completion(
@@ -771,6 +877,105 @@ fn is_multiline_enter(key: crossterm::event::KeyEvent) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An editor with a loaded catalog, for exercising highlighting.
+    fn editor_with_skills(names: &[&str]) -> PromptEditor {
+        let mut editor = PromptEditor::new();
+        editor.set_skills(
+            names
+                .iter()
+                .map(|name| Skill {
+                    name: (*name).to_owned(),
+                    description: String::new(),
+                    instructions: String::new(),
+                    disable_model_invocation: false,
+                    file_path: None,
+                })
+                .collect(),
+        );
+        editor
+    }
+
+    /// The character ranges the editor would highlight on `line`.
+    fn highlighted(editor: &PromptEditor, line: &str) -> Vec<((usize, usize), (usize, usize))> {
+        editor.skill_highlight_ranges(line)
+    }
+
+    #[test]
+    fn a_known_skill_token_is_highlighted() {
+        let editor = editor_with_skills(&["deploy"]);
+
+        assert_eq!(highlighted(&editor, "#deploy"), vec![((0, 0), (0, 7))]);
+    }
+
+    #[test]
+    fn an_unknown_token_is_left_alone() {
+        let editor = editor_with_skills(&["deploy"]);
+
+        assert!(highlighted(&editor, "#depoy").is_empty());
+        assert!(highlighted(&editor, "issue #42").is_empty());
+    }
+
+    #[test]
+    fn every_token_on_a_line_is_highlighted() {
+        let editor = editor_with_skills(&["deploy", "review"]);
+
+        assert_eq!(
+            highlighted(&editor, "#deploy then #review"),
+            vec![((0, 0), (0, 7)), ((0, 13), (0, 20))]
+        );
+    }
+
+    /// Columns are counted in characters, so a multi-byte character before the
+    /// token must not shift the range.
+    #[test]
+    fn a_multibyte_character_before_the_token_is_counted_in_characters() {
+        let editor = editor_with_skills(&["deploy"]);
+
+        assert_eq!(highlighted(&editor, "é #deploy"), vec![((0, 2), (0, 9))]);
+    }
+
+    /// Matches `skills::tokens`, so the popup and the resolver agree on what
+    /// a token is.
+    #[test]
+    fn punctuation_around_a_token_does_not_prevent_a_match() {
+        let editor = editor_with_skills(&["deploy"]);
+
+        for line in ["#deploy.", "(#deploy)", "use:#deploy,"] {
+            assert_eq!(
+                highlighted(&editor, line),
+                vec![((0, 0), (0, line.chars().count()))],
+                "failed for {line:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn no_skills_means_no_highlighting() {
+        let editor = PromptEditor::new();
+
+        assert!(highlighted(&editor, "#deploy").is_empty());
+    }
+
+    #[test]
+    fn a_whole_line_command_still_highlights() {
+        assert_eq!(command_highlight_range("/help"), Some(((0, 0), (0, 5))));
+        assert_eq!(
+            command_highlight_range("/effort high"),
+            Some(((0, 0), (0, 7)))
+        );
+        assert_eq!(command_highlight_range("use #deploy"), None);
+    }
+
+    #[test]
+    fn word_offsets_survive_repeated_and_multibyte_words() {
+        assert_eq!(
+            word_offsets("#deploy #deploy"),
+            vec![(0, "#deploy"), (8, "#deploy")]
+        );
+        assert_eq!(word_offsets("é #a é"), vec![(0, "é"), (3, "#a"), (6, "é")]);
+        assert_eq!(word_offsets("   "), Vec::<(usize, &str)>::new());
+    }
 
     #[test]
     fn slash_commands_are_excluded_from_history() {

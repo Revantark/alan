@@ -64,6 +64,12 @@ async fn main() -> anyhow::Result<()> {
     ));
 
     let current_dir = std::env::current_dir()?;
+    // Resolved before `current_dir` is handed to the agent, which takes
+    // ownership of it.
+    let skill_roots = vec![
+        core::skills::project_root(&current_dir),
+        core::skills::personal_root(&core::paths::alan_data_dir()?),
+    ];
     let policy = build_tool_policy(&settings, &current_dir)?;
     let permission_manager = AlanPermissionManager::init(policy.clone());
     let permission_handler = permission_manager.handler();
@@ -94,6 +100,7 @@ async fn main() -> anyhow::Result<()> {
         credential_store,
         permission_handler,
         policy,
+        skill_roots,
     ))
     .key_mapper(AlanKeyMapper)
     .tick_rate(Duration::from_millis(16))

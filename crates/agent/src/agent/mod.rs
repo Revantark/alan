@@ -13,7 +13,7 @@ mod tests;
 pub use permissions::{AllowAllPermissionManager, Permission, ToolPermissionManager};
 
 use crate::session::{Session, SessionManager};
-use crate::{AgentError, AgentMessage};
+use crate::{AgentError, AgentMessage, Skill};
 use llm::{ReasoningEffort, Usage};
 use providers::{Model, ModelInfo, ModelOptions};
 use std::path::PathBuf;
@@ -66,6 +66,14 @@ fn no_session_error(reason: &str) -> AgentError {
     })
 }
 
+/// A steering message queued while a run is in flight, plus the skills the
+/// user attached to it.
+#[derive(Debug, Clone)]
+pub struct PendingSteer {
+    pub text: String,
+    pub skills: Vec<Skill>,
+}
+
 pub struct Agent {
     pub(super) model: Mutex<Model>,
     pub(super) context: Mutex<crate::context::AgentContext>,
@@ -82,7 +90,7 @@ pub struct Agent {
     /// Working directory reported in the conversation's first message.
     pub(super) working_directory: Option<PathBuf>,
     pub(super) model_info: Mutex<ModelInfo>,
-    steering: std::sync::Mutex<Option<String>>,
+    steering: std::sync::Mutex<Option<PendingSteer>>,
     /// Reasoning effort configured on the bound model, cached as an atomic so
     /// the status line can read it synchronously from the UI thread without
     /// contending with the model mutex. 0 means `None`; otherwise the variant
@@ -136,22 +144,26 @@ impl Agent {
             self,
             content,
             builder.images,
+            builder.skills,
             builder.stream,
         ))
     }
 
     /// Queue `text` as a steering message for the in-flight run.
-    pub fn steer(&self, text: String) {
-        *self.steering.lock().expect("steering lock") = Some(text);
+    ///
+    /// `skills` are attached to the steered message exactly as they are to an
+    /// initial prompt, so a `#name` typed mid-run resolves the same way.
+    pub fn steer(&self, text: String, skills: Vec<Skill>) {
+        *self.steering.lock().expect("steering lock") = Some(PendingSteer { text, skills });
     }
 
     /// Take the pending steering message, if any.
-    pub fn take_pending_steer(&self) -> Option<String> {
+    pub fn take_pending_steer(&self) -> Option<PendingSteer> {
         self.steering
             .lock()
             .expect("steering lock")
             .take()
-            .filter(|text| !text.trim().is_empty())
+            .filter(|steer| !steer.text.trim().is_empty())
     }
 
     /// Reset to a brand-new, empty session in place.

@@ -1,3 +1,4 @@
+use crate::Skill;
 use llm::ImageUrl;
 
 /// Builder for constructing an agent prompt request.
@@ -20,6 +21,7 @@ use llm::ImageUrl;
 pub struct PromptBuilder {
     pub(super) content: Option<String>,
     pub(super) images: Vec<ImageUrl>,
+    pub(super) skills: Vec<Skill>,
     pub(super) stream: bool,
 }
 
@@ -28,6 +30,7 @@ impl PromptBuilder {
         Self {
             content: None,
             images: Vec::new(),
+            skills: Vec::new(),
             stream: false,
         }
     }
@@ -41,6 +44,15 @@ impl PromptBuilder {
     /// Add one or more images to the prompt.
     pub fn images(mut self, images: impl IntoIterator<Item = ImageUrl>) -> Self {
         self.images.extend(images);
+        self
+    }
+
+    /// Attach skills whose full instructions are appended to this prompt. The
+    /// application resolves the `#name` tokens it wrote and hands them over
+    /// here; unlike the skills advertised by the system prompt, these are
+    /// inlined in full, because the user already chose them.
+    pub fn skills(mut self, skills: impl IntoIterator<Item = Skill>) -> Self {
+        self.skills.extend(skills);
         self
     }
 

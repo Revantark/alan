@@ -14,6 +14,7 @@ A minimal coding agent in your terminal.
 - [Usage](#usage)
 - [Permissions](#permissions)
 - [Local models](#local-models)
+- [Skills](#skills)
 - [Configuration and data locations](#configuration-and-data-locations)
 - [Building from source](#building-from-source)
 - [Requirements](#requirements)
@@ -26,8 +27,7 @@ A minimal coding agent in your terminal.
 - **Steering** — queue a message mid-run and the agent picks it up without waiting for the response to finish.
 - **Plan and review modes** — cycle through them with `Shift+Tab` when you want the agent to think before it acts.
 - **Local models** — point Alan at any OpenAI-compatible endpoint, no API key required.
-
-> Skills support is implemented at the agent level but not exposed in the UI yet — coming soon.
+- **Skills** — type `#name` in the prompt to attach a skill's full instructions to that message.
 
 ## Installation
 
@@ -128,12 +128,52 @@ Alan stores everything under `~/.alan/` by default:
 - `settings.json` — your current settings and active-profile marker.
 - `profiles.json` — saved named model/reasoning/web settings profiles.
 - `sessions/` — conversation history (append-only JSONL, one file per session).
+- `skills/` — personal skills, available in every project.
 - `logs/` — daily rotating logs.
 
 All of these live in the data directory (`~/.alan` by default). `ALAN_HOME` selects the *parent* of that directory, so `ALAN_HOME=/tmp/x` puts everything in `/tmp/x/.alan`. Two other environment variables are useful:
 
 - `ALAN_LOG_DIR` — override the log directory.
 - `ALAN_MODEL` — override the default model on startup, e.g. `ALAN_MODEL=openai/gpt-4o-mini alan`.
+
+## Skills
+
+A skill is a folder of instructions for a specific kind of task. Type `#name`
+in the prompt to attach one to that message; Alan completes the name as you
+type and highlights the token.
+
+Skills live in two places:
+
+- `<project>/.alan/skills/<name>/SKILL.md` — project skills. Commit these;
+  everyone who clones the repo gets them, like `AGENTS.md`.
+- `~/.alan/skills/<name>/SKILL.md` — personal skills, shared across projects.
+
+A project skill shadows a personal skill with the same name. The folder name is
+what `#name` resolves against.
+
+Each skill is a `SKILL.md` with YAML frontmatter and a body:
+
+```markdown
+---
+description: Use when shipping a release. Covers the checklist and tag format.
+---
+Run `scripts/check.sh`, then open a release PR. Never push to `main`.
+```
+
+`description` is the only frontmatter key Alan reads, and it is required —
+it is the text you pick the skill from, so write it as "use when…". Every
+other key is ignored. The folder name, not a `name:` key, is what `#name`
+resolves against.
+
+The body is appended in full to the message you attached it to, rather than
+being advertised and fetched on demand. That suits manual invocation: you have
+already decided the skill is relevant, so there is nothing to save by deferring
+the read. The tradeoff is that the body is re-sent on every turn of that
+message's session, so keep skills focused.
+
+Two things worth knowing: skills are read once at startup, so editing a
+`SKILL.md` takes effect on the next launch; and a `#name` that matches no skill
+is left as ordinary text.
 
 ## Building from source
 
