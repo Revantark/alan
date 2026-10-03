@@ -175,7 +175,9 @@ The body is appended in full to the message you attached it to, rather than
 being advertised and fetched on demand. That suits manual invocation: you have
 already decided the skill is relevant, so there is nothing to save by deferring
 the read. The tradeoff is that the body is re-sent on every turn of that
-message's session, so keep skills focused.
+message's session, so keep skills focused. A body over 10,000 characters is
+skipped at load — the skill does not appear in the `#` popup, and the skip is
+logged — because partial instructions would be followed as if complete.
 
 Two things worth knowing: skills are read once at startup, so editing a
 `SKILL.md` takes effect on the next launch; and a `#name` that matches no skill

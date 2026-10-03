@@ -181,7 +181,9 @@ on the next launch.
 YAML dependency. Only `description` is interpreted, inline or as a block
 scalar; other keys are skipped along with their indented children. A skill
 with no description is rejected, since the description is what the user
-chooses from.
+chooses from. A body over `MAX_INSTRUCTIONS` (10,000 chars) is rejected
+whole — partial instructions would be followed as if complete — and the
+skip is `tracing::warn!`-logged.
 
 ## Code Style
 

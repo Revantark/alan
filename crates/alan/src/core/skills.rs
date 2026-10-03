@@ -16,10 +16,9 @@
 use agent::Skill;
 use std::path::{Path, PathBuf};
 
-/// Maximum characters of instructions kept per skill. Past this the skill is
-/// truncated, so one runaway file cannot dominate the context window of every
-/// prompt it is attached to.
-const MAX_INSTRUCTIONS: usize = 8_000;
+/// Maximum characters of instructions kept per skill. A skill whose
+/// body is longer is skipped entirely.
+const MAX_INSTRUCTIONS: usize = 10_000;
 
 /// Maximum characters kept for a description. Descriptions are popup text, not
 /// instructions, so a long one is a sign of a malformed file.
@@ -117,10 +116,18 @@ fn load_one(dir: &Path, name: &str) -> Result<Skill, String> {
         .filter(|value| !value.trim().is_empty())
         .ok_or_else(|| format!("missing or empty {DESCRIPTION_KEY}"))?;
 
+    let instructions = body_of(&raw).trim();
+    if instructions.chars().count() > MAX_INSTRUCTIONS {
+        return Err(format!(
+            "body exceeds {MAX_INSTRUCTIONS} characters ({} total)",
+            instructions.chars().count()
+        ));
+    }
+
     Ok(Skill {
         name: name.to_owned(),
         description: truncate(&collapse_whitespace(&description), MAX_DESCRIPTION),
-        instructions: truncate(body_of(&raw).trim(), MAX_INSTRUCTIONS),
+        instructions: instructions.to_owned(),
         // Alan attaches a skill only when the user types `#name`, and never
         // registers the catalog with the agent, so nothing reads this flag.
         disable_model_invocation: false,
@@ -546,14 +553,16 @@ mod tests {
     }
 
     #[test]
-    fn an_oversized_body_is_truncated() {
+    fn an_oversized_body_is_skipped() {
         let root = temp_root("long-body");
         let long = "y".repeat(MAX_INSTRUCTIONS + 100);
         write_skill(&root, "big", &skill_file("desc", &long));
+        write_skill(&root, "small", &skill_file("desc", "body"));
 
         let skills = load_all(std::slice::from_ref(&root));
 
-        assert_eq!(skills[0].instructions.chars().count(), MAX_INSTRUCTIONS + 1);
+        assert_eq!(skills.len(), 1);
+        assert_eq!(skills[0].name, "small");
 
         std::fs::remove_dir_all(&root).ok();
     }
