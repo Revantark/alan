@@ -163,9 +163,12 @@ When converting assistant messages to LLM messages, omit `tool_calls` when list 
 
 ## Skills
 
-Alan loads skills from `<project>/.alan/skills/<name>/SKILL.md` and
-`<data dir>/skills/<name>/SKILL.md`, project first, so a project skill shadows
-a personal one of the same name. The directory name is what the user types:
+Alan loads skills from `<project>/.alan/skills/<name>/SKILL.md`,
+`<data dir>/skills/<name>/SKILL.md`, and `<home>/.agents/skills/<name>/SKILL.md`,
+in that order, so an earlier root shadows a later one of the same name. The
+last of these is the cross-tool convention other agent tools read, which keeps
+a shared skill from being Alan-only; it is scanned last so a skill written for
+Alan specifically still wins. The directory name is what the user types:
 `#name` in the prompt attaches that skill's body to the message.
 
 Discovery lives in `core::skills`; the `agent` crate only formats skills it is

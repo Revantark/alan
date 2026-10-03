@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- Skills: type `#name` in the prompt to attach a skill's full instructions to that message. Skills load from `<project>/.alan/skills/<name>/SKILL.md` and `<data dir>/skills/<name>/SKILL.md`, complete on `#`, and highlight when they name a loaded skill.
+- Skills: type `#name` in the prompt to attach a skill's full instructions to that message. Skills load from `<project>/.alan/skills/<name>/SKILL.md`, `<data dir>/skills/<name>/SKILL.md`, and `~/.agents/skills/<name>/SKILL.md`, complete on `#`, and highlight when they name a loaded skill. `~/.agents/skills` is the directory shared with other agent tools, so a skill written once is not locked to Alan; it is scanned last, so a project or `~/.alan` skill of the same name still wins.
 
 ### Fixed
 

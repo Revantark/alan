@@ -142,14 +142,20 @@ A skill is a folder of instructions for a specific kind of task. Type `#name`
 in the prompt to attach one to that message; Alan completes the name as you
 type and highlights the token.
 
-Skills live in two places:
+Skills live in three places, scanned in this order:
 
 - `<project>/.alan/skills/<name>/SKILL.md` — project skills. Commit these;
   everyone who clones the repo gets them, like `AGENTS.md`.
 - `~/.alan/skills/<name>/SKILL.md` — personal skills, shared across projects.
+- `~/.agents/skills/<name>/SKILL.md` — skills shared with other agent tools
+  (Claude Code, Zed, Codex, and others), so one you write for them is not
+  locked to Alan.
 
-A project skill shadows a personal skill with the same name. The folder name is
-what `#name` resolves against.
+An earlier entry shadows a later one with the same name, so a project skill
+beats a personal one, and both beat the shared copy. `~/.agents/skills` is
+read last so that a skill you maintain for Alan specifically is not silently
+replaced by a same-named copy from another tool. The folder name is what
+`#name` resolves against.
 
 Each skill is a `SKILL.md` with YAML frontmatter and a body:
 

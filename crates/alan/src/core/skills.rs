@@ -6,7 +6,8 @@
 //! frontmatter `name:` is not read at all.
 //!
 //! Roots are scanned project first, so `<cwd>/.alan/skills` shadows
-//! `<data dir>/skills`. The whole catalog is loaded once at startup.
+//! `<data dir>/skills`, which in turn shadows the cross-tool
+//! `<home>/.agents/skills`. The whole catalog is loaded once at startup.
 //!
 //! Only the frontmatter `description` is interpreted, and it is parsed by hand
 //! rather than with a YAML dependency: the field is either an inline value or
@@ -27,6 +28,9 @@ const MAX_DESCRIPTION: usize = 1_024;
 /// Directory holding skills inside a root.
 const SKILLS_DIR: &str = "skills";
 
+/// Home-relative directory holding skills shared between agent tools.
+const SHARED_DIR: &str = ".agents";
+
 /// The only frontmatter key Alan reads. It is the text the user chooses the
 /// skill from, so a skill without one is not usable.
 const DESCRIPTION_KEY: &str = "description";
@@ -39,6 +43,16 @@ pub fn project_root(cwd: &Path) -> PathBuf {
 /// The personal skills root: `<data dir>/skills`.
 pub fn personal_root(data_dir: &Path) -> PathBuf {
     data_dir.join(SKILLS_DIR)
+}
+
+/// The cross-tool skills root under the home directory: `<home>/.agents/skills`.
+///
+/// This is the shared convention other agent tools use for skills they all read
+/// from one place, so a skill written once here is not locked to Alan. It is
+/// scanned after [`personal_root`], which keeps skills written for Alan itself
+/// authoritative over the shared copy.
+pub fn shared_root(home: &Path) -> PathBuf {
+    home.join(SHARED_DIR).join(SKILLS_DIR)
 }
 
 /// Load every skill under `roots`, in order, keeping the first occurrence of
@@ -456,6 +470,48 @@ mod tests {
 
         std::fs::remove_dir_all(&project).ok();
         std::fs::remove_dir_all(&personal).ok();
+    }
+
+    #[test]
+    fn the_shared_root_is_under_the_agents_directory() {
+        assert_eq!(
+            shared_root(Path::new("/home/dev")),
+            PathBuf::from("/home/dev/.agents/skills")
+        );
+    }
+
+    #[test]
+    fn the_shared_root_is_scanned_last_and_shadowed() {
+        let home = temp_root("home");
+        let cwd = home.join("project");
+        // The three roots under test, built the way `main` builds them.
+        let project_skills = project_root(&cwd);
+        let personal_skills = personal_root(&home.join(".alan"));
+        let shared_skills = shared_root(&home);
+
+        write_skill(&project_skills, "deploy", &skill_file("project", "body"));
+        write_skill(&personal_skills, "deploy", &skill_file("personal", "body"));
+        write_skill(&shared_skills, "deploy", &skill_file("shared", "body"));
+        write_skill(
+            &shared_skills,
+            "no-ai-slop",
+            &skill_file("shared only", "body"),
+        );
+
+        let skills = load_all(&[project_skills, personal_skills, shared_skills]);
+
+        assert_eq!(skills.len(), 2);
+        assert_eq!(
+            skills
+                .iter()
+                .find(|s| s.name == "deploy")
+                .unwrap()
+                .description,
+            "project"
+        );
+        assert!(skills.iter().any(|s| s.name == "no-ai-slop"));
+
+        std::fs::remove_dir_all(&home).ok();
     }
 
     #[test]
