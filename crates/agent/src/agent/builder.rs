@@ -1,7 +1,6 @@
 use crate::session::{Session, SessionError, SessionManager};
 use crate::{
-    AgentError, AgentTool, Skill, agent::permissions::AllowAllPermissionManager,
-    context::AgentContext,
+    AgentError, AgentTool, agent::permissions::AllowAllPermissionManager, context::AgentContext,
 };
 use llm::Usage;
 use providers::Model;
@@ -66,7 +65,6 @@ Be concise and useful. State assumptions when they matter. For implementation ta
 pub struct AgentBuilder {
     pub(super) model: Model,
     pub(super) system_prompt: Option<String>,
-    pub(super) skills: Vec<Skill>,
     pub(super) tools: Vec<AgentTool>,
     pub(super) max_tool_rounds: usize,
     pub(super) session_manager: Option<Arc<SessionManager>>,
@@ -97,11 +95,6 @@ impl AgentBuilder {
             "with_directory requires an absolute path, got {path:?}"
         );
         self.working_directory = Some(path);
-        self
-    }
-
-    pub fn skill(mut self, skill: Skill) -> Self {
-        self.skills.push(skill);
         self
     }
 
@@ -161,7 +154,7 @@ impl AgentBuilder {
             active_session = Some(session);
         }
 
-        let mut context = AgentContext::new(self.system_prompt, self.skills, self.tools);
+        let mut context = AgentContext::new(self.system_prompt, self.tools);
         context.hydrate(messages, usage);
 
         let info = self.model.info().clone();

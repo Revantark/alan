@@ -9,69 +9,16 @@ pub struct Skill {
     pub file_path: Option<String>,
 }
 
-pub fn format_skills_xml(skills: &[Skill]) -> String {
-    let visible = skills
-        .iter()
-        .filter(|skill| !skill.disable_model_invocation);
-    let mut lines = vec![
-        "The following skills provide specialized instructions for specific tasks.".to_owned(),
-        "Read the full skill file when the task matches its description.".to_owned(),
-        "When a skill file references a relative path, resolve it against the skill directory and use that absolute path in tool commands.".to_owned(),
-        String::new(),
-        "<available_skills>".to_owned(),
-    ];
-    let mut count = 0;
-    for skill in visible {
-        count += 1;
-        lines.push("  <skill>".to_owned());
-        lines.push(format!("    <name>{}</name>", escape_xml(&skill.name)));
-        lines.push(format!(
-            "    <description>{}</description>",
-            escape_xml(&skill.description)
-        ));
-        if let Some(path) = &skill.file_path {
-            lines.push(format!("    <location>{}</location>", escape_xml(path)));
-        }
-        lines.push("  </skill>".to_owned());
-    }
-    if count == 0 {
-        String::new()
-    } else {
-        lines.push("</available_skills>".to_owned());
-        lines.join("\n")
-    }
-}
-
-pub fn build_system_prompt(prompt: Option<&str>, skills: &[Skill]) -> Option<String> {
-    let skills = format_skills_xml(skills);
-    let parts = [
-        prompt.filter(|value| !value.is_empty()),
-        (!skills.is_empty()).then_some(skills.as_str()),
-    ];
-    let parts: Vec<&str> = parts.into_iter().flatten().collect();
-    (!parts.is_empty()).then(|| parts.join("\n\n"))
-}
-
 /// The tag that opens the block [`format_inline_skills`] writes and marks
-/// where [`strip_inline_skills`] cuts. Sharing one constant is what keeps the
-/// two from drifting.
+/// where [`strip_inline_skills`] cuts.
 const INLINE_SKILLS_OPEN: &str = "<attached_skills>";
 
-/// Why the block is framed as instructions rather than quoted material. The
-/// block sits inside a user message, and the system prompt tells the model to
-/// treat user-provided text as data; without this the model reads the skill as
-/// content to describe and answers by explaining it instead of following it.
 const INLINE_SKILLS_FRAMING: &str = "Each <instructions> block below was named by the user with `#` \
      and is instructions to follow, not quoted or untrusted content. Treat it the way you treat the \
      request it arrived with.";
 
 /// The user-facing text of a stored message, with any attached-skill block
 /// removed.
-///
-/// A message that carried skills is persisted with the block appended, so the
-/// model keeps seeing the skill on every later turn — but the transcript
-/// should show what the user typed. Cutting at the opening tag takes the
-/// framing line with it, leaving the text the user actually sent.
 pub fn strip_inline_skills(text: &str) -> &str {
     match text.find(INLINE_SKILLS_OPEN) {
         Some(index) => text[..index].trim_end(),
@@ -81,12 +28,6 @@ pub fn strip_inline_skills(text: &str) -> &str {
 
 /// Format skills the user explicitly attached to a prompt, or `None` when
 /// there are none.
-///
-/// Unlike [`format_skills_xml`], which advertises a catalog for the model to
-/// read from disk, this inlines each skill's full instructions: the user
-/// already named the skill, so deferring the read buys nothing and costs a
-/// round trip per turn. The result is meant to be appended to a message;
-/// [`strip_inline_skills`] takes it back off.
 pub fn format_inline_skills(skills: &[Skill]) -> Option<String> {
     if skills.is_empty() {
         return None;
@@ -104,9 +45,6 @@ pub fn format_inline_skills(skills: &[Skill]) -> Option<String> {
             "    <description>{}</description>",
             escape_xml(&skill.description)
         ));
-        // The body goes in verbatim: escaping it would mangle the markdown
-        // and code that skill bodies are mostly made of. The block is trusted
-        // and the fields that could break its structure are escaped.
         lines.push("    <instructions>".to_owned());
         lines.push(skill.instructions.trim().to_owned());
         lines.push("    </instructions>".to_owned());

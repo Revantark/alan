@@ -12,6 +12,7 @@ mod tests;
 
 pub use permissions::{AllowAllPermissionManager, Permission, ToolPermissionManager};
 
+use crate::context::AgentContext;
 use crate::session::{Session, SessionManager};
 use crate::{AgentError, AgentMessage, Skill};
 use llm::{ReasoningEffort, Usage};
@@ -76,7 +77,7 @@ pub struct PendingSteer {
 
 pub struct Agent {
     pub(super) model: Mutex<Model>,
-    pub(super) context: Mutex<crate::context::AgentContext>,
+    pub(super) context: Mutex<AgentContext>,
     pub(super) mode: AtomicU8,
     pub(super) review_intro_pending: AtomicBool,
     pub(super) plan_intro_pending: AtomicBool,
@@ -106,7 +107,6 @@ impl Agent {
         AgentBuilder {
             model,
             system_prompt: None,
-            skills: Vec::new(),
             tools: Vec::new(),
             max_tool_rounds: 200,
             session_manager: None,
@@ -150,9 +150,6 @@ impl Agent {
     }
 
     /// Queue `text` as a steering message for the in-flight run.
-    ///
-    /// `skills` are attached to the steered message exactly as they are to an
-    /// initial prompt, so a `#name` typed mid-run resolves the same way.
     pub fn steer(&self, text: String, skills: Vec<Skill>) {
         *self.steering.lock().expect("steering lock") = Some(PendingSteer { text, skills });
     }

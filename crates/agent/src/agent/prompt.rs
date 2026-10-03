@@ -11,6 +11,7 @@ use llm::{
     RequestOptions, ToolSpec, Usage,
 };
 use providers::{Model, ModelError};
+use std::sync::Arc;
 use tokio::sync::{mpsc::Sender, watch};
 
 /// Mutable state threaded through the entire prompt lifecycle.
@@ -37,7 +38,7 @@ impl<'a> PromptCx<'a> {
 }
 
 pub(super) fn spawn_prompt_task(
-    agent: &std::sync::Arc<Agent>,
+    agent: &Arc<Agent>,
     content: String,
     images: Vec<llm::ImageUrl>,
     skills: Vec<Skill>,
@@ -310,7 +311,7 @@ fn aggregate_usage(current: &Usage, round: &Usage) -> Usage {
 }
 
 fn build_messages(context: &AgentContext) -> Vec<Message> {
-    let system = crate::build_system_prompt(context.system_prompt.as_deref(), &context.skills);
+    let system = context.system_prompt.clone();
     let mut messages = Vec::with_capacity(context.messages.len() + usize::from(system.is_some()));
     if let Some(system) = system {
         messages.push(Message::system(system));
@@ -320,10 +321,7 @@ fn build_messages(context: &AgentContext) -> Vec<Message> {
 }
 
 /// Build a user message, applying the plan-mode intro/reminder, the
-/// review-mode guidelines, and optional images.
-///
-/// Attached skills are appended after the message text, so the user's own
-/// wording stays at the front and the skill block reads as supporting material.
+/// review-mode guidelines, skills and optional images.
 pub(super) fn build_user_message(
     content: String,
     images: Vec<llm::ImageUrl>,
