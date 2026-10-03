@@ -70,7 +70,7 @@ async fn main() -> anyhow::Result<()> {
     let alan_home = core::paths::alan_home()?;
     let skill_roots = vec![
         core::skills::project_root(&current_dir),
-        core::skills::personal_root(&alan_home.join(".alan")),
+        core::skills::personal_root(&core::paths::alan_data_dir()?),
         core::skills::shared_root(&alan_home),
     ];
     let policy = build_tool_policy(&settings, &current_dir)?;

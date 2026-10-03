@@ -358,15 +358,17 @@ impl PromptEditor {
     /// them all, so ranges must be re-derived rather than adjusted.
     fn sync_highlights(&mut self) {
         self.editor.clear_custom_highlight();
-        let line = match self.editor.lines() {
-            [line] => line,
-            _ => return,
+
+        let (command, skills) = {
+            let lines = self.editor.lines();
+            let command = lines.first().and_then(|line| command_highlight_range(line));
+            let skills: Vec<((usize, usize), (usize, usize))> = lines
+                .iter()
+                .enumerate()
+                .flat_map(|(row, line)| self.skill_highlight_ranges(row, line))
+                .collect();
+            (command, skills)
         };
-        // The ranges are collected before any highlight is pushed: the line
-        // borrows the editor immutably while `custom_highlight` needs it
-        // mutably.
-        let command = command_highlight_range(line);
-        let skills = self.skill_highlight_ranges(line);
 
         if let Some(range) = command {
             self.editor
@@ -378,12 +380,17 @@ impl PromptEditor {
         }
     }
 
-    /// Character-column ranges of every `#name` token naming a loaded skill.
+    /// Character-column ranges of every `#name` token naming a loaded skill
+    /// on line `row`.
     ///
     /// Tokens matching nothing are left alone: they may be prose, an issue
     /// reference, or a skill the user has not installed, and none of those
     /// should look like an editor error.
-    fn skill_highlight_ranges(&self, line: &str) -> Vec<((usize, usize), (usize, usize))> {
+    fn skill_highlight_ranges(
+        &self,
+        row: usize,
+        line: &str,
+    ) -> Vec<((usize, usize), (usize, usize))> {
         if self.skills.is_empty() {
             return Vec::new();
         }
@@ -401,7 +408,7 @@ impl PromptEditor {
             .map(|(start, word)| {
                 let column = line[..start].chars().count();
                 let end = column + word.chars().count();
-                ((0, column), (0, end))
+                ((row, column), (row, end))
             })
             .collect()
     }
@@ -888,17 +895,16 @@ mod tests {
                     name: (*name).to_owned(),
                     description: String::new(),
                     instructions: String::new(),
-                    disable_model_invocation: false,
-                    file_path: None,
                 })
                 .collect(),
         );
         editor
     }
 
-    /// The character ranges the editor would highlight on `line`.
+    /// The character ranges the editor would highlight on `line`,
+    /// which is the buffer's only line.
     fn highlighted(editor: &PromptEditor, line: &str) -> Vec<((usize, usize), (usize, usize))> {
-        editor.skill_highlight_ranges(line)
+        editor.skill_highlight_ranges(0, line)
     }
 
     #[test]

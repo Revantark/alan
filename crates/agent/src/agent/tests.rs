@@ -181,8 +181,6 @@ fn skill(name: &str, instructions: &str) -> Skill {
         name: name.to_owned(),
         description: format!("{name} description"),
         instructions: instructions.to_owned(),
-        disable_model_invocation: false,
-        file_path: Some(format!("/tmp/{name}/SKILL.md")),
     }
 }
 

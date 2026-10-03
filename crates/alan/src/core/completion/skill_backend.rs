@@ -64,8 +64,6 @@ mod tests {
             name: name.to_owned(),
             description: description.to_owned(),
             instructions: String::new(),
-            disable_model_invocation: false,
-            file_path: None,
         }
     }
 

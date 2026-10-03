@@ -5,8 +5,6 @@ pub struct Skill {
     pub name: String,
     pub description: String,
     pub instructions: String,
-    pub disable_model_invocation: bool,
-    pub file_path: Option<String>,
 }
 
 /// The tag that opens the block [`format_inline_skills`] writes and marks
@@ -72,8 +70,6 @@ mod tests {
             name: name.to_owned(),
             description: format!("{name} description"),
             instructions: instructions.to_owned(),
-            disable_model_invocation: false,
-            file_path: Some(format!("/tmp/{name}/SKILL.md")),
         }
     }
 

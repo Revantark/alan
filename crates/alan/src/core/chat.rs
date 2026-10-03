@@ -597,8 +597,6 @@ mod tests {
             name: "deploy".to_owned(),
             description: "Use when shipping".to_owned(),
             instructions: "Run the checklist.".to_owned(),
-            disable_model_invocation: false,
-            file_path: None,
         };
         let stored = format!(
             "ship it #deploy\n\n{}",

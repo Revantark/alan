@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 
 /// Maximum characters of instructions kept per skill. A skill whose
 /// body is longer is skipped entirely.
-const MAX_INSTRUCTIONS: usize = 10_000;
+const MAX_INSTRUCTIONS: usize = 25_000;
 
 /// Maximum characters kept for a description. Descriptions are popup text, not
 /// instructions, so a long one is a sign of a malformed file.
@@ -128,10 +128,6 @@ fn load_one(dir: &Path, name: &str) -> Result<Skill, String> {
         name: name.to_owned(),
         description: truncate(&collapse_whitespace(&description), MAX_DESCRIPTION),
         instructions: instructions.to_owned(),
-        // Alan attaches a skill only when the user types `#name`, and never
-        // registers the catalog with the agent, so nothing reads this flag.
-        disable_model_invocation: false,
-        file_path: Some(path.to_string_lossy().into_owned()),
     })
 }
 
@@ -391,13 +387,6 @@ mod tests {
         assert_eq!(skills[0].name, "deploy");
         assert_eq!(skills[0].description, "Use when shipping");
         assert_eq!(skills[0].instructions, "Run the release checklist.");
-        assert!(
-            skills[0]
-                .file_path
-                .as_ref()
-                .unwrap()
-                .ends_with("deploy/SKILL.md")
-        );
 
         std::fs::remove_dir_all(&root).ok();
     }
@@ -573,15 +562,11 @@ mod tests {
                 name: "deploy".into(),
                 description: "Use when shipping".into(),
                 instructions: "release checklist".into(),
-                disable_model_invocation: false,
-                file_path: None,
             },
             Skill {
                 name: "review".into(),
                 description: "Use when reviewing".into(),
                 instructions: "review rules".into(),
-                disable_model_invocation: false,
-                file_path: None,
             },
         ]
     }
