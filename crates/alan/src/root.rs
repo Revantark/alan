@@ -17,6 +17,7 @@ use alan_tui::{ActionStatus, Component, RenderContext, Subscription};
 use crossterm::event::Event;
 use ratatui::Frame;
 use ratatui::layout::Rect;
+use std::path::PathBuf;
 
 use crate::core::ImageAttachment;
 use crate::core::chat::ChatController;
@@ -66,6 +67,8 @@ pub struct AlanRoot {
     permission_handler: PermissionHandler,
     /// Tool-permission policy, shared with the permission manager.
     policy: ToolPolicy,
+    /// Roots scanned for skills, handed to the chat view at `init`.
+    skill_roots: Vec<PathBuf>,
     /// The chat controller to install on `init`; taken when inserted.
     chat_source: Option<ChatController>,
     header: Option<Entity<Header>>,
@@ -82,12 +85,14 @@ impl AlanRoot {
         credentials: Arc<dyn CredentialStore>,
         permission_handler: PermissionHandler,
         policy: ToolPolicy,
+        skill_roots: Vec<PathBuf>,
     ) -> Self {
         Self {
             providers,
             credentials,
             permission_handler,
             policy,
+            skill_roots,
             chat_source: Some(chat),
             header: None,
             view: None,
@@ -116,6 +121,7 @@ impl Component<AlanAction> for AlanRoot {
             Arc::clone(&self.providers),
             self.permission_handler.clone(),
             self.policy.clone(),
+            self.skill_roots.clone(),
         ));
         self.view = Some(view);
         self.login_subscription = Some(

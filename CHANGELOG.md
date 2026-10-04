@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Skills: type `#name` in the prompt to attach a skill's full instructions to that
+  message. Skills load from `<project>/.alan/skills/<name>/SKILL.md`,
+  `<data dir>/skills/<name>/SKILL.md`, and `~/.agents/skills/<name>/SKILL.md`,
+  complete on `#`, and highlight when they name a loaded skill. A skill whose body
+  exceeds 25,000 characters is skipped rather than truncated.
+
 ### Fixed
 
 - Permission tests no longer delete the shared temp root on cleanup, fixing an intermittent `cargo test --workspace` failure where a concurrent test's directory was removed mid-run.

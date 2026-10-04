@@ -21,6 +21,8 @@ pub const PROMPT_GUTTER: u16 = 4;
 pub const SELECTION_BG: Color = Color::Rgb(58, 76, 107);
 pub const SELECTION_FG: Color = Color::White;
 pub const COMMAND_FG: Color = Color::Cyan;
+/// A `#skill` token in the editor that names a known skill.
+pub const SKILL_FG: Color = Color::LightYellow;
 pub const ATTACHMENT_BG: Color = Color::Rgb(50, 46, 28);
 pub const ATTACHMENT_FG: Color = Color::Rgb(200, 190, 140);
 /// Steering-prompt band: queued prompt shown above the attachments.

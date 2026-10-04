@@ -8,11 +8,14 @@ mod command_backend;
 mod matcher;
 mod path_backend;
 pub(crate) mod scan;
+mod skill_backend;
 pub(crate) mod token;
 
 use crate::core::SlashCommand;
+use agent::Skill;
 pub use command_backend::CommandCompleterBackend;
 pub use path_backend::PathCompleterBackend;
+pub use skill_backend::SkillCompleterBackend;
 use std::collections::HashMap;
 use std::ops::Range;
 
@@ -87,6 +90,14 @@ pub struct PathsContext {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CommandsContext {
     pub commands: Vec<SlashCommand>,
+}
+
+/// Data the skill backend needs. Written once by the startup skill load via
+/// `cx.update` on the completer entity.
+#[derive(Debug, Clone)]
+pub struct SkillsContext {
+    pub skills: Vec<Skill>,
+    pub status: CompletionStatus,
 }
 
 /// A context-bearing backend for the v2 [`Completer`]. Each backend owns its

@@ -1,4 +1,4 @@
-use crate::{AgentTool, Skill};
+use crate::AgentTool;
 use llm::{ContentPart, LlmResponse, Message, ToolCall, Usage};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -182,7 +182,6 @@ impl AgentMessage {
 
 pub struct AgentContext {
     pub system_prompt: Option<String>,
-    pub skills: Vec<Skill>,
     pub messages: Vec<AgentMessage>,
     pub usage: Usage,
     pub tools: Vec<AgentTool>,
@@ -190,7 +189,7 @@ pub struct AgentContext {
 }
 
 impl AgentContext {
-    pub fn new(system_prompt: Option<String>, skills: Vec<Skill>, tools: Vec<AgentTool>) -> Self {
+    pub fn new(system_prompt: Option<String>, tools: Vec<AgentTool>) -> Self {
         let mut tool_indexes = HashMap::with_capacity(tools.len());
         for (index, tool) in tools.iter().enumerate() {
             tool_indexes
@@ -200,7 +199,6 @@ impl AgentContext {
 
         Self {
             system_prompt,
-            skills,
             messages: Vec::new(),
             usage: Usage::default(),
             tools,
@@ -211,7 +209,7 @@ impl AgentContext {
     /// Hydrate the persistent portions (`messages`, `usage`) of this
     /// runtime context from a session.
     ///
-    /// Runtime-only state (tools, system prompt, skills, tool indexes)
+    /// Runtime-only state (tools, system prompt, tool indexes)
     /// remains untouched; a resumed agent must rebuild it from the current
     /// application configuration.
     pub fn hydrate(&mut self, messages: Vec<AgentMessage>, usage: Usage) {
