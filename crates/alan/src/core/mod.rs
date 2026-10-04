@@ -12,6 +12,7 @@ pub mod server_tools;
 pub mod settings;
 pub mod skills;
 pub mod store;
+pub mod update;
 
 pub use action::ImageAttachment;
 pub use chat::{Activity, ChatController, Entry};

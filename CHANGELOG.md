@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Shell installer now also installs `alan-update`, a standalone self-updater; the in-app update notice points at it instead of the installer command.
 - Skills: type `#name` in the prompt to attach a skill's full instructions to that
   message. Skills load from `<project>/.alan/skills/<name>/SKILL.md`,
   `<data dir>/skills/<name>/SKILL.md`, and `~/.agents/skills/<name>/SKILL.md`,

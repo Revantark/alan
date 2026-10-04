@@ -404,6 +404,12 @@ impl Component<AlanAction> for ChatView {
             return ActionStatus::Handled;
         }
 
+        if let AlanAction::NotifyUser(text) = action {
+            self.controller.push_info(text.to_owned());
+            cx.notify();
+            return ActionStatus::Handled;
+        }
+
         if matches!(action, AlanAction::ToggleProfiles) {
             if !profiles::reject_while_busy(self) {
                 profiles::open_profile_picker(cx, profiles::ProfileOperation::Apply);

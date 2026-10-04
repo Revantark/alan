@@ -51,11 +51,19 @@ Not supported yet.
 
 ### Updating
 
-Run the same installer command again to install the latest release. To see the installed version:
+The installer also installs `alan-update` next to `alan` (in Cargo's binary directory, `~/.cargo/bin`). Run it to check for a newer release and install it:
+
+```bash
+alan-update
+```
+
+It takes no arguments and needs no confirmation. To see the installed version:
 
 ```bash
 alan --version
 ```
+
+`alan-update` only exists for installations that ran the installer after it started shipping the updater. If you installed earlier, or you built from source, run the installer command once to get it. Alan also shows an update notice on startup when a newer release is published.
 
 ## Providers
 

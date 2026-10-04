@@ -12,6 +12,7 @@ use crate::core::permissions::ToolPolicy;
 use crate::core::permissions_store;
 use crate::core::server_tools::server_tools;
 use crate::core::settings::{DEFAULT_MODEL, PatchSettings, Settings, SettingsStore};
+use crate::core::update::current_version;
 use crate::core::{ChatController, SlashCommand};
 use crate::keymap::AlanKeyMapper;
 use crate::local_model_store::JsonLocalModelStore;
@@ -34,7 +35,7 @@ async fn main() -> anyhow::Result<()> {
     let is_save = has_flag("--save");
 
     if has_flag("--version") {
-        println!("alan-init {}", env!("CARGO_PKG_VERSION"));
+        println!("alan-init {}", current_version());
         return Ok(());
     }
 
