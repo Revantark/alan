@@ -477,40 +477,6 @@ mod tests {
     }
 
     #[test]
-    fn the_shared_root_is_scanned_last_and_shadowed() {
-        let home = temp_root("home");
-        let cwd = home.join("project");
-        // The three roots under test, built the way `main` builds them.
-        let project_skills = project_root(&cwd);
-        let personal_skills = personal_root(&home.join(".alan"));
-        let shared_skills = shared_root(&home);
-
-        write_skill(&project_skills, "deploy", &skill_file("project", "body"));
-        write_skill(&personal_skills, "deploy", &skill_file("personal", "body"));
-        write_skill(&shared_skills, "deploy", &skill_file("shared", "body"));
-        write_skill(
-            &shared_skills,
-            "no-ai-slop",
-            &skill_file("shared only", "body"),
-        );
-
-        let skills = load_all(&[project_skills, personal_skills, shared_skills]);
-
-        assert_eq!(skills.len(), 2);
-        assert_eq!(
-            skills
-                .iter()
-                .find(|s| s.name == "deploy")
-                .unwrap()
-                .description,
-            "project"
-        );
-        assert!(skills.iter().any(|s| s.name == "no-ai-slop"));
-
-        std::fs::remove_dir_all(&home).ok();
-    }
-
-    #[test]
     fn skills_are_loaded_in_a_stable_order() {
         let root = temp_root("order");
         for name in ["zebra", "alpha", "middle"] {

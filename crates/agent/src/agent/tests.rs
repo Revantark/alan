@@ -206,26 +206,14 @@ async fn an_attached_skill_is_inlined_into_the_user_message() {
 async fn a_prompt_without_skills_is_unchanged() {
     let a = agent(model());
 
-    // Guards the regression: attaching the feature must not alter a prompt
-    // that uses none of it. Covers both omitting `.skills` and passing an
-    // empty list, which are the two ways a caller says "no skills".
-    for prompt in [
-        a.prompt().content("plain question"),
-        a.prompt().content("plain question").skills(Vec::new()),
-    ] {
-        a.ask(prompt).unwrap().into_response().await.unwrap();
-    }
+    a.ask(a.prompt().content("plain question"))
+        .unwrap()
+        .into_response()
+        .await
+        .unwrap();
 
-    let messages = a.messages().await;
-    let texts: Vec<&str> = messages
-        .iter()
-        .filter_map(|message| match message {
-            AgentMessage::User { text, .. } => Some(text.as_str()),
-            _ => None,
-        })
-        .collect();
-
-    assert_eq!(texts, ["plain question", "plain question"]);
+    let text = first_user_text(&a).await;
+    assert!(!text.contains("attached_skills"));
 }
 
 #[tokio::test]

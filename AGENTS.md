@@ -176,7 +176,7 @@ catalog loads once at startup.
 
 `core::skills::description_of` parses frontmatter by hand rather than with
 a YAML dependency; only `description` is interpreted, and a skill with none
-is rejected. A body over `MAX_INSTRUCTIONS` (10,000 chars) is rejected
+is rejected. A body over `MAX_INSTRUCTIONS` (25,000 chars) is rejected
 whole — partial instructions would be followed as if complete — and the
 skip is `tracing::warn!`-logged.
 

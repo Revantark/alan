@@ -166,7 +166,7 @@ Run `scripts/check.sh`, then open a release PR. Never push to `main`.
 `description` is the only frontmatter key Alan reads, and it is required —
 it is the text you pick the skill from, so write it as "use when…". The body
 is appended in full to the message you attached it to, so keep skills focused.
-A body over 10,000 characters is skipped at load — the skill does not appear
+A body over 25,000 characters is skipped at load — the skill does not appear
 in the `#` popup, and the skip is logged.
 
 Skills are read once at startup, so editing a `SKILL.md` takes effect on the

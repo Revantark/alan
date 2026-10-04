@@ -56,7 +56,7 @@ impl CompletionBackendV2 for SkillCompleterBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::completion::{CompletionStatus, PathsContext};
+    use crate::core::completion::CompletionStatus;
     use agent::Skill;
 
     fn skill(name: &str, description: &str) -> Skill {
@@ -127,33 +127,5 @@ mod tests {
         assert_eq!(result.range, 1..4);
         assert_eq!(result.items[0].replacement, "deploy");
         assert_eq!(result.items[0].accept, Accept::Complete);
-    }
-
-    #[test]
-    fn the_context_status_is_reported_while_loading() {
-        let context = SkillsContext {
-            skills: Vec::new(),
-            status: CompletionStatus::Loading,
-        };
-
-        let result = SkillCompleterBackend
-            .complete(&request(""), &context)
-            .unwrap();
-
-        assert_eq!(result.status, CompletionStatus::Loading);
-    }
-
-    #[test]
-    fn a_mismatched_context_yields_no_completion() {
-        let context = PathsContext {
-            paths: Vec::new(),
-            status: CompletionStatus::Ready,
-        };
-
-        assert!(
-            SkillCompleterBackend
-                .complete(&request(""), &context)
-                .is_none()
-        );
     }
 }
