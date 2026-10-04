@@ -13,10 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   message. Skills load from `<project>/.alan/skills/<name>/SKILL.md`,
   `<data dir>/skills/<name>/SKILL.md`, and `~/.agents/skills/<name>/SKILL.md`,
   complete on `#`, and highlight when they name a loaded skill. A skill whose body
-  exceeds 10,000 characters is skipped rather than truncated. `~/.agents/skills` is
-  the directory shared with other agent tools, so a skill written once is not locked
-  to Alan; it is scanned last, so a project or `~/.alan` skill of the same name
-  still wins.
+  exceeds 10,000 characters is skipped rather than truncated.
 
 ### Fixed
 

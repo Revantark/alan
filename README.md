@@ -151,11 +151,8 @@ Skills live in three places, scanned in this order:
   (Claude Code, Zed, Codex, and others), so one you write for them is not
   locked to Alan.
 
-An earlier entry shadows a later one with the same name, so a project skill
-beats a personal one, and both beat the shared copy. `~/.agents/skills` is
-read last so that a skill you maintain for Alan specifically is not silently
-replaced by a same-named copy from another tool. The folder name is what
-`#name` resolves against.
+An earlier entry shadows a later one with the same name. The folder name is
+what `#name` resolves against.
 
 Each skill is a `SKILL.md` with YAML frontmatter and a body:
 
@@ -167,21 +164,13 @@ Run `scripts/check.sh`, then open a release PR. Never push to `main`.
 ```
 
 `description` is the only frontmatter key Alan reads, and it is required —
-it is the text you pick the skill from, so write it as "use when…". Every
-other key is ignored. The folder name, not a `name:` key, is what `#name`
-resolves against.
+it is the text you pick the skill from, so write it as "use when…". The body
+is appended in full to the message you attached it to, so keep skills focused.
+A body over 10,000 characters is skipped at load — the skill does not appear
+in the `#` popup, and the skip is logged.
 
-The body is appended in full to the message you attached it to, rather than
-being advertised and fetched on demand. That suits manual invocation: you have
-already decided the skill is relevant, so there is nothing to save by deferring
-the read. The tradeoff is that the body is re-sent on every turn of that
-message's session, so keep skills focused. A body over 10,000 characters is
-skipped at load — the skill does not appear in the `#` popup, and the skip is
-logged — because partial instructions would be followed as if complete.
-
-Two things worth knowing: skills are read once at startup, so editing a
-`SKILL.md` takes effect on the next launch; and a `#name` that matches no skill
-is left as ordinary text.
+Skills are read once at startup, so editing a `SKILL.md` takes effect on the
+next launch; a `#name` that matches no skill is left as ordinary text.
 
 ## Building from source
 

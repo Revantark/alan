@@ -163,25 +163,20 @@ When converting assistant messages to LLM messages, omit `tool_calls` when list 
 
 ## Skills
 
-Alan loads skills from `<project>/.alan/skills/<name>/SKILL.md`,
-`<data dir>/skills/<name>/SKILL.md`, and `<home>/.agents/skills/<name>/SKILL.md`,
-in that order, so an earlier root shadows a later one of the same name. The
-last of these is the cross-tool convention other agent tools read, which keeps
-a shared skill from being Alan-only; it is scanned last so a skill written for
-Alan specifically still wins. The directory name is what the user types:
-`#name` in the prompt attaches that skill's body to the message.
+Skills load from `<project>/.alan/skills/<name>/SKILL.md`,
+`<data dir>/skills/<name>/SKILL.md`, and
+`<home>/.agents/skills/<name>/SKILL.md`, in that order, so an earlier
+root shadows a later one of the same name. Typing `#name` in the prompt
+attaches that skill's body to the message.
 
-Discovery lives in `core::skills`; the `agent` crate only formats skills it is
-given and never reads from disk. `core::completion::SkillCompleterBackend`
-offers names on `#`, and `PromptEditor` highlights tokens that match a loaded
-skill. The catalog loads once at startup, so editing a `SKILL.md` takes effect
-on the next launch.
+Discovery lives in `core::skills`; the `agent` crate only formats skills
+it is given and never reads from disk. `core::completion::SkillCompleterBackend`
+offers names on `#`, and `PromptEditor` highlights matching tokens. The
+catalog loads once at startup.
 
-`core::skills::description_of` parses frontmatter by hand rather than with a
-YAML dependency. Only `description` is interpreted, inline or as a block
-scalar; other keys are skipped along with their indented children. A skill
-with no description is rejected, since the description is what the user
-chooses from. A body over `MAX_INSTRUCTIONS` (10,000 chars) is rejected
+`core::skills::description_of` parses frontmatter by hand rather than with
+a YAML dependency; only `description` is interpreted, and a skill with none
+is rejected. A body over `MAX_INSTRUCTIONS` (10,000 chars) is rejected
 whole — partial instructions would be followed as if complete — and the
 skip is `tracing::warn!`-logged.
 
