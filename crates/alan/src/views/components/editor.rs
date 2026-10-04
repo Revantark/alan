@@ -86,8 +86,6 @@ impl PromptEditor {
                 )
                 .with_backend(
                     Box::new(crate::core::SkillCompleterBackend),
-                    // The catalog loads asynchronously at startup, so the
-                    // popup opens empty until it lands.
                     Box::new(SkillsContext {
                         skills: Vec::new(),
                         status: CompletionStatus::Loading,
@@ -100,8 +98,6 @@ impl PromptEditor {
         }
     }
 
-    /// Install the skill catalog loaded at startup, filling the `#` popup and
-    /// enabling `#name` highlighting.
     pub fn set_skills(&mut self, skills: Vec<Skill>) {
         let names: Vec<String> = skills.iter().map(|skill| skill.name.clone()).collect();
         self.completer.set_context(
@@ -111,8 +107,6 @@ impl PromptEditor {
                 status: CompletionStatus::Ready,
             }),
         );
-        // The popup takes ownership of the catalog, so highlighting works off
-        // the names rather than a second copy of the whole skill.
         self.skills = names;
         self.sync_highlights();
     }
@@ -177,8 +171,6 @@ impl PromptEditor {
 
     /// Replace the editor buffer with `text`, cursor at the end. Shared by
     /// history recall and steering recall.
-    ///
-    /// Highlights are re-derived because the buffer was replaced wholesale.
     fn load_text(&mut self, text: &str) {
         self.editor.clear();
         self.editor.move_cursor(CursorMove::Jump(0, 0));
@@ -352,10 +344,6 @@ impl PromptEditor {
         }
     }
 
-    /// Recompute every custom highlight for the current buffer: a line that is
-    /// entirely a slash command, and each `#name` token naming a known skill.
-    /// Both are reapplied from scratch because `clear_custom_highlight` drops
-    /// them all, so ranges must be re-derived rather than adjusted.
     fn sync_highlights(&mut self) {
         self.editor.clear_custom_highlight();
 
@@ -380,12 +368,6 @@ impl PromptEditor {
         }
     }
 
-    /// Character-column ranges of every `#name` token naming a loaded skill
-    /// on line `row`.
-    ///
-    /// Tokens matching nothing are left alone: they may be prose, an issue
-    /// reference, or a skill the user has not installed, and none of those
-    /// should look like an editor error.
     fn skill_highlight_ranges(
         &self,
         row: usize,
@@ -395,9 +377,6 @@ impl PromptEditor {
             return Vec::new();
         }
 
-        // Only the word boundaries are computed here; what counts as a token
-        // is `skills::token_name`, the same rule the resolver attaches by, so
-        // a highlighted token is always one that will attach.
         word_offsets(line)
             .into_iter()
             .filter(|(_, word)| {

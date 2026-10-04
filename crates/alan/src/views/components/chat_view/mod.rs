@@ -82,11 +82,7 @@ pub struct ChatView {
     /// Keeps render cadence independent of the token rate.
     stream_repaint: Option<Subscription>,
     fork_in_flight: bool,
-    /// The skill catalog, loaded from `skill_roots` once at startup. Held
-    /// here because a submission resolves its `#name` tokens against it, and
-    /// the editor gets its own copy for completion and highlighting.
     skills: Vec<agent::Skill>,
-    /// Roots scanned for skills, passed through from `main`.
     skill_roots: Vec<PathBuf>,
 }
 
@@ -264,8 +260,7 @@ impl ChatView {
         }
 
         let text = submission.text.trim().to_owned();
-        // Resolved from the text rather than tracked as editor state, so
-        // deleting a `#name` token before sending drops the skill with it.
+
         let skills = resolve(&self.skills, &text);
 
         if controller.is_busy() {
@@ -340,16 +335,10 @@ impl ChatView {
     }
 
     /// Load the skill catalog off the UI thread and hand it to the editor.
-    ///
-    /// Loading up front is what keeps submission cheap: a prompt resolves its
-    /// `#name` tokens against an in-memory catalog, so no disk access happens
-    /// while the user is waiting.
     fn fetch_skills(&mut self, cx: &mut Context<'_, Self, AlanAction>) {
         let roots = std::mem::take(&mut self.skill_roots);
 
         let _ = cx.spawn(
-            // The scan is blocking file I/O, so it runs on the blocking pool
-            // rather than occupying a runtime worker for the duration.
             async move {
                 let skills = tokio::task::spawn_blocking(move || skills::load_all(&roots))
                     .await
@@ -604,9 +593,6 @@ fn handle_agent_stream_event(
                             if let Some(editor) = view.editor {
                                 cx.dispatch(editor, &AlanAction::SetSteering(None));
                             }
-                            // The steer never reached the in-flight run, so it
-                            // is submitted as a fresh prompt carrying the
-                            // skills it was queued with.
                             if let Some(stream) =
                                 view.controller.submit(steer.text, Vec::new(), steer.skills)
                             {

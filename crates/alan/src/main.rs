@@ -64,15 +64,14 @@ async fn main() -> anyhow::Result<()> {
     ));
 
     let current_dir = std::env::current_dir()?;
-    // Resolved before `current_dir` is handed to the agent, which takes
-    // ownership of it. Ordered so that a project skill shadows a personal one,
-    // and both shadow the cross-tool shared directory.
+
     let alan_home = core::paths::alan_home()?;
     let skill_roots = vec![
         core::skills::project_root(&current_dir),
         core::skills::personal_root(&core::paths::alan_data_dir()?),
         core::skills::shared_root(&alan_home),
     ];
+
     let policy = build_tool_policy(&settings, &current_dir)?;
     let permission_manager = AlanPermissionManager::init(policy.clone());
     let permission_handler = permission_manager.handler();

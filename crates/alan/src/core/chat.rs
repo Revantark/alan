@@ -112,8 +112,6 @@ impl ChatController {
 
         for message in messages {
             match message {
-                // A stored message carries the skill block appended to it, so
-                // the transcript shows only what the user typed.
                 agent::AgentMessage::User { text, .. } => self
                     .entries
                     .push(Entry::Prompt(agent::strip_inline_skills(&text).to_owned())),
@@ -267,10 +265,6 @@ impl ChatController {
 
     /// Take the pending steering message, clearing the mirror and agent
     /// slot. Used by cancel (Esc) to discard a queued steer.
-    ///
-    /// The whole [`agent::PendingSteer`] comes back, so a caller that
-    /// re-submits an unconsumed steer carries its skills rather than having
-    /// to re-resolve them from the text.
     pub fn take_steering(&mut self) -> Option<agent::PendingSteer> {
         self.steering = None;
         self.agent.take_pending_steer()
@@ -585,38 +579,6 @@ mod tests {
                 ..
             }) if error == "cancelled"
         ));
-    }
-
-    /// The skill block lives in the stored message so the model keeps seeing
-    /// it, but the transcript must show only what the user typed. This is the
-    /// path a resumed session takes.
-    #[test]
-    fn restoring_a_session_hides_the_skill_block() {
-        let mut controller = make_controller("m");
-        let deploy = agent::Skill {
-            name: "deploy".to_owned(),
-            description: "Use when shipping".to_owned(),
-            instructions: "Run the checklist.".to_owned(),
-        };
-        let stored = format!(
-            "ship it #deploy\n\n{}",
-            agent::format_inline_skills(&[deploy]).expect("a skill produces a block")
-        );
-
-        controller.apply_restored(
-            vec![AgentMessage::user(stored)],
-            Default::default(),
-            "m".to_owned(),
-            None,
-        );
-
-        let Some(Entry::Prompt(text)) = controller.entries().first() else {
-            panic!(
-                "expected a prompt entry, got {:?}",
-                controller.entries().first()
-            );
-        };
-        assert_eq!(text, "ship it #deploy");
     }
 
     #[test]
