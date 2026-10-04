@@ -6,13 +6,13 @@ mod skill;
 mod tool;
 
 pub use agent::{
-    Agent, AgentBuilder, AgentEvent, AgentStream, AllowAllPermissionManager, Mode, Permission,
-    PromptBuilder, ToolPermissionManager,
+    Agent, AgentBuilder, AgentEvent, AgentStream, AllowAllPermissionManager, Mode, PendingSteer,
+    Permission, PromptBuilder, ToolPermissionManager,
 };
 pub use context::AgentMessage;
 pub use error::AgentError;
 pub use session::{
     SESSION_SCHEMA_VERSION, Session, SessionError, SessionManager, SessionRecord, pwd_key,
 };
-pub use skill::{Skill, build_system_prompt, format_skills_xml};
+pub use skill::{Skill, format_inline_skills, strip_inline_skills};
 pub use tool::{AgentTool, default_tools};

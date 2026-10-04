@@ -17,6 +17,7 @@ use crate::core::permissions::PermissionHandler;
 use crate::core::permissions::PermissionRequest;
 use crate::core::permissions::{Answer, Policy, ToolPolicy};
 use crate::core::settings::{self, PatchSettings, SettingsStore};
+use crate::core::skills;
 use crate::core::{Activity, Entry};
 use crate::root::{AlanAction, PromptSubmission};
 use crate::views::theme;
@@ -33,6 +34,7 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::Style;
 use ratatui::widgets::Paragraph;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use super::chat_history::ChatHistory;
@@ -80,6 +82,8 @@ pub struct ChatView {
     /// Keeps render cadence independent of the token rate.
     stream_repaint: Option<Subscription>,
     fork_in_flight: bool,
+    skills: Vec<agent::Skill>,
+    skill_roots: Vec<PathBuf>,
 }
 
 impl ChatView {
@@ -88,6 +92,7 @@ impl ChatView {
         providers: Arc<ProviderRegistry>,
         permission_handler: PermissionHandler,
         policy: ToolPolicy,
+        skill_roots: Vec<PathBuf>,
     ) -> Self {
         Self {
             controller,
@@ -104,6 +109,8 @@ impl ChatView {
             prompt: None,
             stream_repaint: None,
             fork_in_flight: false,
+            skills: Vec::new(),
+            skill_roots,
         }
     }
 
@@ -254,8 +261,10 @@ impl ChatView {
 
         let text = submission.text.trim().to_owned();
 
+        let skills = resolve(&self.skills, &text);
+
         if controller.is_busy() {
-            controller.steer(text.clone());
+            controller.steer(text.clone(), skills);
             if self.editor.is_some() {
                 cx.spawn(
                     async move { Ok::<String, alan_tui::TaskError>(text) },
@@ -272,7 +281,7 @@ impl ChatView {
             return;
         }
 
-        let Some(stream) = controller.submit(text, submission.images) else {
+        let Some(stream) = controller.submit(text, submission.images, skills) else {
             return;
         };
         // A new prompt pins the transcript to the newest content.
@@ -325,6 +334,28 @@ impl ChatView {
         );
     }
 
+    /// Load the skill catalog off the UI thread and hand it to the editor.
+    fn fetch_skills(&mut self, cx: &mut Context<'_, Self, AlanAction>) {
+        let roots = std::mem::take(&mut self.skill_roots);
+
+        let _ = cx.spawn(
+            async move {
+                let skills = tokio::task::spawn_blocking(move || skills::load_all(&roots))
+                    .await
+                    .unwrap_or_default();
+                Ok::<Vec<agent::Skill>, TaskError>(skills)
+            },
+            |result, view, cx| {
+                view.skills = result.unwrap_or_default();
+                if let Some(editor) = view.editor {
+                    let skills = view.skills.clone();
+                    cx.update(editor, |editor| editor.set_skills(skills));
+                }
+                cx.notify();
+            },
+        );
+    }
+
     fn subscribe_permissions(&mut self, cx: &mut Context<'_, Self, AlanAction>) {
         self.permission_subscription = Some(cx.subscribe_stream(
             self.permission_handler.subscribe(),
@@ -361,6 +392,7 @@ impl Component<AlanAction> for ChatView {
         self.permission = Some(cx.insert(permissions::PermissionPrompt::new()));
         self.subscribe_permissions(cx);
         self.fetch_models(cx);
+        self.fetch_skills(cx);
     }
 
     fn handle_action(
@@ -530,6 +562,14 @@ fn agent_events(
     })
 }
 
+/// The skills `text`'s `#name` tokens name, owned.
+fn resolve(catalog: &[agent::Skill], text: &str) -> Vec<agent::Skill> {
+    skills::resolve_skills(catalog, text)
+        .into_iter()
+        .cloned()
+        .collect()
+}
+
 /// Shared event handler for agent-stream subscriptions. Both the initial
 /// submit path and the steer auto-submit path wire their subscriptions
 /// through this function so the `Closed` → auto-submit logic is not
@@ -554,12 +594,14 @@ fn handle_agent_stream_event(
                     async { Ok::<(), alan_tui::TaskError>(()) },
                     |result, view, cx| {
                         if result.is_ok()
-                            && let Some(text) = view.controller.take_steering()
+                            && let Some(steer) = view.controller.take_steering()
                         {
                             if let Some(editor) = view.editor {
                                 cx.dispatch(editor, &AlanAction::SetSteering(None));
                             }
-                            if let Some(stream) = view.controller.submit(text, Vec::new()) {
+                            if let Some(stream) =
+                                view.controller.submit(steer.text, Vec::new(), steer.skills)
+                            {
                                 if let Some(chat) = view.chat {
                                     cx.update(chat, |c| c.stick_to_bottom());
                                 }

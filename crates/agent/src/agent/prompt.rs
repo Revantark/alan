@@ -1,6 +1,7 @@
 use super::event::{AgentEvent, emit_event};
 use super::{Agent, Mode};
 use crate::AgentMessage;
+use crate::Skill;
 use crate::agent::persistence;
 use crate::context::AgentContext;
 use crate::{AgentError, AgentStream};
@@ -10,6 +11,7 @@ use llm::{
     RequestOptions, ToolSpec, Usage,
 };
 use providers::{Model, ModelError};
+use std::sync::Arc;
 use tokio::sync::{mpsc::Sender, watch};
 
 /// Mutable state threaded through the entire prompt lifecycle.
@@ -36,9 +38,10 @@ impl<'a> PromptCx<'a> {
 }
 
 pub(super) fn spawn_prompt_task(
-    agent: &std::sync::Arc<Agent>,
+    agent: &Arc<Agent>,
     content: String,
     images: Vec<llm::ImageUrl>,
+    skills: Vec<Skill>,
     stream: bool,
 ) -> AgentStream {
     let (tx, receiver) = tokio::sync::mpsc::channel(super::AGENT_EVENT_CAPACITY);
@@ -49,7 +52,7 @@ pub(super) fn spawn_prompt_task(
         let mode = agent.mode();
         let review_intro = mode == Mode::Review && agent.take_review_intro();
         let plan_intro = mode == Mode::Plan && agent.take_plan_intro();
-        let user_msg = build_user_message(content, images, mode, review_intro, plan_intro);
+        let user_msg = build_user_message(content, images, skills, mode, review_intro, plan_intro);
         let mut partial = String::new();
         let mut cx = PromptCx {
             events: Some(&tx),
@@ -308,7 +311,7 @@ fn aggregate_usage(current: &Usage, round: &Usage) -> Usage {
 }
 
 fn build_messages(context: &AgentContext) -> Vec<Message> {
-    let system = crate::build_system_prompt(context.system_prompt.as_deref(), &context.skills);
+    let system = context.system_prompt.clone();
     let mut messages = Vec::with_capacity(context.messages.len() + usize::from(system.is_some()));
     if let Some(system) = system {
         messages.push(Message::system(system));
@@ -318,20 +321,35 @@ fn build_messages(context: &AgentContext) -> Vec<Message> {
 }
 
 /// Build a user message, applying the plan-mode intro/reminder, the
-/// review-mode guidelines, and optional images.
+/// review-mode guidelines, skills and optional images.
 pub(super) fn build_user_message(
     content: String,
     images: Vec<llm::ImageUrl>,
+    skills: Vec<Skill>,
     mode: Mode,
     review_intro: bool,
     plan_intro: bool,
 ) -> AgentMessage {
-    let text = prompt_content(content, mode, review_intro, plan_intro);
+    let text = with_skills(
+        prompt_content(content, mode, review_intro, plan_intro),
+        &skills,
+    );
     if images.is_empty() {
         AgentMessage::user(text)
     } else {
         AgentMessage::user_with_images(text, images)
     }
+}
+
+fn with_skills(text: String, skills: &[Skill]) -> String {
+    match crate::format_inline_skills(skills) {
+        Some(block) => format!("{text}\n\n{block}"),
+        None => text,
+    }
+}
+
+pub(super) fn build_steer_message(text: String, skills: Vec<Skill>) -> AgentMessage {
+    AgentMessage::user(with_skills(text, &skills))
 }
 
 fn prompt_content(
