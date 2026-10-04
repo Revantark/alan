@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Shell installer now also installs `alan-update`, a standalone self-updater; the in-app update notice points at it instead of the installer command.
+
 ### Fixed
 
 - Permission tests no longer delete the shared temp root on cleanup, fixing an intermittent `cargo test --workspace` failure where a concurrent test's directory was removed mid-run.

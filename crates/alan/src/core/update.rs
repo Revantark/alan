@@ -4,7 +4,8 @@ use serde::Deserialize;
 use std::time::Duration;
 
 const LATEST_RELEASE_URL: &str = "https://api.github.com/repos/Revantark/alan/releases/latest";
-const INSTALL_COMMAND: &str = "curl -fsSL https://github.com/Revantark/alan/releases/latest/download/alan-installer.sh | bash";
+
+const UPDATE_COMMAND: &str = "alan-update";
 
 /// Fetch the latest published release version (leading `v` stripped).
 pub async fn fetch_latest_version() -> anyhow::Result<String> {
@@ -45,7 +46,7 @@ pub fn update_notice(latest: &str) -> Option<String> {
         return None;
     }
     Some(format!(
-        "alan v{latest} is available (current: {}) — update with: {INSTALL_COMMAND}",
+        "alan v{latest} is available (current: {}) — update with: {UPDATE_COMMAND}",
         current_version()
     ))
 }
