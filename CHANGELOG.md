@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `/local add` fetches the server's `/models` once URL and key are filled and opens a searchable picker. If detection fails it shows why (e.g. `HTTP 401`, `could not connect`) and falls back to typing the model ID. Fields are now ordered URL, API, API Key, Model ID.
+
 ## 0.1.4 - 2026-10-4
 
 ### Added
