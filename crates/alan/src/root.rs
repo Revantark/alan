@@ -23,6 +23,7 @@ use crate::core::chat::ChatController;
 use crate::core::permissions::Answer;
 use crate::core::permissions::PermissionHandler;
 use crate::core::permissions::ToolPolicy;
+use crate::core::update;
 use crate::login_overlay::LoginOverlay;
 use crate::views::{ChatView, Header, LoginRequested};
 
@@ -47,6 +48,8 @@ pub enum AlanAction {
     CancelSteer,
     /// A pending permission request was answered; ChatView restores focus.
     PermissionAnswered(Answer),
+    /// A message the app wants surfaced to the user.
+    NotifyUser(String),
     Raw(Event),
 }
 
@@ -101,6 +104,27 @@ impl AlanRoot {
             Arc::clone(&self.credentials),
         ));
     }
+
+    fn check_for_update(&self, cx: &mut Context<'_, Self, AlanAction>) {
+        let Some(view) = self.view else {
+            return;
+        };
+        cx.spawn(
+            async {
+                update::fetch_latest_version()
+                    .await
+                    .map_err(|error| alan_tui::TaskError(error.into()))
+            },
+            move |result, _root, cx| {
+                let Ok(latest) = result else {
+                    return;
+                };
+                if let Some(notice) = update::update_notice(&latest) {
+                    cx.dispatch(view, &AlanAction::NotifyUser(notice));
+                }
+            },
+        );
+    }
 }
 
 impl Component<AlanAction> for AlanRoot {
@@ -123,6 +147,7 @@ impl Component<AlanAction> for AlanRoot {
                 root.open_login(cx)
             }),
         );
+        self.check_for_update(cx);
     }
 
     fn handle_action(
