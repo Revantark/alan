@@ -67,8 +67,6 @@ fn no_session_error(reason: &str) -> AgentError {
     })
 }
 
-/// A steering message queued while a run is in flight, plus the skills the
-/// user attached to it.
 #[derive(Debug, Clone)]
 pub struct PendingSteer {
     pub text: String,

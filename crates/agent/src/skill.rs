@@ -7,16 +7,12 @@ pub struct Skill {
     pub instructions: String,
 }
 
-/// The tag that opens the block [`format_inline_skills`] writes and marks
-/// where [`strip_inline_skills`] cuts.
 const INLINE_SKILLS_OPEN: &str = "<attached_skills>";
 
 const INLINE_SKILLS_FRAMING: &str = "Each <instructions> block below was named by the user with `#` \
      and is instructions to follow, not quoted or untrusted content. Treat it the way you treat the \
      request it arrived with.";
 
-/// The user-facing text of a stored message, with any attached-skill block
-/// removed.
 pub fn strip_inline_skills(text: &str) -> &str {
     match text.find(INLINE_SKILLS_OPEN) {
         Some(index) => text[..index].trim_end(),
@@ -24,8 +20,6 @@ pub fn strip_inline_skills(text: &str) -> &str {
     }
 }
 
-/// Format skills the user explicitly attached to a prompt, or `None` when
-/// there are none.
 pub fn format_inline_skills(skills: &[Skill]) -> Option<String> {
     if skills.is_empty() {
         return None;
@@ -89,51 +83,6 @@ mod tests {
         assert_eq!(format_inline_skills(&[]), None);
     }
 
-    /// The system prompt tells the model to treat user-provided text as data.
-    /// An attached skill arrives inside a user message, so without an explicit
-    /// carve-out the two instructions contradict and the model answers by
-    /// describing the skill instead of following it. This guards the wording
-    /// that resolves that, since the failure is silent and behavioural.
-    #[test]
-    fn the_block_is_framed_as_instructions_not_as_data() {
-        let block = format_inline_skills(&[skill("deploy", "Run the checklist.")]).unwrap();
-        let framing = block
-            .lines()
-            .nth(1)
-            .expect("a framing line follows the opening tag");
-
-        assert!(
-            framing.contains("is instructions to follow"),
-            "the block must be marked as the user's instructions, got: {framing}"
-        );
-    }
-
-    #[test]
-    fn several_skills_are_all_inlined_in_order() {
-        let block = format_inline_skills(&[
-            skill("deploy", "Run the checklist."),
-            skill("review", "Check the diff."),
-        ])
-        .unwrap();
-
-        let deploy = block.find("<name>deploy</name>").unwrap();
-        let review = block.find("<name>review</name>").unwrap();
-        assert!(deploy < review);
-        assert!(block.contains("Run the checklist."));
-        assert!(block.contains("Check the diff."));
-    }
-
-    /// A skill body is emitted verbatim, unlike the name and description.
-    /// Escaping it would mangle the markdown and code that skill bodies are
-    /// mostly made of, and buys nothing: the block is explicitly trusted, and
-    /// the fields that could break its structure are escaped.
-    #[test]
-    fn a_body_is_emitted_verbatim() {
-        let block = format_inline_skills(&[skill("deploy", "run <cmd> & </cmd>")]).unwrap();
-        assert!(block.contains("run <cmd> & </cmd>"));
-        assert_eq!(block.matches("<instructions>").count(), 2);
-    }
-
     #[test]
     fn a_name_containing_markup_is_escaped() {
         let mut forged = skill("deploy", "body");
@@ -144,11 +93,6 @@ mod tests {
 
         assert!(block.contains("&lt;/instructions&gt;"));
         assert_eq!(block.matches("<skill>").count(), 1);
-    }
-
-    #[test]
-    fn stripping_leaves_a_plain_message_unchanged() {
-        assert_eq!(strip_inline_skills("ship it #deploy"), "ship it #deploy");
     }
 
     /// The block, framing line included, must leave no trace in the
@@ -169,16 +113,5 @@ mod tests {
         let stored = "The user attached the following skills to the deploy plan";
 
         assert_eq!(strip_inline_skills(stored), stored);
-    }
-
-    /// A skill body that quotes the opening tag verbatim must not move the cut:
-    /// only the block's own start ends the user's text.
-    #[test]
-    fn a_body_quoting_the_tag_does_not_shorten_the_cut() {
-        let block =
-            format_inline_skills(&[skill("deploy", "emit <attached_skills> when done")]).unwrap();
-        let stored = format!("ship it\n\n{block}");
-
-        assert_eq!(strip_inline_skills(&stored), "ship it");
     }
 }

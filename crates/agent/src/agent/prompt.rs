@@ -341,8 +341,6 @@ pub(super) fn build_user_message(
     }
 }
 
-/// Append the attached-skill block to `text`, or leave it alone when no
-/// skills were attached.
 fn with_skills(text: String, skills: &[Skill]) -> String {
     match crate::format_inline_skills(skills) {
         Some(block) => format!("{text}\n\n{block}"),
@@ -350,8 +348,6 @@ fn with_skills(text: String, skills: &[Skill]) -> String {
     }
 }
 
-/// Build the user message for a steering message queued mid-run. A steer gets
-/// no plan/review treatment, only its attached skills.
 pub(super) fn build_steer_message(text: String, skills: Vec<Skill>) -> AgentMessage {
     AgentMessage::user(with_skills(text, &skills))
 }

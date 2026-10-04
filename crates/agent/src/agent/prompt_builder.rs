@@ -47,10 +47,7 @@ impl PromptBuilder {
         self
     }
 
-    /// Attach skills whose full instructions are appended to this prompt. The
-    /// application resolves the `#name` tokens it wrote and hands them over
-    /// here; unlike the skills advertised by the system prompt, these are
-    /// inlined in full, because the user already chose them.
+    /// Attach skills to this prompt.
     pub fn skills(mut self, skills: impl IntoIterator<Item = Skill>) -> Self {
         self.skills.extend(skills);
         self
