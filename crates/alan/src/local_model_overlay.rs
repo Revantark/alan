@@ -306,6 +306,12 @@ impl Component<AlanAction> for LocalModelOverlay {
                         KeyCode::BackTab => self.move_focus(-1, cx),
                         KeyCode::Down => self.move_focus(1, cx),
                         KeyCode::Up => self.move_focus(-1, cx),
+                        // re-pick after a wrong choice.
+                        KeyCode::Left | KeyCode::Right
+                            if self.focused == MODEL && matches!(self.detect, Detect::Found(_)) =>
+                        {
+                            self.open_picker(cx)
+                        }
                         KeyCode::Enter => self.on_enter(cx),
                         KeyCode::Backspace => {
                             if let Some(field) = self.fields.field_mut(self.focused) {
@@ -450,15 +456,25 @@ fn render_local_model_overlay(
                     Span::styled(value, value_style)
                 };
 
-                let line = Line::from(vec![
+                let mut spans = vec![
                     Span::styled(if is_focused { " › " } else { "   " }, accent),
                     Span::styled(
                         format!("{:>width$}  ", FormFields::label(i), width = max_label),
                         label_style,
                     ),
                     Span::styled(": ", muted),
-                    display,
-                ]);
+                ];
+                // detected list available: ◀ ▶ reopen the picker.
+                if i == MODEL && matches!(detect, Detect::Found(_)) {
+                    spans.extend([
+                        Span::styled("◀ ", accent),
+                        display,
+                        Span::styled(" ▶", accent),
+                    ]);
+                } else {
+                    spans.push(display);
+                }
+                let line = Line::from(spans);
                 frame.render_widget(
                     Paragraph::new(line).style(line_style),
                     Rect::new(inner.x, y, inner.width, 1),
@@ -500,7 +516,7 @@ fn detect_hint(detect: &Detect, model_empty: bool) -> String {
         Detect::Idle => String::new(),
         Detect::Loading => format!("{indent}detecting models…"),
         Detect::Found(ids) if model_empty => {
-            format!("{indent}{} found, Enter to pick", ids.len())
+            format!("{indent}{} found, Enter or ◀ ▶ to pick", ids.len())
         }
         Detect::Found(_) => String::new(),
         Detect::Failed(reason) => {
@@ -514,7 +530,7 @@ mod tests {
     use super::*;
     use ratatui::{Terminal, backend::TestBackend};
 
-    fn render_grid(width: u16, height: u16) -> Vec<String> {
+    fn render_grid(width: u16, height: u16, detect: &Detect) -> Vec<String> {
         let fields = FormFields {
             model_id: "gpt-4o-mini".to_owned(),
             url: "http://localhost:11434".to_owned(),
@@ -530,7 +546,7 @@ mod tests {
                     0,
                     &OverlayState::Editing,
                     false,
-                    &Detect::Idle,
+                    detect,
                 );
             })
             .unwrap();
@@ -549,7 +565,7 @@ mod tests {
 
     #[test]
     fn form_field_labels_align_to_a_fixed_column() {
-        let rows = render_grid(80, 18);
+        let rows = render_grid(80, 18, &Detect::Idle);
         let mut colon_cols = Vec::new();
         for row in &rows {
             if let Some(col) = row.chars().position(|character| character == ':') {
@@ -570,7 +586,7 @@ mod tests {
 
     #[test]
     fn model_field_comes_last() {
-        let rows = render_grid(80, 18);
+        let rows = render_grid(80, 18, &Detect::Idle);
         let labels: Vec<&str> = rows
             .iter()
             .filter_map(|row| row.split(':').next())
@@ -582,11 +598,24 @@ mod tests {
     }
 
     #[test]
+    fn model_arrows_only_when_detected() {
+        let model_row = |detect: &Detect| {
+            render_grid(80, 18, detect)
+                .into_iter()
+                .find(|row| row.contains("Model ID"))
+                .unwrap()
+        };
+        assert!(!model_row(&Detect::Idle).contains('◀'));
+        assert!(!model_row(&Detect::Failed("x".into())).contains('◀'));
+        assert!(model_row(&Detect::Found(vec!["gpt-4o-mini".into()])).contains("◀ gpt-4o-mini ▶"));
+    }
+
+    #[test]
     fn detect_hint_per_state() {
         assert_eq!(detect_hint(&Detect::Idle, true), "");
         assert!(detect_hint(&Detect::Loading, true).ends_with("detecting models…"));
         let found = Detect::Found(vec!["a".into(), "b".into()]);
-        assert!(detect_hint(&found, true).ends_with("2 found, Enter to pick"));
+        assert!(detect_hint(&found, true).ends_with("2 found, Enter or ◀ ▶ to pick"));
         // already typed: nothing to nag about.
         assert_eq!(detect_hint(&found, false), "");
         let failed = Detect::Failed("HTTP 401 Unauthorized".into());
