@@ -200,6 +200,67 @@ pub fn bind_local_model(
     Ok(crate::Model::new_with_options(info, api, auth, options))
 }
 
+/// `GET {url}/models` on an OpenAI-compatible server. Sorted, deduped ids.
+pub async fn list_local_models(
+    url: &str,
+    api_key: Option<&str>,
+) -> Result<Vec<String>, ProviderError> {
+    let mut request = reqwest::Client::new()
+        .get(format!("{}/models", url.trim().trim_end_matches('/')))
+        .timeout(std::time::Duration::from_secs(10));
+    if let Some(key) = api_key.filter(|key| !key.is_empty()) {
+        request = request.bearer_auth(key);
+    }
+    // reqwest's own message ("error sending request") hides why.
+    let response = request.send().await.map_err(|error| {
+        ProviderError::Fetch(if error.is_timeout() {
+            "timed out".into()
+        } else if error.is_connect() {
+            "could not connect".into()
+        } else if error.is_builder() {
+            "invalid URL".into()
+        } else {
+            format!("request failed: {error}")
+        })
+    })?;
+    let status = response.status();
+    if !status.is_success() {
+        return Err(ProviderError::Fetch(format!("HTTP {status}")));
+    }
+    let payload = response
+        .text()
+        .await
+        .map_err(|error| ProviderError::Fetch(format!("request failed: {error}")))?;
+    parse_model_ids(&payload)
+}
+
+fn parse_model_ids(payload: &str) -> Result<Vec<String>, ProviderError> {
+    #[derive(Deserialize)]
+    struct Listing {
+        data: Vec<Listed>,
+    }
+
+    #[derive(Deserialize)]
+    struct Listed {
+        id: String,
+    }
+
+    let listing: Listing = serde_json::from_str(payload)
+        .map_err(|_| ProviderError::Fetch("not an OpenAI-style model list".into()))?;
+    let mut ids: Vec<String> = listing
+        .data
+        .into_iter()
+        .map(|model| model.id)
+        .filter(|id| !id.trim().is_empty())
+        .collect();
+    ids.sort();
+    ids.dedup();
+    if ids.is_empty() {
+        return Err(ProviderError::Fetch("server listed no models".into()));
+    }
+    Ok(ids)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -423,6 +484,105 @@ mod tests {
         let store = MockStore::shared();
         let provider = LocalProvider::new(store);
         assert_eq!(provider.id(), ProviderId::new("local"));
+    }
+
+    // one-shot server: replies `response`, hands back the raw request.
+    async fn serve_once(response: &'static str) -> (String, tokio::task::JoinHandle<String>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            let mut buffer = [0; 4096];
+            while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                let read = socket.read(&mut buffer).await.unwrap();
+                assert!(read > 0);
+                request.extend_from_slice(&buffer[..read]);
+            }
+            socket.write_all(response.as_bytes()).await.unwrap();
+            String::from_utf8(request).unwrap()
+        });
+        (format!("http://{address}/v1/"), server)
+    }
+
+    #[test]
+    fn parse_model_ids_sorts_and_dedupes() {
+        let ids = parse_model_ids(
+            r#"{"data":[{"id":"b"},{"id":"a","owned_by":"x"},{"id":"b"},{"id":" "}]}"#,
+        )
+        .unwrap();
+        assert_eq!(ids, ["a", "b"]);
+    }
+
+    #[test]
+    fn parse_model_ids_rejects_empty_and_junk() {
+        assert!(parse_model_ids(r#"{"data":[]}"#).is_err());
+        assert!(parse_model_ids(r#"{"models":[{"name":"x"}]}"#).is_err());
+        assert!(parse_model_ids("<html>404</html>").is_err());
+    }
+
+    #[tokio::test]
+    async fn list_local_models_sends_key_to_models_path() {
+        let (url, server) = serve_once(
+            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\nconnection: close\r\n\r\n{\"data\":[{\"id\":\"m1\"}]}",
+        )
+        .await;
+        let ids = list_local_models(&url, Some("sk-test")).await.unwrap();
+        assert_eq!(ids, ["m1"]);
+        let request = server.await.unwrap();
+        assert!(request.starts_with("GET /v1/models HTTP/1.1"), "{request}");
+        assert!(
+            request
+                .to_lowercase()
+                .contains("authorization: bearer sk-test")
+        );
+    }
+
+    #[tokio::test]
+    async fn list_local_models_skips_empty_key() {
+        let (url, server) =
+            serve_once("HTTP/1.1 200 OK\r\nconnection: close\r\n\r\n{\"data\":[{\"id\":\"m1\"}]}")
+                .await;
+        list_local_models(&url, Some("")).await.unwrap();
+        assert!(
+            !server
+                .await
+                .unwrap()
+                .to_lowercase()
+                .contains("authorization")
+        );
+    }
+
+    #[tokio::test]
+    async fn list_local_models_reports_http_status() {
+        let (url, _server) = serve_once(
+            "HTTP/1.1 401 Unauthorized\r\nconnection: close\r\n\r\n{\"error\":\"Invalid API key\"}",
+        )
+        .await;
+        let error = list_local_models(&url, Some("bad")).await.unwrap_err();
+        assert!(error.to_string().contains("401"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn list_local_models_reports_unreachable() {
+        // bind then drop: port is closed.
+        let address = std::net::TcpListener::bind(("127.0.0.1", 0))
+            .unwrap()
+            .local_addr()
+            .unwrap();
+        let error = list_local_models(&format!("http://{address}/v1"), None)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("could not connect"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn list_local_models_reports_invalid_url() {
+        let error = list_local_models("not a url", None).await.unwrap_err();
+        assert!(error.to_string().contains("invalid URL"), "{error}");
     }
 
     #[tokio::test]

@@ -1,9 +1,10 @@
 use crate::root::AlanAction;
 use crate::views::theme;
+use crate::views::{SearchListEvent, SearchListOverlay};
 use alan_tui::context::Context;
-use alan_tui::{ActionStatus, Component, RenderContext};
+use alan_tui::{ActionStatus, Component, RenderContext, TaskError};
 use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers};
-use providers::{LocalApi, LocalModelEntry, LocalProvider};
+use providers::{LocalApi, LocalModelEntry, LocalProvider, list_local_models};
 use ratatui::Frame;
 use ratatui::layout::Alignment;
 use ratatui::layout::Rect;
@@ -13,7 +14,12 @@ use ratatui::widgets::{Block, BorderType, Paragraph};
 use std::sync::Arc;
 
 const FIELD_COUNT: usize = 4;
-const FIELD_LABELS: [&str; FIELD_COUNT] = ["Model ID", "URL", "API", "API Key"];
+// model last so url + key are known when we auto-detect it.
+const FIELD_LABELS: [&str; FIELD_COUNT] = ["URL", "API", "API Key", "Model ID"];
+const URL: usize = 0;
+const API: usize = 1;
+const API_KEY: usize = 2;
+const MODEL: usize = 3;
 
 #[derive(Debug, Clone)]
 struct FormFields {
@@ -25,18 +31,18 @@ struct FormFields {
 impl FormFields {
     fn field_mut(&mut self, index: usize) -> Option<&mut String> {
         match index {
-            0 => Some(&mut self.model_id),
-            1 => Some(&mut self.url),
-            3 => Some(&mut self.api_key),
+            URL => Some(&mut self.url),
+            API_KEY => Some(&mut self.api_key),
+            MODEL => Some(&mut self.model_id),
             _ => None,
         }
     }
 
     fn field(&self, index: usize) -> &str {
         match index {
-            0 => &self.model_id,
-            1 => &self.url,
-            3 => &self.api_key,
+            URL => &self.url,
+            API_KEY => &self.api_key,
+            MODEL => &self.model_id,
             _ => "",
         }
     }
@@ -73,12 +79,24 @@ enum OverlayState {
     Error(String),
 }
 
+/// `GET /models` result for `detect_source`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Detect {
+    Idle,
+    Loading,
+    Found(Vec<String>),
+    Failed(String),
+}
+
 pub struct LocalModelOverlay {
     provider: Arc<LocalProvider>,
     fields: FormFields,
     focused: usize,
     state: OverlayState,
     edit_mode: bool,
+    detect: Detect,
+    // (url, key) the current `detect` belongs to.
+    detect_source: (String, String),
 }
 
 impl LocalModelOverlay {
@@ -107,11 +125,106 @@ impl LocalModelOverlay {
             focused: 0,
             state: OverlayState::Editing,
             edit_mode,
+            detect: Detect::Idle,
+            detect_source: (String::new(), String::new()),
         }
     }
 
-    fn move_focus(&mut self, delta: isize) {
+    fn source(&self) -> (String, String) {
+        (
+            self.fields.url.trim().to_owned(),
+            self.fields.api_key.trim().to_owned(),
+        )
+    }
+
+    /// Fetch the model list when focus lands on Model ID. Reuses a result for
+    /// the same url/key; a failed one retries.
+    fn maybe_detect(&mut self, cx: &mut Context<'_, Self, AlanAction>) {
+        if self.edit_mode || self.focused != MODEL {
+            return;
+        }
+        let source = self.source();
+        if source.0.is_empty()
+            || (source == self.detect_source
+                && matches!(self.detect, Detect::Loading | Detect::Found(_)))
+        {
+            return;
+        }
+        self.detect_source = source.clone();
+        self.detect = Detect::Loading;
+        let requested = source.clone();
+        cx.spawn(
+            async move {
+                let (url, key) = source;
+                list_local_models(&url, Some(&key))
+                    .await
+                    .map_err(|e| match e {
+                        // drop the "failed to fetch models:" prefix, hint says it.
+                        providers::ProviderError::Fetch(reason) => TaskError(reason.into()),
+                        e => TaskError(e.to_string().into()),
+                    })
+            },
+            move |result, overlay, cx| {
+                // url/key changed mid-flight.
+                if overlay.detect_source != requested {
+                    return;
+                }
+                match result {
+                    Ok(ids) => {
+                        overlay.detect = Detect::Found(ids);
+                        // don't yank focus if they already typed or moved on.
+                        if overlay.focused == MODEL
+                            && overlay.state == OverlayState::Editing
+                            && overlay.fields.model_id.trim().is_empty()
+                        {
+                            overlay.open_picker(cx);
+                        }
+                    }
+                    Err(e) => overlay.detect = Detect::Failed(e.to_string()),
+                }
+                cx.notify();
+            },
+        );
+    }
+
+    fn open_picker(&mut self, cx: &mut Context<'_, Self, AlanAction>) {
+        let Detect::Found(ids) = &self.detect else {
+            return;
+        };
+        let ids = ids.clone();
+        let picker = cx.open_overlay(SearchListOverlay::new("Pick Model", ids.clone()));
+        cx.subscribe_once::<SearchListEvent, SearchListOverlay, _>(
+            picker,
+            move |event, overlay, _picker, cx| {
+                if let SearchListEvent::Chosen(index) = event
+                    && let Some(id) = ids.get(*index)
+                {
+                    overlay.fields.model_id = id.clone();
+                    cx.notify();
+                }
+            },
+        );
+    }
+
+    fn on_enter(&mut self, cx: &mut Context<'_, Self, AlanAction>) {
+        if !self.fields.model_id.trim().is_empty() || self.fields.url.trim().is_empty() {
+            self.submit(cx);
+            return;
+        }
+        // url set, model missing: detect/pick instead of erroring out the form.
+        if self.focused != MODEL {
+            self.focused = MODEL;
+            self.maybe_detect(cx);
+            cx.notify();
+        } else if matches!(self.detect, Detect::Found(_)) {
+            self.open_picker(cx);
+        }
+    }
+
+    fn move_focus(&mut self, delta: isize, cx: &mut Context<'_, Self, AlanAction>) {
         self.focused = ((self.focused as isize + delta).rem_euclid(FIELD_COUNT as isize)) as usize;
+        self.maybe_detect(cx);
+        cx.notify();
     }
 
     fn submit(&mut self, cx: &mut Context<'_, Self, AlanAction>) {
@@ -189,25 +302,17 @@ impl Component<AlanAction> for LocalModelOverlay {
                         KeyCode::Esc => {
                             self.dismiss(cx);
                         }
-                        KeyCode::Tab => {
-                            self.move_focus(1);
-                            cx.notify();
+                        KeyCode::Tab => self.move_focus(1, cx),
+                        KeyCode::BackTab => self.move_focus(-1, cx),
+                        KeyCode::Down => self.move_focus(1, cx),
+                        KeyCode::Up => self.move_focus(-1, cx),
+                        // re-pick after a wrong choice.
+                        KeyCode::Left | KeyCode::Right
+                            if self.focused == MODEL && matches!(self.detect, Detect::Found(_)) =>
+                        {
+                            self.open_picker(cx)
                         }
-                        KeyCode::BackTab => {
-                            self.move_focus(-1);
-                            cx.notify();
-                        }
-                        KeyCode::Down => {
-                            self.move_focus(1);
-                            cx.notify();
-                        }
-                        KeyCode::Up => {
-                            self.move_focus(-1);
-                            cx.notify();
-                        }
-                        KeyCode::Enter => {
-                            self.submit(cx);
-                        }
+                        KeyCode::Enter => self.on_enter(cx),
                         KeyCode::Backspace => {
                             if let Some(field) = self.fields.field_mut(self.focused) {
                                 field.pop();
@@ -248,6 +353,7 @@ impl Component<AlanAction> for LocalModelOverlay {
             self.focused,
             &self.state,
             self.edit_mode,
+            &self.detect,
         );
     }
 }
@@ -259,6 +365,7 @@ fn render_local_model_overlay(
     focused: usize,
     state: &OverlayState,
     edit_mode: bool,
+    detect: &Detect,
 ) {
     let width = area.width.saturating_sub(4).min(88);
     let height = area.height.saturating_sub(2).min(18);
@@ -327,9 +434,9 @@ fn render_local_model_overlay(
                     Style::default()
                 };
 
-                // Value (field 2 is a fixed read-only label so the user
+                // Value (API is a fixed read-only label so the user
                 // knows local models use the chat-completions API).
-                let value = if i == 2 {
+                let value = if i == API {
                     "Chat Completions"
                 } else {
                     fields.field(i)
@@ -341,27 +448,44 @@ fn render_local_model_overlay(
                 } else {
                     Style::default().fg(theme::EDITOR_FG)
                 };
-                let display = if value.is_empty() && i != 2 {
+                let display = if value.is_empty() && i == API_KEY {
+                    Span::styled("optional", muted)
+                } else if value.is_empty() && i != API {
                     Span::styled("required", muted)
                 } else {
                     Span::styled(value, value_style)
                 };
 
-                let line = Line::from(vec![
+                let mut spans = vec![
                     Span::styled(if is_focused { " › " } else { "   " }, accent),
                     Span::styled(
                         format!("{:>width$}  ", FormFields::label(i), width = max_label),
                         label_style,
                     ),
                     Span::styled(": ", muted),
-                    display,
-                ]);
+                ];
+                // detected list available: ◀ ▶ reopen the picker.
+                if i == MODEL && matches!(detect, Detect::Found(_)) {
+                    spans.extend([
+                        Span::styled("◀ ", accent),
+                        display,
+                        Span::styled(" ▶", accent),
+                    ]);
+                } else {
+                    spans.push(display);
+                }
+                let line = Line::from(spans);
                 frame.render_widget(
                     Paragraph::new(line).style(line_style),
                     Rect::new(inner.x, y, inner.width, 1),
                 );
+                let hint = if i == MODEL {
+                    detect_hint(detect, fields.model_id.trim().is_empty())
+                } else {
+                    String::new()
+                };
                 frame.render_widget(
-                    Paragraph::new(Span::raw("")).style(Style::default()),
+                    Paragraph::new(Span::styled(hint, muted)),
                     Rect::new(inner.x, y + 1, inner.width, 1),
                 );
             }
@@ -386,12 +510,27 @@ fn render_local_model_overlay(
     }
 }
 
+fn detect_hint(detect: &Detect, model_empty: bool) -> String {
+    let indent = " ".repeat(5 + FIELD_LABELS.iter().map(|l| l.len()).max().unwrap_or(0) + 2);
+    match detect {
+        Detect::Idle => String::new(),
+        Detect::Loading => format!("{indent}detecting models…"),
+        Detect::Found(ids) if model_empty => {
+            format!("{indent}{} found, Enter or ◀ ▶ to pick", ids.len())
+        }
+        Detect::Found(_) => String::new(),
+        Detect::Failed(reason) => {
+            format!("{indent}auto-detect failed ({reason}), type the model ID")
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use ratatui::{Terminal, backend::TestBackend};
 
-    fn render_grid(width: u16, height: u16) -> Vec<String> {
+    fn render_grid(width: u16, height: u16, detect: &Detect) -> Vec<String> {
         let fields = FormFields {
             model_id: "gpt-4o-mini".to_owned(),
             url: "http://localhost:11434".to_owned(),
@@ -407,6 +546,7 @@ mod tests {
                     0,
                     &OverlayState::Editing,
                     false,
+                    detect,
                 );
             })
             .unwrap();
@@ -425,7 +565,7 @@ mod tests {
 
     #[test]
     fn form_field_labels_align_to_a_fixed_column() {
-        let rows = render_grid(80, 18);
+        let rows = render_grid(80, 18, &Detect::Idle);
         let mut colon_cols = Vec::new();
         for row in &rows {
             if let Some(col) = row.chars().position(|character| character == ':') {
@@ -441,6 +581,47 @@ mod tests {
         assert!(
             colon_cols.iter().all(|&c| c == first),
             "label colon columns are not aligned: {colon_cols:?}"
+        );
+    }
+
+    #[test]
+    fn model_field_comes_last() {
+        let rows = render_grid(80, 18, &Detect::Idle);
+        let labels: Vec<&str> = rows
+            .iter()
+            .filter_map(|row| row.split(':').next())
+            .map(str::trim)
+            .filter(|label| FIELD_LABELS.iter().any(|l| label.ends_with(l)))
+            .collect();
+        assert_eq!(labels.len(), FIELD_COUNT);
+        assert!(labels[MODEL].ends_with("Model ID"), "{labels:?}");
+    }
+
+    #[test]
+    fn model_arrows_only_when_detected() {
+        let model_row = |detect: &Detect| {
+            render_grid(80, 18, detect)
+                .into_iter()
+                .find(|row| row.contains("Model ID"))
+                .unwrap()
+        };
+        assert!(!model_row(&Detect::Idle).contains('◀'));
+        assert!(!model_row(&Detect::Failed("x".into())).contains('◀'));
+        assert!(model_row(&Detect::Found(vec!["gpt-4o-mini".into()])).contains("◀ gpt-4o-mini ▶"));
+    }
+
+    #[test]
+    fn detect_hint_per_state() {
+        assert_eq!(detect_hint(&Detect::Idle, true), "");
+        assert!(detect_hint(&Detect::Loading, true).ends_with("detecting models…"));
+        let found = Detect::Found(vec!["a".into(), "b".into()]);
+        assert!(detect_hint(&found, true).ends_with("2 found, Enter or ◀ ▶ to pick"));
+        // already typed: nothing to nag about.
+        assert_eq!(detect_hint(&found, false), "");
+        let failed = Detect::Failed("HTTP 401 Unauthorized".into());
+        assert!(
+            detect_hint(&failed, false)
+                .ends_with("auto-detect failed (HTTP 401 Unauthorized), type the model ID")
         );
     }
 

@@ -1,4 +1,4 @@
 mod components;
 pub mod theme;
 
-pub(crate) use components::{ChatView, Header, LoginRequested};
+pub(crate) use components::{ChatView, Header, LoginRequested, SearchListEvent, SearchListOverlay};

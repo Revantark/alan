@@ -18,7 +18,7 @@ pub use credentials::{
     FileCredentialStore, InMemoryCredentialStore, SharedCredentialStore,
 };
 pub use google::{GoogleBuilder, GoogleProvider};
-pub use local::{LocalApi, LocalModelEntry, LocalProvider, bind_local_model};
+pub use local::{LocalApi, LocalModelEntry, LocalProvider, bind_local_model, list_local_models};
 pub use model::{Model, ModelError, ModelOptions};
 pub use openrouter::{OpenRouterBuilder, OpenRouterProvider, Options as OpenRouterOptions};
 pub use provider::{Provider, ProviderError, ProviderRegistry, bind_model};
