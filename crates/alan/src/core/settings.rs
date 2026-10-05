@@ -22,6 +22,7 @@ use crate::core::store::JsonStore;
 const SETTINGS_KEY: &str = "settings";
 use anyhow::Context as _;
 use llm::ReasoningEffort;
+use providers::OpenRouterOptions;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
@@ -145,6 +146,20 @@ impl Settings {
     /// The provider order configured for `model`, empty when unset.
     pub fn provider_order(&self, model: &str) -> Vec<String> {
         self.provider_orders.get(model).cloned().unwrap_or_default()
+    }
+
+    /// Provider-specific request options for `model`, keyed by provider.
+    /// Only OpenRouter exposes settings today; the order is routed to its
+    /// codec via request extensions.
+    pub fn extensions(&self, model: &str) -> llm::Extensions {
+        let mut extensions = llm::Extensions::default();
+        let order = self.provider_order(model);
+        if !order.is_empty() {
+            extensions.insert(OpenRouterOptions {
+                provider_order: order,
+            });
+        }
+        extensions
     }
 }
 

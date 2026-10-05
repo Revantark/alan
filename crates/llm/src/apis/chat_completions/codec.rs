@@ -1,200 +1,227 @@
+use crate::codec::{CodecChunk, LlmApiCodec};
 use crate::{LlmError, LlmEvent, LlmRequest, Message, Role, StopReason, ToolSpec, Usage};
 use serde::{Deserialize, Serialize};
 
-/// Providers to prioritize, in order. Sent only when the caller configures one;
-/// otherwise the request carries no `provider` block at all.
+/// Codec for the canonical OpenAI-compatible `/chat/completions` protocol.
+pub struct DefaultChatCompletionsCodec;
+
+impl LlmApiCodec for DefaultChatCompletionsCodec {
+    fn request(&self, request: &LlmRequest<'_>) -> Result<String, LlmError> {
+        serde_json::to_string(&BaseRequest::new(request)).map_err(LlmError::Serialization)
+    }
+
+    fn response(&self, data: &str) -> Result<CodecChunk, LlmError> {
+        let response: BaseResponse = serde_json::from_str(data).map_err(LlmError::Serialization)?;
+        decode_stream_response(&response)
+    }
+}
+
+/// Canonical `/chat/completions` request body. Providers with extras embed it
+/// via `#[serde(flatten)]` and add their own fields.
 #[derive(Serialize)]
-struct Request<'a> {
-    model: &'a str,
-    stream: bool,
-    messages: Vec<WireMessage>,
+pub struct BaseRequest<'a> {
+    pub model: &'a str,
+    pub stream: bool,
+    pub messages: Vec<WireMessage>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    tools: Vec<WireTool>,
+    pub tools: Vec<WireTool>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    temperature: Option<f32>,
+    pub temperature: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    max_tokens: Option<u32>,
-    reasoning: WireReasoning,
+    pub max_tokens: Option<u32>,
+    pub reasoning: WireReasoning,
     #[serde(skip_serializing_if = "Option::is_none")]
-    session_id: Option<&'a str>,
+    pub prompt_cache_key: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    prompt_cache_key: Option<&'a str>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    cache_control: Option<&'a crate::PromptCacheControl>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    provider: Option<WireProvider>,
+    pub cache_control: Option<&'a crate::PromptCacheControl>,
+}
+
+impl<'a> BaseRequest<'a> {
+    pub fn new(request: &'a LlmRequest<'a>) -> Self {
+        Self {
+            model: request.model_id,
+            stream: true,
+            messages: request.messages.iter().map(wire_message).collect(),
+            tools: request.tools.iter().map(wire_tool).collect(),
+            temperature: request.options.temperature,
+            max_tokens: request.options.max_tokens,
+            reasoning: WireReasoning {
+                effort: request.reasoning_effort.to_string(),
+            },
+            prompt_cache_key: request
+                .extensions
+                .get::<crate::SessionId>()
+                .map(|session| session.0.as_str()),
+            cache_control: request.options.cache_control.as_ref(),
+        }
+    }
+}
+
+/// Canonical `/chat/completions` stream chunk. Providers with extra fields
+/// embed it via `#[serde(flatten)]` and patch the decoded result.
+#[derive(Deserialize)]
+pub struct BaseResponse {
+    pub model: Option<String>,
+    pub choices: Vec<StreamChoice>,
+    pub usage: Option<WireUsage>,
+}
+
+/// Decode a canonical [`BaseResponse`] into the API-facing [`CodecChunk`].
+/// Exposed so provider codecs can reuse the canonical mapping after
+/// flattening [`BaseResponse`] into their own wire chunk.
+pub fn decode_stream_response(response: &BaseResponse) -> Result<CodecChunk, LlmError> {
+    let chunk = stream_chunk_from_response(response)?;
+    let events = stream_events(&chunk);
+    Ok(CodecChunk {
+        model: chunk.model,
+        finish_reason: chunk.finish_reason,
+        usage: chunk.usage,
+        events,
+    })
 }
 
 #[derive(Serialize)]
-struct WireProvider {
-    only: Vec<String>,
-    allow_fallbacks: bool,
+pub struct WireMessage {
+    pub role: &'static str,
+    pub content: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_calls: Option<Vec<WireToolCall>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    /// Always `None`: reasoning history is never re-sent on the wire
+    /// (OpenAI-compatible APIs reject or mis-handle round-tripped
+    /// `reasoning_details`).
+    pub reasoning_details: Option<Vec<serde_json::Value>>,
 }
 
 #[derive(Serialize)]
-struct WireMessage {
-    role: &'static str,
-    content: Option<serde_json::Value>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    tool_calls: Option<Vec<WireToolCall>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    tool_call_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    reasoning_details: Option<Vec<serde_json::Value>>,
-}
-
-#[derive(Serialize)]
-struct WireToolCall {
-    id: String,
+pub struct WireToolCall {
+    pub id: String,
     #[serde(rename = "type")]
-    kind: &'static str,
-    function: WireFunction,
+    pub kind: &'static str,
+    pub function: WireFunction,
 }
 
 #[derive(Serialize)]
-struct WireFunction {
-    name: String,
-    arguments: String,
+pub struct WireFunction {
+    pub name: String,
+    pub arguments: String,
 }
 
 #[derive(Serialize)]
-struct WireTool {
+pub struct WireTool {
     #[serde(rename = "type")]
-    kind: String,
+    pub kind: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    function: Option<WireDefinition>,
+    pub function: Option<WireDefinition>,
 }
 
 #[derive(Serialize)]
-struct WireDefinition {
-    name: String,
-    description: String,
-    parameters: serde_json::Value,
+pub struct WireDefinition {
+    pub name: String,
+    pub description: String,
+    pub parameters: serde_json::Value,
 }
 
 #[derive(Serialize)]
-struct WireReasoning {
-    effort: String,
+pub struct WireReasoning {
+    pub effort: String,
 }
 
 #[derive(Deserialize)]
-struct StreamResponse {
-    model: Option<String>,
-    choices: Vec<StreamChoice>,
-    usage: Option<WireUsage>,
+pub struct StreamChoice {
+    pub delta: Option<StreamDelta>,
+    pub finish_reason: Option<String>,
 }
 
 #[derive(Deserialize)]
-struct StreamChoice {
-    delta: Option<StreamDelta>,
-    finish_reason: Option<String>,
+pub struct StreamDelta {
+    pub content: Option<String>,
+    pub tool_calls: Option<Vec<StreamToolCallWire>>,
+    pub reasoning: Option<String>,
+    pub reasoning_content: Option<String>,
+    pub reasoning_details: Option<Vec<serde_json::Value>>,
 }
 
 #[derive(Deserialize)]
-struct StreamDelta {
-    content: Option<String>,
-    tool_calls: Option<Vec<StreamToolCallWire>>,
-    reasoning: Option<String>,
-    reasoning_content: Option<String>,
-    reasoning_details: Option<Vec<serde_json::Value>>,
+pub struct StreamToolCallWire {
+    pub index: Option<usize>,
+    pub id: Option<String>,
+    pub function: Option<StreamFunctionWire>,
 }
 
 #[derive(Deserialize)]
-struct StreamToolCallWire {
-    index: Option<usize>,
-    id: Option<String>,
-    function: Option<StreamFunctionWire>,
+pub struct StreamFunctionWire {
+    pub name: Option<String>,
+    pub arguments: Option<String>,
 }
 
-#[derive(Deserialize)]
-struct StreamFunctionWire {
-    name: Option<String>,
-    arguments: Option<String>,
-}
-
+/// Canonical usage fields; the OpenAI-standard token accounting.
 #[derive(Deserialize, Default)]
 #[serde(default)]
-struct WireUsage {
-    prompt_tokens: u64,
-    completion_tokens: u64,
-    total_tokens: Option<u64>,
-    cost: Option<f64>,
-    cost_details: Option<WireCostDetails>,
-    prompt_tokens_details: Option<WirePromptTokensDetails>,
-    completion_tokens_details: Option<WireCompletionTokensDetails>,
+pub struct WireUsage {
+    pub prompt_tokens: u64,
+    pub completion_tokens: u64,
+    pub total_tokens: Option<u64>,
+    pub prompt_tokens_details: Option<WirePromptTokensDetails>,
+    pub completion_tokens_details: Option<WireCompletionTokensDetails>,
 }
 
 #[derive(Deserialize, Clone, Default)]
 #[serde(default)]
-struct WireCostDetails {
-    upstream_inference_cost: Option<f64>,
+pub struct WirePromptTokensDetails {
+    pub cached_tokens: Option<u64>,
+    pub cache_write_tokens: Option<u64>,
+    pub audio_tokens: Option<u64>,
 }
 
 #[derive(Deserialize, Clone, Default)]
 #[serde(default)]
-struct WirePromptTokensDetails {
-    cached_tokens: Option<u64>,
-    cache_write_tokens: Option<u64>,
-    audio_tokens: Option<u64>,
+pub struct WireCompletionTokensDetails {
+    pub reasoning_tokens: Option<u64>,
 }
 
-#[derive(Deserialize, Clone, Default)]
-#[serde(default)]
-struct WireCompletionTokensDetails {
-    reasoning_tokens: Option<u64>,
+/// Map canonical [`WireUsage`] onto [`Usage`].
+pub fn usage_from_wire(wire: &WireUsage) -> Usage {
+    Usage {
+        input_tokens: wire.prompt_tokens,
+        output_tokens: wire.completion_tokens,
+        total_tokens: wire.total_tokens,
+        cost: None,
+        upstream_inference_cost: None,
+        cached_tokens: wire
+            .prompt_tokens_details
+            .as_ref()
+            .and_then(|d| d.cached_tokens),
+        cache_write_tokens: wire
+            .prompt_tokens_details
+            .as_ref()
+            .and_then(|d| d.cache_write_tokens),
+        reasoning_tokens: wire
+            .completion_tokens_details
+            .as_ref()
+            .and_then(|d| d.reasoning_tokens),
+        audio_tokens: wire
+            .prompt_tokens_details
+            .as_ref()
+            .and_then(|d| d.audio_tokens),
+    }
 }
 
-#[derive(Debug)]
-pub(crate) struct StreamChunk {
-    pub(crate) model: Option<String>,
-    pub(crate) text: Option<String>,
-    pub(crate) reasoning: Option<String>,
-    pub(crate) reasoning_details: Vec<serde_json::Value>,
-    pub(crate) tool_calls: Vec<StreamToolCall>,
-    pub(crate) finish_reason: Option<String>,
-    pub(crate) usage: Option<Usage>,
-}
-
-#[derive(Debug)]
-pub(crate) struct StreamToolCall {
-    pub(crate) index: usize,
-    pub(crate) id: Option<String>,
-    pub(crate) name: Option<String>,
-    pub(crate) arguments: String,
-}
-
-pub(crate) fn serialize_request(request: &LlmRequest<'_>) -> Result<String, LlmError> {
-    let messages = request.messages.iter().map(wire_message).collect();
-    let tools = request.tools.iter().map(wire_tool).collect();
-    let reasoning = WireReasoning {
-        effort: request.reasoning_effort.to_string(),
-    };
-    let provider = request
-        .provider_order
-        .filter(|order| !order.is_empty())
-        .map(|order| WireProvider {
-            only: order.to_vec(),
-            allow_fallbacks: order.is_empty(),
-        });
-
-    serde_json::to_string(&Request {
-        model: request.model_id,
-        stream: true,
-        messages,
-        tools,
-        temperature: request.options.temperature,
-        max_tokens: request.options.max_tokens,
-        reasoning,
-        session_id: request.options.session_id.as_deref(),
-        prompt_cache_key: request.options.prompt_cache_key.as_deref(),
-        cache_control: request.options.cache_control.as_ref(),
-        provider,
+/// Map a canonical finish reason onto [`StopReason`].
+pub fn stop_reason_for_finish_reason(reason: Option<&str>) -> Option<StopReason> {
+    reason.map(|reason| match reason {
+        "tool_calls" | "function_call" => StopReason::ToolUse,
+        "length" => StopReason::Length,
+        "content_filter" => StopReason::ContentFilter,
+        "stop" => StopReason::Stop,
+        _ => StopReason::Error,
     })
-    .map_err(LlmError::Serialization)
 }
 
-pub(crate) fn deserialize_stream_chunk(body: &str) -> Result<StreamChunk, LlmError> {
-    let response: StreamResponse = serde_json::from_str(body).map_err(LlmError::Serialization)?;
+/// Decode a canonical [`BaseResponse`] into the internal stream chunk.
+pub(crate) fn stream_chunk_from_response(response: &BaseResponse) -> Result<StreamChunk, LlmError> {
     let choice = response.choices.first();
     let delta = choice.and_then(|choice| choice.delta.as_ref());
     let text = delta
@@ -235,34 +262,39 @@ pub(crate) fn deserialize_stream_chunk(body: &str) -> Result<StreamChunk, LlmErr
         .unwrap_or_default();
 
     Ok(StreamChunk {
-        model: response.model,
+        model: response.model.clone(),
         text,
         reasoning,
         reasoning_details,
         tool_calls,
         finish_reason: choice.and_then(|choice| choice.finish_reason.clone()),
-        usage: response.usage.map(|usage| {
-            let prompt_details = usage.prompt_tokens_details;
-            let completion_details = usage.completion_tokens_details;
-            Usage {
-                input_tokens: usage.prompt_tokens,
-                output_tokens: usage.completion_tokens,
-                total_tokens: usage.total_tokens,
-                cost: usage.cost,
-                upstream_inference_cost: usage.cost_details.and_then(|d| d.upstream_inference_cost),
-                cached_tokens: prompt_details.as_ref().and_then(|d| d.cached_tokens),
-                cache_write_tokens: prompt_details.as_ref().and_then(|d| d.cache_write_tokens),
-                reasoning_tokens: completion_details.as_ref().and_then(|d| d.reasoning_tokens),
-                audio_tokens: prompt_details.as_ref().and_then(|d| d.audio_tokens),
-            }
-        }),
+        usage: response.usage.as_ref().map(usage_from_wire),
     })
 }
 
-pub(crate) fn stream_events(chunk: StreamChunk) -> Vec<LlmEvent> {
+#[derive(Debug)]
+pub(crate) struct StreamChunk {
+    pub(crate) model: Option<String>,
+    pub(crate) text: Option<String>,
+    pub(crate) reasoning: Option<String>,
+    pub(crate) reasoning_details: Vec<serde_json::Value>,
+    pub(crate) tool_calls: Vec<StreamToolCall>,
+    pub(crate) finish_reason: Option<String>,
+    pub(crate) usage: Option<Usage>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct StreamToolCall {
+    pub(crate) index: usize,
+    pub(crate) id: Option<String>,
+    pub(crate) name: Option<String>,
+    pub(crate) arguments: String,
+}
+
+pub(crate) fn stream_events(chunk: &StreamChunk) -> Vec<LlmEvent> {
     let mut events = Vec::new();
-    let details = chunk.reasoning_details;
-    if let Some(reasoning) = chunk.reasoning {
+    let details = chunk.reasoning_details.clone();
+    if let Some(reasoning) = chunk.reasoning.clone() {
         let details = if details.is_empty() {
             vec![serde_json::json!({
                 "type": "reasoning.text",
@@ -278,12 +310,13 @@ pub(crate) fn stream_events(chunk: StreamChunk) -> Vec<LlmEvent> {
             events.push(LlmEvent::ReasoningDelta { reasoning, details });
         }
     }
-    if let Some(text) = chunk.text {
+    if let Some(text) = chunk.text.clone() {
         events.push(LlmEvent::TextDelta { text });
     }
     events.extend(
         chunk
             .tool_calls
+            .clone()
             .into_iter()
             .map(|call| LlmEvent::ToolCallDelta {
                 index: call.index,
@@ -306,16 +339,6 @@ fn reasoning_text(details: &[serde_json::Value]) -> String {
                 .or_else(|| detail.get("summary").and_then(serde_json::Value::as_str))
         })
         .collect()
-}
-
-pub(crate) fn stop_reason_for_finish_reason(reason: Option<&str>) -> Option<StopReason> {
-    reason.map(|reason| match reason {
-        "tool_calls" | "function_call" => StopReason::ToolUse,
-        "length" => StopReason::Length,
-        "content_filter" => StopReason::ContentFilter,
-        "stop" => StopReason::Stop,
-        _ => StopReason::Error,
-    })
 }
 
 fn wire_message(message: &Message) -> WireMessage {
@@ -377,6 +400,10 @@ fn role(role: Role) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn codec() -> super::DefaultChatCompletionsCodec {
+        super::DefaultChatCompletionsCodec
+    }
     use crate::{RequestOptions, ToolDefinition, ToolSpec};
 
     fn request<'a>(
@@ -392,7 +419,7 @@ mod tests {
             options,
             credential: None,
             reasoning_effort: crate::ReasoningEffort::None,
-            provider_order: None,
+            extensions: crate::Extensions::default(),
         }
     }
 
@@ -409,7 +436,9 @@ mod tests {
             max_tokens: Some(128),
             ..RequestOptions::default()
         };
-        let body = serialize_request(&request("model-a", &messages, &tools, &options)).unwrap();
+        let body = codec()
+            .request(&request("model-a", &messages, &tools, &options))
+            .unwrap();
         let json: serde_json::Value = serde_json::from_str(&body).unwrap();
 
         assert_eq!(json["model"], "model-a");
@@ -437,7 +466,7 @@ mod tests {
         let mut request = request("model-a", &messages, &[], &options);
         request.reasoning_effort = crate::ReasoningEffort::High;
         let json: serde_json::Value =
-            serde_json::from_str(&serialize_request(&request).unwrap()).unwrap();
+            serde_json::from_str(&codec().request(&request).unwrap()).unwrap();
         assert_eq!(json["reasoning"]["effort"], "high");
         assert!(
             json["messages"][0].get("reasoning_details").is_none(),
@@ -453,49 +482,14 @@ mod tests {
             max_tokens: None,
             ..RequestOptions::default()
         };
-        let body = serialize_request(&request("model-a", &messages, &[], &options)).unwrap();
+        let body = codec()
+            .request(&request("model-a", &messages, &[], &options))
+            .unwrap();
         let json: serde_json::Value = serde_json::from_str(&body).unwrap();
 
         assert!(json.get("tools").is_none());
         assert!(json.get("temperature").is_none());
         assert!(json.get("max_tokens").is_none());
-    }
-
-    #[test]
-    fn omits_provider_block_when_unconfigured() {
-        let messages = [Message::user("hello")];
-        let options = RequestOptions::default();
-        let mut request = request("model-a", &messages, &[], &options);
-        request.provider_order = None;
-        let json: serde_json::Value =
-            serde_json::from_str(&serialize_request(&request).unwrap()).unwrap();
-        assert!(json.get("provider").is_none());
-    }
-
-    #[test]
-    fn omits_provider_block_when_order_is_empty() {
-        let messages = [Message::user("hello")];
-        let options = RequestOptions::default();
-        let mut request = request("model-a", &messages, &[], &options);
-        request.provider_order = Some(&[]);
-        let json: serde_json::Value =
-            serde_json::from_str(&serialize_request(&request).unwrap()).unwrap();
-        assert!(json.get("provider").is_none());
-    }
-
-    #[test]
-    fn serializes_provider_order_when_configured() {
-        let messages = [Message::user("hello")];
-        let options = RequestOptions::default();
-        let order = vec!["deepseek".to_string(), "fireworks".to_string()];
-        let mut request = request("model-a", &messages, &[], &options);
-        request.provider_order = Some(&order);
-        let json: serde_json::Value =
-            serde_json::from_str(&serialize_request(&request).unwrap()).unwrap();
-        assert_eq!(
-            json["provider"]["only"],
-            serde_json::json!(["deepseek", "fireworks"])
-        );
     }
 
     #[test]
@@ -516,18 +510,30 @@ mod tests {
             "usage": {"prompt_tokens": 11, "completion_tokens": 7}
         }"#;
 
-        let chunk = deserialize_stream_chunk(body).unwrap();
+        let chunk = codec().response(body).unwrap();
         assert_eq!(chunk.model.as_deref(), Some("served-model"));
-        assert_eq!(chunk.text.as_deref(), Some("Checking"));
-        assert_eq!(chunk.tool_calls[0].name.as_deref(), Some("weather"));
-        assert_eq!(chunk.tool_calls[0].arguments, "{\"city\":");
+        assert_eq!(
+            chunk.events,
+            vec![
+                LlmEvent::TextDelta {
+                    text: "Checking".into()
+                },
+                LlmEvent::ToolCallDelta {
+                    index: 0,
+                    id: Some("call-1".into()),
+                    name: Some("weather".into()),
+                    arguments: "{\"city\":".into(),
+                    signature: None,
+                },
+            ]
+        );
         assert_eq!(chunk.finish_reason.as_deref(), Some("tool_calls"));
         assert_eq!(chunk.usage.unwrap().output_tokens, 7);
     }
 
     #[test]
     fn rejects_tool_call_without_index() {
-        let error = deserialize_stream_chunk(
+        let error = codec().response(
             r#"{"choices":[{"delta":{"tool_calls":[{"id":"call-1","function":{"name":"bash"}}]}}]}"#,
         )
         .unwrap_err();
@@ -536,11 +542,10 @@ mod tests {
 
     #[test]
     fn accepts_usage_only_chunk() {
-        let chunk = deserialize_stream_chunk(
-            r#"{"choices":[],"usage":{"prompt_tokens":2,"completion_tokens":3}}"#,
-        )
-        .unwrap();
-        assert!(chunk.text.is_none());
+        let chunk = codec()
+            .response(r#"{"choices":[],"usage":{"prompt_tokens":2,"completion_tokens":3}}"#)
+            .unwrap();
+        assert!(chunk.events.is_empty());
         assert_eq!(chunk.usage.unwrap().input_tokens, 2);
     }
 
@@ -571,7 +576,9 @@ mod tests {
             },
         ])];
         let options = RequestOptions::default();
-        let body = serialize_request(&request("model-a", &messages, &[], &options)).unwrap();
+        let body = codec()
+            .request(&request("model-a", &messages, &[], &options))
+            .unwrap();
         let json: serde_json::Value = serde_json::from_str(&body).unwrap();
 
         let content = &json["messages"][0]["content"];
@@ -603,7 +610,9 @@ mod tests {
             },
         ])];
         let options = RequestOptions::default();
-        let body = serialize_request(&request("model-a", &messages, &[], &options)).unwrap();
+        let body = codec()
+            .request(&request("model-a", &messages, &[], &options))
+            .unwrap();
         let json: serde_json::Value = serde_json::from_str(&body).unwrap();
 
         let content = &json["messages"][0]["content"];
@@ -619,7 +628,9 @@ mod tests {
             text: "hello".into(),
         }])];
         let options = RequestOptions::default();
-        let body = serialize_request(&request("model-a", &messages, &[], &options)).unwrap();
+        let body = codec()
+            .request(&request("model-a", &messages, &[], &options))
+            .unwrap();
         let json: serde_json::Value = serde_json::from_str(&body).unwrap();
 
         let content = &json["messages"][0]["content"];

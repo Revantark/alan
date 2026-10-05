@@ -20,7 +20,7 @@ pub use credentials::{
 pub use google::{GoogleBuilder, GoogleProvider};
 pub use local::{LocalApi, LocalModelEntry, LocalProvider, bind_local_model};
 pub use model::{Model, ModelError, ModelOptions};
-pub use openrouter::{OpenRouterBuilder, OpenRouterProvider};
+pub use openrouter::{OpenRouterBuilder, OpenRouterProvider, Options as OpenRouterOptions};
 pub use provider::{Provider, ProviderError, ProviderRegistry, bind_model};
 pub use store::LocalModelStore;
 pub use zai::{ZaiBuilder, ZaiProvider};

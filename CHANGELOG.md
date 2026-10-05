@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Provider-specific request/response handling moved out of the generic chat completions codec into per-provider codecs.
+- Remove google from active providers.
+
 ## 0.1.4 - 2026-10-4
 
 ### Added

@@ -184,11 +184,13 @@ pub(super) async fn summarize(
     messages.push(Message::user(instruction));
 
     let options = RequestOptions::default();
+    let extensions = llm::Extensions::default();
     let mut stream_resp = model
         .stream(CompletionInput {
             messages: &messages,
             tools: &[],
             options: &options,
+            extensions: &extensions,
         })
         .await?;
 
@@ -217,9 +219,9 @@ pub(super) async fn stream_round(
         .collect();
 
     let messages = build_messages(context);
+    let mut extensions = llm::Extensions::default();
+    extensions.insert(llm::SessionId(session_id));
     let options = RequestOptions {
-        prompt_cache_key: Some(session_id.clone()),
-        session_id: Some(session_id),
         cache_control: Some(PromptCacheControl::one_hour()),
         ..RequestOptions::default()
     };
@@ -229,6 +231,7 @@ pub(super) async fn stream_round(
             messages: &messages,
             tools: &tools,
             options: &options,
+            extensions: &extensions,
         })
         .await?;
 

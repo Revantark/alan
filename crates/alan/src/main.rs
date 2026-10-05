@@ -22,7 +22,7 @@ use agent::{Agent, SessionManager, ToolPermissionManager, default_tools};
 use alan_tui::Runtime;
 use llm::ReasoningEffort;
 use providers::{
-    FileCredentialStore, GoogleProvider, LocalProvider, ModelOptions, OpenRouterProvider, Provider,
+    FileCredentialStore, LocalProvider, ModelOptions, OpenRouterProvider, Provider,
     ProviderRegistry, ZaiProvider, bind_model,
 };
 use std::path::PathBuf;
@@ -151,7 +151,8 @@ fn build_providers(
 ) -> anyhow::Result<Vec<Arc<dyn Provider>>> {
     Ok(vec![
         Arc::new(ZaiProvider::from_store(Arc::clone(credential_store)).build()?),
-        Arc::new(GoogleProvider::from_store(Arc::clone(credential_store)).build()?),
+        // until there really exists some evidence that this is needed, we can add back
+        // Arc::new(GoogleProvider::from_store(Arc::clone(credential_store)).build()?),
         Arc::new(OpenRouterProvider::from_store(Arc::clone(credential_store)).build()?),
         Arc::clone(local_provider) as Arc<dyn Provider>,
     ])
@@ -197,7 +198,7 @@ fn select_model(
         ModelOptions {
             server_tools,
             reasoning_effort: settings.reasoning.unwrap_or_default(),
-            provider_order: settings.provider_order(&model_id),
+            extensions: settings.extensions(&model_id),
         },
     )?)
 }
