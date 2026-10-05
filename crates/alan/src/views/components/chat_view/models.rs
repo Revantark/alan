@@ -8,8 +8,8 @@ use crate::root::AlanAction;
 use alan_tui::TaskError;
 use alan_tui::context::Context;
 use providers::{
-    Model, ModelInfo, ModelOptions, Provider, ProviderId, ProviderRegistry, bind_local_model,
-    bind_model,
+    Model, ModelInfo, ModelOptions, OpenRouterOptions, Provider, ProviderId, ProviderRegistry,
+    bind_local_model, bind_model,
 };
 use std::sync::Arc;
 
@@ -63,7 +63,7 @@ pub(crate) fn open_models_picker(view: &mut ChatView, cx: &mut Context<'_, ChatV
                     let settings = settings::get_settings()
                         .await
                         .map_err(|e| TaskError(e.into()))?;
-                    options.provider_order = settings.provider_order(&model_info.id);
+                    options.extensions = settings.extensions(&model_info.id);
 
                     let model = bind_model_info(&providers, &model_info, options)?;
                     let name = model_info.name.clone();
@@ -124,8 +124,12 @@ pub(crate) fn apply_model_provider(
     cx.spawn(
         async move {
             let model_id = agent.info().await.id;
+            let mut extensions = agent.model_options().await.extensions;
+            extensions.insert(OpenRouterOptions {
+                provider_order: provider_order.clone(),
+            });
             agent
-                .set_provider_order(provider_order.clone())
+                .set_extensions(extensions)
                 .await
                 .map_err(|error| TaskError(Box::new(error)))?;
 

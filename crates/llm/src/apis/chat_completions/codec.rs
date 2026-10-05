@@ -48,7 +48,10 @@ impl<'a> BaseRequest<'a> {
             reasoning: WireReasoning {
                 effort: request.reasoning_effort.to_string(),
             },
-            prompt_cache_key: request.options.prompt_cache_key.as_deref(),
+            prompt_cache_key: request
+                .extensions
+                .get::<crate::SessionId>()
+                .map(|session| session.0.as_str()),
             cache_control: request.options.cache_control.as_ref(),
         }
     }
@@ -420,7 +423,6 @@ mod tests {
             options,
             credential: None,
             reasoning_effort: crate::ReasoningEffort::None,
-            provider_order: None,
             extensions: crate::Extensions::default(),
         }
     }

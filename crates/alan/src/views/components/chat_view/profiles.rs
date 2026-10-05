@@ -187,7 +187,7 @@ fn apply_profile(
         async move {
             let mut options = agent.model_options().await;
             let settings = settings::get_settings().await.map_err(super::to_task)?;
-            options.provider_order = settings.provider_order(&profile.model);
+            options.extensions = settings.extensions(&profile.model);
             options.reasoning_effort = profile.reasoning;
             options.server_tools = server_tools_for_provider(
                 &providers,

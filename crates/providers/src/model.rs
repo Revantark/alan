@@ -19,10 +19,8 @@ pub enum ModelError {
 pub struct ModelOptions {
     pub server_tools: Vec<ServerTool>,
     pub reasoning_effort: ReasoningEffort,
-    /// Ordered provider list forwarded to the API. Empty means the request
-    /// carries no `provider` block at all.
-    pub provider_order: Vec<String>,
-    /// Provider-specific options forwarded to codecs with every request.
+    /// Provider-specific options (like OpenRouter routing) forwarded to
+    /// codecs with every request.
     pub extensions: llm::Extensions,
 }
 
@@ -31,7 +29,6 @@ impl From<&Model> for ModelOptions {
         ModelOptions {
             server_tools: value.server_tools.clone(),
             reasoning_effort: value.reasoning_effort(),
-            provider_order: value.provider_order.clone(),
             extensions: value.extensions.clone(),
         }
     }
@@ -44,7 +41,6 @@ pub struct Model {
     auth: Arc<dyn AuthResolver>,
     server_tools: Vec<ServerTool>,
     reasoning_effort: ReasoningEffort,
-    provider_order: Vec<String>,
     extensions: Extensions,
 }
 
@@ -61,7 +57,6 @@ impl Model {
             auth,
             server_tools: options.server_tools,
             reasoning_effort: options.reasoning_effort,
-            provider_order: options.provider_order,
             extensions: options.extensions,
         }
     }
@@ -81,8 +76,8 @@ impl Model {
         self.reasoning_effort = reasoning_effort;
     }
 
-    pub fn set_provider_order(&mut self, order: Vec<String>) {
-        self.provider_order = order;
+    pub fn set_extensions(&mut self, extensions: Extensions) {
+        self.extensions = extensions;
     }
 
     fn tools<'a>(&'a self, local: &'a [ToolSpec]) -> Vec<ToolSpec> {
@@ -96,6 +91,8 @@ impl Model {
     pub async fn complete(&self, input: CompletionInput<'_>) -> Result<LlmResponse, ModelError> {
         let credential = self.auth.resolve().await?;
         let tools = self.tools(input.tools);
+        let mut extensions = self.extensions.clone();
+        extensions.merge(input.extensions);
         let request = LlmRequest {
             model_id: &self.info.id,
             messages: input.messages,
@@ -103,9 +100,7 @@ impl Model {
             options: input.options,
             credential: Some(&credential),
             reasoning_effort: self.reasoning_effort,
-            provider_order: (!self.provider_order.is_empty())
-                .then_some(self.provider_order.as_slice()),
-            extensions: self.extensions.clone(),
+            extensions,
         };
         Ok(self.api.complete(request).await?)
     }
@@ -113,6 +108,8 @@ impl Model {
     pub async fn stream(&self, input: CompletionInput<'_>) -> Result<LlmStream, ModelError> {
         let credential = self.auth.resolve().await?;
         let tools = self.tools(input.tools);
+        let mut extensions = self.extensions.clone();
+        extensions.merge(input.extensions);
         let request = LlmRequest {
             model_id: &self.info.id,
             messages: input.messages,
@@ -120,9 +117,7 @@ impl Model {
             options: input.options,
             credential: Some(&credential),
             reasoning_effort: self.reasoning_effort,
-            provider_order: (!self.provider_order.is_empty())
-                .then_some(self.provider_order.as_slice()),
-            extensions: self.extensions.clone(),
+            extensions,
         };
         Ok(self.api.stream(request).await?)
     }

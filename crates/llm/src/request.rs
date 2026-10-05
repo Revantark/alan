@@ -99,10 +99,6 @@ impl PromptCacheControl {
 pub struct RequestOptions {
     pub temperature: Option<f32>,
     pub max_tokens: Option<u32>,
-    /// OpenRouter sticky-session key for keeping a conversation on one provider.
-    pub session_id: Option<String>,
-    /// cache routing key for requests sharing a prefix.
-    pub prompt_cache_key: Option<String>,
     /// Provider-translated cache breakpoint/TTL configuration.
     pub cache_control: Option<PromptCacheControl>,
 }
@@ -111,6 +107,8 @@ pub struct CompletionInput<'a> {
     pub messages: &'a [Message],
     pub tools: &'a [ToolSpec],
     pub options: &'a RequestOptions,
+    /// Provider-specific options forwarded to codecs with the request.
+    pub extensions: &'a Extensions,
 }
 
 pub struct LlmRequest<'a> {
@@ -120,9 +118,6 @@ pub struct LlmRequest<'a> {
     pub options: &'a RequestOptions,
     pub credential: Option<&'a Credential>,
     pub reasoning_effort: ReasoningEffort,
-    /// Ordered provider list forwarded to the API. `None` means the request
-    /// carries no `provider` block at all.
-    pub provider_order: Option<&'a [String]>,
     /// Provider-specific options, read by codecs when building the wire body.
     pub extensions: Extensions,
 }

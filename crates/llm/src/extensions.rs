@@ -1,6 +1,7 @@
 use std::any::{Any, TypeId};
 use std::collections::HashMap;
 use std::sync::Arc;
+
 /// Type-erased side-channel carrying provider-specific options on an
 /// [`LlmRequest`](crate::LlmRequest). Keys are types, so a value's meaning is
 /// defined by whoever defines the key type.
@@ -29,6 +30,14 @@ impl Extensions {
         self.map
             .get(&TypeId::of::<T>())
             .and_then(|value| value.as_ref().downcast_ref::<T>())
+    }
+
+    /// Copy every entry from `other`, overwriting same-keyed values. Use to
+    /// layer per-request extensions (e.g. session id) over defaults held
+    /// elsewhere (e.g. provider options from settings).
+    pub fn merge(&mut self, other: &Extensions) {
+        self.map
+            .extend(other.map.iter().map(|(key, value)| (*key, value.clone())));
     }
 }
 
@@ -71,5 +80,22 @@ mod tests {
         detached.insert(SessionId("other".into()));
         assert_eq!(extensions.get::<SessionId>().unwrap().0, "abc");
         assert_eq!(detached.get::<SessionId>().unwrap().0, "other");
+    }
+
+    #[test]
+    fn merge_layers_other_over_self() {
+        struct Routing(Vec<String>);
+
+        let mut base = Extensions::default();
+        base.insert(SessionId("abc".into()));
+        base.insert(Routing(vec!["a".into()]));
+
+        let mut per_request = Extensions::default();
+        per_request.insert(SessionId("xyz".into()));
+
+        base.merge(&per_request);
+
+        assert_eq!(base.get::<SessionId>().unwrap().0, "xyz");
+        assert_eq!(base.get::<Routing>().unwrap().0, vec!["a"]);
     }
 }

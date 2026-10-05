@@ -197,8 +197,7 @@ fn select_model(
         ModelOptions {
             server_tools,
             reasoning_effort: settings.reasoning.unwrap_or_default(),
-            provider_order: settings.provider_order(&model_id),
-            extensions: llm::Extensions::default(),
+            extensions: settings.extensions(&model_id),
         },
     )?)
 }

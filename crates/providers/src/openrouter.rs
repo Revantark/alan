@@ -131,7 +131,6 @@ mod codec_tests {
             options: &options,
             credential: None,
             reasoning_effort: llm::ReasoningEffort::None,
-            provider_order: None,
             extensions,
         };
         let body = OpenRouterCodec.request(&request).unwrap();
