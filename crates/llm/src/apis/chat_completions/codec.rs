@@ -80,13 +80,6 @@ pub fn decode_stream_response(response: &BaseResponse) -> Result<CodecChunk, Llm
     })
 }
 
-/// OpenRouter-style routing block: which upstream providers to prefer.
-#[derive(Serialize)]
-pub struct WireProvider {
-    pub only: Vec<String>,
-    pub allow_fallbacks: bool,
-}
-
 #[derive(Serialize)]
 pub struct WireMessage {
     pub role: &'static str,
@@ -96,6 +89,9 @@ pub struct WireMessage {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    /// Always `None`: reasoning history is never re-sent on the wire
+    /// (OpenAI-compatible APIs reject or mis-handle round-tripped
+    /// `reasoning_details`).
     pub reasoning_details: Option<Vec<serde_json::Value>>,
 }
 

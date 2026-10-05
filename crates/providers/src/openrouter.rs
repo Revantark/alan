@@ -4,7 +4,7 @@ use crate::{
 };
 use async_trait::async_trait;
 use llm::apis::chat_completions::{
-    BaseRequest, BaseResponse, WireProvider, WireUsage, decode_stream_response,
+    BaseRequest, BaseResponse, WireUsage, decode_stream_response,
 };
 use llm::{ChatCompletionsApi, CodecChunk, HttpClient, LlmApi, LlmApiCodec, LlmError, LlmRequest};
 use reqwest::StatusCode;
@@ -22,6 +22,13 @@ struct OpenRouterCodec;
 pub struct Options {
     /// Providers to prioritize, in order.
     pub provider_order: Vec<String>,
+}
+
+/// OpenRouter's `provider` routing block: which upstream providers to prefer.
+#[derive(Serialize)]
+pub(crate) struct WireProvider {
+    pub(crate) only: Vec<String>,
+    pub(crate) allow_fallbacks: bool,
 }
 
 #[derive(Serialize)]
