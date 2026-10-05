@@ -1,6 +1,7 @@
 //! Provider-independent LLM protocol types and API implementations.
 
 mod api;
+mod codec;
 mod error;
 mod event;
 mod extensions;
@@ -14,6 +15,7 @@ pub mod apis;
 
 pub use api::LlmApi;
 pub use apis::{ChatCompletionsApi, InteractionsApi};
+pub use codec::{CodecChunk, LlmApiCodec};
 pub use error::LlmError;
 pub use event::{LlmEvent, LlmStream};
 pub use extensions::{Extensions, SessionId};

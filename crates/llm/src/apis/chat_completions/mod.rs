@@ -1,6 +1,7 @@
 mod codec;
 
 use crate::apis::sse::SseDecoder;
+use crate::codec::{CodecChunk, LlmApiCodec};
 use crate::{HttpClient, LlmApi, LlmError, LlmEvent, LlmRequest, LlmStream, StopReason};
 use async_trait::async_trait;
 use futures_util::{StreamExt, stream};
@@ -12,6 +13,7 @@ const ENDPOINT: &str = "/chat/completions";
 pub struct ChatCompletionsApi {
     base_url: String,
     http: Arc<HttpClient>,
+    codec: Arc<dyn LlmApiCodec>,
 }
 
 impl ChatCompletionsApi {
@@ -19,14 +21,22 @@ impl ChatCompletionsApi {
         Self {
             base_url: base_url.into(),
             http,
+            codec: Arc::new(codec::DefaultChatCompletionsCodec),
         }
+    }
+
+    /// Attach a provider codec that translates between canonical requests
+    /// and this provider's wire format.
+    pub fn with_codec(mut self, codec: Arc<dyn LlmApiCodec>) -> Self {
+        self.codec = codec;
+        self
     }
 }
 
 #[async_trait]
 impl LlmApi for ChatCompletionsApi {
     async fn stream(&self, request: LlmRequest<'_>) -> Result<LlmStream, LlmError> {
-        let body = codec::serialize_request(&request)?;
+        let body = self.codec.request(&request)?;
         let url = format!("{}{}", self.base_url.trim_end_matches('/'), ENDPOINT);
         let response = self.http.post(&url, &body, request.credential).await?;
         let status = response.status();
@@ -38,7 +48,7 @@ impl LlmApi for ChatCompletionsApi {
             });
         }
 
-        let state = StreamState::new(response.bytes_stream());
+        let state = StreamState::new(response.bytes_stream(), self.codec.clone());
         let output = stream::try_unfold(state, |mut state| async move {
             let event = state.next_event().await?;
             Ok::<_, LlmError>(event.map(|event| (event, state)))
@@ -51,6 +61,7 @@ impl LlmApi for ChatCompletionsApi {
 struct StreamState<S> {
     input: S,
     decoder: SseDecoder,
+    codec: Arc<dyn LlmApiCodec>,
     pending: VecDeque<LlmEvent>,
     model: Option<String>,
     stop_reason: Option<StopReason>,
@@ -62,10 +73,11 @@ impl<S> StreamState<S>
 where
     S: futures_util::Stream<Item = Result<bytes::Bytes, reqwest::Error>> + Unpin,
 {
-    fn new(input: S) -> Self {
+    fn new(input: S, codec: Arc<dyn LlmApiCodec>) -> Self {
         Self {
             input,
             decoder: SseDecoder::default(),
+            codec,
             pending: VecDeque::new(),
             model: None,
             stop_reason: None,
@@ -115,7 +127,7 @@ where
                 continue;
             }
 
-            let chunk = codec::deserialize_stream_chunk(&payload)?;
+            let chunk: CodecChunk = self.codec.response(&payload)?;
             if let Some(model) = chunk.model.clone() {
                 self.model = Some(model);
             }
@@ -130,7 +142,7 @@ where
             // Emit usage *after* the chunk's text/reasoning/tool-call deltas
             // so consumers see content before the summary.
             let usage_event = chunk.usage.clone().map(|usage| LlmEvent::Usage { usage });
-            self.pending.extend(codec::stream_events(chunk));
+            self.pending.extend(chunk.events);
             if let Some(event) = usage_event {
                 self.pending.push_back(event);
             }
@@ -142,6 +154,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::codec::CodecChunk;
     use crate::{Message, RequestOptions, ToolSpec};
     use futures_util::StreamExt;
     use std::sync::Arc;
@@ -212,5 +225,81 @@ mod tests {
         assert_eq!(response.model.as_deref(), Some("served"));
         assert_eq!(response.usage.unwrap().output_tokens, 3);
         assert!(server.await.unwrap().contains("\"stream\":true"));
+    }
+
+    /// A custom codec replaces both directions: the body it serializes is
+    /// sent, and the chunk it decodes drives the emitted events.
+    #[tokio::test]
+    async fn with_codec_uses_the_custom_codec() {
+        struct UppercaseCodec;
+
+        impl LlmApiCodec for UppercaseCodec {
+            fn request(&self, request: &LlmRequest<'_>) -> Result<String, LlmError> {
+                Ok(format!(
+                    r#"{{"model":"{}","upper":true}}"#,
+                    request.model_id
+                ))
+            }
+
+            fn response(&self, _data: &str) -> Result<CodecChunk, LlmError> {
+                Ok(CodecChunk {
+                    model: Some("rewired".into()),
+                    finish_reason: Some("stop".into()),
+                    usage: None,
+                    events: vec![LlmEvent::TextDelta {
+                        text: "decoded by custom codec".into(),
+                    }],
+                })
+            }
+        }
+
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            let mut buffer = [0; 4096];
+            loop {
+                let read = socket.read(&mut buffer).await.unwrap();
+                assert!(read > 0);
+                request.extend_from_slice(&buffer[..read]);
+                if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            socket
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\nconnection: close\r\n\r\ndata: anything\n\ndata: [DONE]\n\n",
+                )
+                .await
+                .unwrap();
+            String::from_utf8(request).unwrap()
+        });
+
+        let api =
+            ChatCompletionsApi::new(format!("http://{address}/v1/"), Arc::new(HttpClient::new()))
+                .with_codec(Arc::new(UppercaseCodec));
+        let messages = [Message::user("ping")];
+        let options = RequestOptions::default();
+        let mut events = api
+            .stream(request("model", &messages, &[], &options))
+            .await
+            .unwrap();
+
+        let mut texts = Vec::new();
+        let mut model = None;
+        let mut done = None;
+        while let Some(event) = events.next().await {
+            match event.unwrap() {
+                LlmEvent::TextDelta { text } => texts.push(text),
+                LlmEvent::Done { model: served, .. } => model = served,
+                other => done = Some(format!("{other:?}")),
+            }
+        }
+
+        assert_eq!(texts.join(""), "decoded by custom codec");
+        assert_eq!(model.as_deref(), Some("rewired"));
+        assert_eq!(done, None);
+        assert!(server.await.unwrap().contains(r#""upper":true"#));
     }
 }

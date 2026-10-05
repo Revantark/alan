@@ -1,5 +1,26 @@
+use crate::codec::{CodecChunk, LlmApiCodec};
 use crate::{LlmError, LlmEvent, LlmRequest, Message, Role, StopReason, ToolSpec, Usage};
 use serde::{Deserialize, Serialize};
+
+/// Codec for the canonical OpenAI-compatible `/chat/completions` protocol.
+pub struct DefaultChatCompletionsCodec;
+
+impl LlmApiCodec for DefaultChatCompletionsCodec {
+    fn request(&self, request: &LlmRequest<'_>) -> Result<String, LlmError> {
+        serialize_request(request)
+    }
+
+    fn response(&self, data: &str) -> Result<CodecChunk, LlmError> {
+        let chunk = deserialize_stream_chunk(data)?;
+        let events = stream_events(&chunk);
+        Ok(CodecChunk {
+            model: chunk.model,
+            finish_reason: chunk.finish_reason,
+            usage: chunk.usage,
+            events,
+        })
+    }
+}
 
 /// Providers to prioritize, in order. Sent only when the caller configures one;
 /// otherwise the request carries no `provider` block at all.
@@ -155,7 +176,7 @@ pub(crate) struct StreamChunk {
     pub(crate) usage: Option<Usage>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct StreamToolCall {
     pub(crate) index: usize,
     pub(crate) id: Option<String>,
@@ -259,10 +280,10 @@ pub(crate) fn deserialize_stream_chunk(body: &str) -> Result<StreamChunk, LlmErr
     })
 }
 
-pub(crate) fn stream_events(chunk: StreamChunk) -> Vec<LlmEvent> {
+pub(crate) fn stream_events(chunk: &StreamChunk) -> Vec<LlmEvent> {
     let mut events = Vec::new();
-    let details = chunk.reasoning_details;
-    if let Some(reasoning) = chunk.reasoning {
+    let details = chunk.reasoning_details.clone();
+    if let Some(reasoning) = chunk.reasoning.clone() {
         let details = if details.is_empty() {
             vec![serde_json::json!({
                 "type": "reasoning.text",
@@ -278,12 +299,13 @@ pub(crate) fn stream_events(chunk: StreamChunk) -> Vec<LlmEvent> {
             events.push(LlmEvent::ReasoningDelta { reasoning, details });
         }
     }
-    if let Some(text) = chunk.text {
+    if let Some(text) = chunk.text.clone() {
         events.push(LlmEvent::TextDelta { text });
     }
     events.extend(
         chunk
             .tool_calls
+            .clone()
             .into_iter()
             .map(|call| LlmEvent::ToolCallDelta {
                 index: call.index,

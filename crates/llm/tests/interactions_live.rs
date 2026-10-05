@@ -42,7 +42,7 @@ async fn live_text_completion() {
         credential: Some(&credential),
         reasoning_effort: ReasoningEffort::None,
         provider_order: None,
-            extensions: llm::Extensions::default(),
+        extensions: llm::Extensions::default(),
     };
 
     let response = api.complete(request).await.unwrap();
@@ -83,7 +83,7 @@ async fn live_function_call() {
         credential: Some(&credential),
         reasoning_effort: ReasoningEffort::None,
         provider_order: None,
-            extensions: llm::Extensions::default(),
+        extensions: llm::Extensions::default(),
     };
 
     let response = api.complete(request).await.unwrap();
@@ -127,7 +127,7 @@ async fn live_function_call_round_trip() {
         credential: Some(&credential),
         reasoning_effort: ReasoningEffort::None,
         provider_order: None,
-            extensions: llm::Extensions::default(),
+        extensions: llm::Extensions::default(),
     };
     let first_response = api.complete(first_request).await.unwrap();
     let calls: Vec<_> = first_response.tool_calls().cloned().collect();
@@ -167,7 +167,7 @@ async fn live_function_call_round_trip() {
         credential: Some(&credential),
         reasoning_effort: ReasoningEffort::None,
         provider_order: None,
-            extensions: llm::Extensions::default(),
+        extensions: llm::Extensions::default(),
     };
     let second_response = api.complete(second_request).await.unwrap();
     assert!(
