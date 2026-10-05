@@ -393,6 +393,7 @@ mod tests {
             credential: None,
             reasoning_effort: crate::ReasoningEffort::None,
             provider_order: None,
+            extensions: crate::Extensions::default(),
         }
     }
 

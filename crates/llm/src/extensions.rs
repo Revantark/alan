@@ -1,0 +1,75 @@
+use std::any::{Any, TypeId};
+use std::collections::HashMap;
+use std::sync::Arc;
+/// Type-erased side-channel carrying provider-specific options on an
+/// [`LlmRequest`](crate::LlmRequest). Keys are types, so a value's meaning is
+/// defined by whoever defines the key type.
+///
+/// Keys live next to their consumers: generic keys (like
+/// [`SessionId`]) in `llm`, provider-specific ones (like OpenRouter routing
+/// options) in `providers`. The container never inspects what it stores, so
+/// the dependency direction `llm <- providers <- agent <- alan` is preserved.
+///
+/// Cloning is cheap: values live behind an [`Arc`], so requests can carry
+/// their own copy. Insertion is intended before a request is shared.
+#[derive(Clone, Default)]
+pub struct Extensions {
+    map: HashMap<TypeId, Arc<dyn Any + Send + Sync>>,
+}
+
+impl Extensions {
+    /// Store `value` under its type, replacing any previous value of the same
+    /// type.
+    pub fn insert<T: 'static + Send + Sync>(&mut self, value: T) {
+        self.map.insert(TypeId::of::<T>(), Arc::new(value));
+    }
+
+    /// Borrow the value stored under type `T`, if any.
+    pub fn get<T: 'static>(&self) -> Option<&T> {
+        self.map
+            .get(&TypeId::of::<T>())
+            .and_then(|value| value.as_ref().downcast_ref::<T>())
+    }
+}
+
+/// Canonical session identity, set by the agent for every request. Codecs
+/// translate it per provider: OpenRouter sends it as `session_id` and
+/// `prompt_cache_key`, vanilla OpenAI-compatible APIs as `prompt_cache_key`.
+pub struct SessionId(pub String);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stores_and_returns_typed_values() {
+        let mut extensions = Extensions::default();
+        extensions.insert(SessionId("abc".into()));
+
+        assert_eq!(extensions.get::<SessionId>().unwrap().0, "abc");
+        assert!(extensions.get::<String>().is_none());
+    }
+
+    #[test]
+    fn replacing_a_key_overwrites_the_value() {
+        let mut extensions = Extensions::default();
+        extensions.insert(SessionId("one".into()));
+        extensions.insert(SessionId("two".into()));
+
+        assert_eq!(extensions.get::<SessionId>().unwrap().0, "two");
+    }
+
+    #[test]
+    fn clones_share_values_without_observing_each_other() {
+        let mut extensions = Extensions::default();
+        extensions.insert(SessionId("abc".into()));
+        let clone = extensions.clone();
+
+        assert_eq!(clone.get::<SessionId>().unwrap().0, "abc");
+
+        let mut detached = extensions.clone();
+        detached.insert(SessionId("other".into()));
+        assert_eq!(extensions.get::<SessionId>().unwrap().0, "abc");
+        assert_eq!(detached.get::<SessionId>().unwrap().0, "other");
+    }
+}

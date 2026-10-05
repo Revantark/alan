@@ -1,8 +1,8 @@
 use crate::auth::{AuthError, AuthResolver};
 use crate::catalog::ModelInfo;
 use llm::{
-    CompletionInput, LlmApi, LlmError, LlmRequest, LlmResponse, LlmStream, ReasoningEffort,
-    ServerTool, ToolSpec,
+    CompletionInput, Extensions, LlmApi, LlmError, LlmRequest, LlmResponse, LlmStream,
+    ReasoningEffort, ServerTool, ToolSpec,
 };
 use std::sync::Arc;
 use thiserror::Error;
@@ -22,6 +22,8 @@ pub struct ModelOptions {
     /// Ordered provider list forwarded to the API. Empty means the request
     /// carries no `provider` block at all.
     pub provider_order: Vec<String>,
+    /// Provider-specific options forwarded to codecs with every request.
+    pub extensions: llm::Extensions,
 }
 
 impl From<&Model> for ModelOptions {
@@ -30,6 +32,7 @@ impl From<&Model> for ModelOptions {
             server_tools: value.server_tools.clone(),
             reasoning_effort: value.reasoning_effort(),
             provider_order: value.provider_order.clone(),
+            extensions: value.extensions.clone(),
         }
     }
 }
@@ -42,6 +45,7 @@ pub struct Model {
     server_tools: Vec<ServerTool>,
     reasoning_effort: ReasoningEffort,
     provider_order: Vec<String>,
+    extensions: Extensions,
 }
 
 impl Model {
@@ -58,6 +62,7 @@ impl Model {
             server_tools: options.server_tools,
             reasoning_effort: options.reasoning_effort,
             provider_order: options.provider_order,
+            extensions: options.extensions,
         }
     }
 
@@ -100,6 +105,7 @@ impl Model {
             reasoning_effort: self.reasoning_effort,
             provider_order: (!self.provider_order.is_empty())
                 .then_some(self.provider_order.as_slice()),
+            extensions: self.extensions.clone(),
         };
         Ok(self.api.complete(request).await?)
     }
@@ -116,6 +122,7 @@ impl Model {
             reasoning_effort: self.reasoning_effort,
             provider_order: (!self.provider_order.is_empty())
                 .then_some(self.provider_order.as_slice()),
+            extensions: self.extensions.clone(),
         };
         Ok(self.api.stream(request).await?)
     }

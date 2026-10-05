@@ -1,4 +1,4 @@
-use crate::{Message, ToolSpec};
+use crate::{Extensions, Message, ToolSpec};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
@@ -123,4 +123,6 @@ pub struct LlmRequest<'a> {
     /// Ordered provider list forwarded to the API. `None` means the request
     /// carries no `provider` block at all.
     pub provider_order: Option<&'a [String]>,
+    /// Provider-specific options, read by codecs when building the wire body.
+    pub extensions: Extensions,
 }
