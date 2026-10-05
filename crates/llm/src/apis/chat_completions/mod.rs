@@ -1,5 +1,12 @@
 mod codec;
 
+pub use codec::{
+    BaseRequest, BaseResponse, DefaultChatCompletionsCodec, StreamChoice, StreamDelta,
+    StreamFunctionWire, StreamToolCallWire, WireDefinition, WireFunction, WireMessage,
+    WireProvider, WireReasoning, WireTool, WireToolCall, WireUsage, decode_stream_response,
+    stop_reason_for_finish_reason, usage_from_wire,
+};
+
 use crate::apis::sse::SseDecoder;
 use crate::codec::{CodecChunk, LlmApiCodec};
 use crate::{HttpClient, LlmApi, LlmError, LlmEvent, LlmRequest, LlmStream, StopReason};
