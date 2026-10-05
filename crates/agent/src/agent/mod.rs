@@ -370,13 +370,13 @@ impl Agent {
         Ok(())
     }
 
-    pub async fn set_provider_order(&self, provider_order: Vec<String>) -> Result<(), AgentError> {
+    pub async fn set_extensions(&self, extensions: llm::Extensions) -> Result<(), AgentError> {
         let mut model = self.model.try_lock().map_err(|_| {
             AgentError::Model(providers::ModelError::Llm(llm::LlmError::Configuration(
-                "agent is busy: cannot change provider order mid-run".into(),
+                "agent is busy: cannot change request extensions mid-run".into(),
             )))
         })?;
-        model.set_provider_order(provider_order);
+        model.set_extensions(extensions);
         Ok(())
     }
 }
