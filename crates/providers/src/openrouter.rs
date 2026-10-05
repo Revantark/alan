@@ -3,9 +3,7 @@ use crate::{
     ProviderError, ProviderId, ServerToolInfo,
 };
 use async_trait::async_trait;
-use llm::apis::chat_completions::{
-    BaseRequest, BaseResponse, WireUsage, decode_stream_response,
-};
+use llm::apis::chat_completions::{BaseRequest, BaseResponse, WireUsage, decode_stream_response};
 use llm::{ChatCompletionsApi, CodecChunk, HttpClient, LlmApi, LlmApiCodec, LlmError, LlmRequest};
 use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
