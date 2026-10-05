@@ -7,12 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Added
-
-- `/local add` fetches the server's `/models` once URL and key are filled and opens a searchable picker; once detected, ◀ ▶ on Model ID reopen it to change the pick. If detection fails it shows why (e.g. `HTTP 401`, `could not connect`) and falls back to typing the model ID. Fields are now ordered URL, API, API Key, Model ID.
-
 ### Changed
 
+- `/local add` auto-detects models via `/models` and provides a searchable picker for model selection.
 - Provider-specific request/response handling moved out of the generic chat completions codec into per-provider codecs.
 - Remove google from active providers.
 
