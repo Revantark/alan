@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- Provider-specific request/response handling moved out of the generic chat completions codec into per-provider codecs (`LlmApiCodec`). OpenRouter's provider routing, sticky session id, and usage cost parsing now live in `OpenRouterCodec`; other OpenAI-compatible providers no longer receive those OpenRouter-only body fields. Provider options travel via typed request extensions instead of fields on the shared request types.
+- Provider-specific request/response handling moved out of the generic chat completions codec into per-provider codecs.
 
 ## 0.1.4 - 2026-10-4
 

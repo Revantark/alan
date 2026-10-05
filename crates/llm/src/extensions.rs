@@ -3,16 +3,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 /// Type-erased side-channel carrying provider-specific options on an
-/// [`LlmRequest`](crate::LlmRequest). Keys are types, so a value's meaning is
-/// defined by whoever defines the key type.
-///
-/// Keys live next to their consumers: generic keys (like
-/// [`SessionId`]) in `llm`, provider-specific ones (like OpenRouter routing
-/// options) in `providers`. The container never inspects what it stores, so
-/// the dependency direction `llm <- providers <- agent <- alan` is preserved.
-///
-/// Cloning is cheap: values live behind an [`Arc`], so requests can carry
-/// their own copy. Insertion is intended before a request is shared.
+/// [`LlmRequest`](crate::LlmRequest).
 #[derive(Clone, Default)]
 pub struct Extensions {
     map: HashMap<TypeId, Arc<dyn Any + Send + Sync>>,
