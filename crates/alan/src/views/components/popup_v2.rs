@@ -100,6 +100,7 @@ impl PopupListv2 {
         }
 
         if let Some(message) = &self.message {
+            frame.render_widget(ratatui::widgets::Clear, area);
             frame.render_widget(
                 Paragraph::new(message.clone())
                     .style(Style::default().bg(theme::EDITOR_BG))
