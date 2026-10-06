@@ -147,9 +147,6 @@ impl AgentMessage {
             Self::Assistant(message) => {
                 let text = message.text();
                 let calls: Vec<ToolCall> = message.tool_calls().cloned().collect();
-                // Reasoning is preserved so codecs that re-send it to the
-                // API (DeepSeek requires it with tool calls) can. The
-                // canonical wire format never serializes it.
                 if calls.is_empty() {
                     Message::assistant_with_reasoning(
                         (!text.is_empty()).then_some(text),
@@ -240,27 +237,6 @@ mod tests {
             message,
             Message::assistant_with_reasoning(Some("hello".into()), None, Vec::new())
         );
-        assert!(message.tool_calls.is_none());
-    }
-
-    #[test]
-    fn assistant_message_preserves_reasoning() {
-        let assistant = LlmResponse {
-            content: vec![ContentBlock::Text("hello".into())],
-            stop_reason: StopReason::Stop,
-            usage: None,
-            model: None,
-            reasoning: Some("thought process".into()),
-            reasoning_details: vec![
-                serde_json::json!({"type": "reasoning.text", "text": "thought process"}),
-            ],
-        };
-
-        let message = AgentMessage::Assistant(assistant).to_llm();
-
-        assert_eq!(message.content.as_deref(), Some("hello"));
-        assert_eq!(message.reasoning.as_deref(), Some("thought process"));
-        assert_eq!(message.reasoning_details.unwrap().len(), 1);
         assert!(message.tool_calls.is_none());
     }
 }

@@ -85,16 +85,19 @@ impl LlmApiCodec for DeepSeekCodec {
             .as_ref()
             .and_then(|usage| usage.get("prompt_cache_hit_tokens"))
             .and_then(serde_json::Value::as_u64);
+
         let usage = chunk
             .usage
             .map(Deserialize::deserialize)
             .transpose()
             .map_err(LlmError::Serialization)?;
+
         let mut decoded = decode_stream_response(&BaseResponse {
             model: chunk.model,
             choices: chunk.choices,
             usage,
         })?;
+
         if let (Some(cached), Some(usage)) = (cached_tokens, &mut decoded.usage) {
             usage.cached_tokens = Some(cached);
         }
