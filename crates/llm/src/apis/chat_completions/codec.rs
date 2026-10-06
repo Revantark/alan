@@ -88,11 +88,6 @@ pub struct WireMessage {
     pub tool_calls: Option<Vec<WireToolCall>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    /// Always `None`: reasoning history is never re-sent on the wire
-    /// (OpenAI-compatible APIs reject or mis-handle round-tripped
-    /// `reasoning_details`).
-    pub reasoning_details: Option<Vec<serde_json::Value>>,
 }
 
 #[derive(Serialize)]
@@ -367,7 +362,6 @@ fn wire_message(message: &Message) -> WireMessage {
                 .collect()
         }),
         tool_call_id: message.tool_call_id.clone(),
-        reasoning_details: None,
     }
 }
 
@@ -450,7 +444,7 @@ mod tests {
     }
 
     #[test]
-    fn serializes_reasoning_effort_and_strips_reasoning_details() {
+    fn serializes_reasoning_effort_and_omits_reasoning_history() {
         let messages = [Message::assistant_with_tool_calls_and_reasoning(
             None,
             vec![crate::ToolCall {
@@ -469,7 +463,11 @@ mod tests {
             serde_json::from_str(&codec().request(&request).unwrap()).unwrap();
         assert_eq!(json["reasoning"]["effort"], "high");
         assert!(
-            json["messages"][0].get("reasoning_details").is_none(),
+            json["messages"][0]
+                .as_object()
+                .unwrap()
+                .keys()
+                .all(|key| key != "reasoning_details" && key != "reasoning_content"),
             "reasoning history must not be re-sent"
         );
     }
