@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- DeepSeek provider (`https://api.deepseek.com`), authenticated with `DEEPSEEK_API_KEY`. Thinking mode and reasoning-effort levels map to DeepSeek's `thinking`/`reasoning_effort` parameters, reasoning is sent back on tool-call turns as the API requires, and prompt-cache hits surface as cached tokens. Model catalog is fetched from `/models`.
+
 ### Changed
 
 - `/local add` auto-detects models via `/models` and provides a searchable picker for model selection.
