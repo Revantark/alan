@@ -5,9 +5,11 @@ use crate::views::theme;
 use alan_tui::component::{ActionStatus, Component, RenderContext};
 use alan_tui::context::Context;
 use alan_tui::selection;
-use alan_tui::selection::{Selection, TextPosition};
+use alan_tui::selection::{Selection, SelectionMode, TextPosition};
 use alan_tui::{Subscription, SubscriptionEvent};
-use crossterm::event::{Event, KeyCode, KeyEventKind, MouseButton, MouseEvent, MouseEventKind};
+use crossterm::event::{
+    Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+};
 use futures_util::Stream;
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
@@ -51,8 +53,9 @@ struct View {
     /// hundreds of events; they are coalesced and applied once per tick
     /// instead of one redraw per event.
     pending_wheel: isize,
-    /// Last click timestamp and position for double-click detection.
-    last_click: Option<(Instant, u16, u16)>,
+    /// Last click timestamp, position and consecutive click count for
+    /// double/triple-click detection.
+    last_click: Option<(Instant, u16, u16, u8)>,
 }
 
 impl Default for View {
@@ -214,27 +217,52 @@ impl View {
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) => {
                 let now = Instant::now();
-                let is_double_click = self.last_click.is_some_and(|(t, c, r)| {
-                    c == mouse.column && r == mouse.row && now.duration_since(t).as_millis() <= 500
-                });
-
-                if let Some(pos) = self.screen_to_text_pos(mouse.column, mouse.row, area) {
-                    let lines = self.layout.lines();
-                    if is_double_click && pos.line < lines.len() {
-                        let (start_col, end_col) =
-                            selection::find_word_bounds_at(&lines[pos.line], pos.col);
-                        let sel = Selection::new_word(pos, start_col, end_col);
-                        self.selection = Some(sel);
-                        self.last_click = None;
-                        self.copy_selection();
-                    } else {
-                        self.selection = Some(Selection::new(pos));
-                        self.last_click = Some((now, mouse.column, mouse.row));
+                let click_count = match self.last_click {
+                    Some((t, c, r, n))
+                        if c == mouse.column
+                            && r == mouse.row
+                            && now.duration_since(t).as_millis() <= 500 =>
+                    {
+                        n + 1
                     }
-                    true
-                } else {
-                    false
+                    _ => 1,
+                };
+
+                let Some(pos) = self.screen_to_text_pos(mouse.column, mouse.row, area) else {
+                    return false;
+                };
+                let lines = self.layout.lines();
+
+                let extend = mouse.modifiers.contains(KeyModifiers::SHIFT)
+                    && self
+                        .selection
+                        .is_some_and(|s| !s.is_dragging && !s.is_empty());
+                if extend {
+                    if let Some(sel) = &mut self.selection {
+                        sel.mode = SelectionMode::Character;
+                        sel.word_anchor = None;
+                        sel.is_dragging = true;
+                        sel.update_cursor(pos, lines);
+                    }
+                    self.last_click = None;
+                    return true;
                 }
+
+                if click_count >= 3 {
+                    self.selection = Some(Selection::new_line(pos));
+                    self.last_click = Some((now, mouse.column, mouse.row, 3));
+                    self.copy_selection();
+                } else if click_count == 2 && pos.line < lines.len() {
+                    let (start_col, end_col) =
+                        selection::find_word_bounds_at(&lines[pos.line], pos.col);
+                    self.selection = Some(Selection::new_word(pos, start_col, end_col));
+                    self.last_click = Some((now, mouse.column, mouse.row, 2));
+                    self.copy_selection();
+                } else {
+                    self.selection = Some(Selection::new(pos));
+                    self.last_click = Some((now, mouse.column, mouse.row, click_count));
+                }
+                true
             }
             MouseEventKind::Drag(MouseButton::Left) => {
                 let is_dragging = self.selection.as_ref().is_some_and(|s| s.is_dragging);

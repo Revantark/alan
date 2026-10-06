@@ -29,6 +29,8 @@ pub enum SelectionMode {
     #[default]
     Character,
     Word,
+    /// Whole-line selection sentinel.
+    Line,
 }
 
 /// The active selection range in a text view.
@@ -63,7 +65,21 @@ impl Selection {
         }
     }
 
+    pub fn new_line(pos: TextPosition) -> Self {
+        Self {
+            anchor: TextPosition::new(pos.line, 0),
+            cursor: TextPosition::new(pos.line, usize::MAX),
+            mode: SelectionMode::Line,
+            word_anchor: None,
+            is_dragging: true,
+        }
+    }
+
     pub fn update_cursor(&mut self, pos: TextPosition, lines: &[Line<'static>]) {
+        if self.mode == SelectionMode::Line {
+            self.cursor = TextPosition::new(pos.line, usize::MAX);
+            return;
+        }
         if self.mode == SelectionMode::Word {
             let Some((anchor_start, anchor_end)) = self.word_anchor else {
                 self.cursor = pos;
@@ -94,11 +110,19 @@ impl Selection {
     }
 
     pub fn start(&self) -> TextPosition {
-        self.anchor.min(self.cursor)
+        let start = self.anchor.min(self.cursor);
+        if self.mode == SelectionMode::Line {
+            return TextPosition::new(start.line, 0);
+        }
+        start
     }
 
     pub fn end(&self) -> TextPosition {
-        self.anchor.max(self.cursor)
+        let end = self.anchor.max(self.cursor);
+        if self.mode == SelectionMode::Line {
+            return TextPosition::new(end.line, usize::MAX);
+        }
+        end
     }
 
     pub fn is_empty(&self) -> bool {
@@ -163,24 +187,6 @@ fn highlight_line(
     }
 
     let selected_style = || Style::default().bg(selection_bg).fg(selection_fg);
-
-    // Fast path: the whole line lies inside the selection.
-    let line_width: usize = line.spans.iter().map(|s| s.width()).sum();
-    if line_width <= col_end {
-        let mut spans = Vec::with_capacity(line.spans.len());
-        for span in &line.spans {
-            if line_width > col_start {
-                spans.push(Span::styled(
-                    span.content.clone(),
-                    span.style.patch(selected_style()),
-                ));
-            } else {
-                spans.push(span.clone());
-            }
-        }
-        return Line::from(spans);
-    }
-
     let mut current_col = 0;
     let mut new_spans = Vec::with_capacity(line.spans.len());
 
@@ -419,6 +425,60 @@ mod tests {
         assert_eq!(sel.start(), TextPosition::new(0, 0));
         assert_eq!(sel.end(), TextPosition::new(0, 12));
         assert_eq!(extract_selected_text(&lines, &sel), "first second");
+    }
+
+    #[test]
+    fn word_bounds_follow_punctuation() {
+        let line = Line::from(vec![Span::raw("foo-bar")]);
+        assert_eq!(find_word_bounds_at(&line, 5), (4, 7));
+        assert_eq!(find_word_bounds_at(&line, 0), (0, 3));
+    }
+
+    #[test]
+    fn highlights_from_mid_line_start() {
+        let line = Line::from(vec![
+            Span::raw("Hello "),
+            Span::raw("World!"),
+            Span::raw(" padding"),
+        ]);
+        let highlighted = highlight_line(&line, 4, usize::MAX, Color::Blue, Color::White);
+        let texts: Vec<&str> = highlighted
+            .spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert_eq!(texts, vec!["Hell", "o ", "World!", " padding"]);
+        assert!(highlighted.spans[0].style.bg.is_none());
+        assert!(highlighted.spans[1].style.bg.is_some());
+        assert!(highlighted.spans[2].style.bg.is_some());
+    }
+
+    #[test]
+    fn word_drag_across_lines() {
+        let lines = vec![Line::from("alpha beta"), Line::from("gamma delta")];
+        let mut sel = Selection::new_word(TextPosition::new(0, 6), 6, 10);
+        sel.update_cursor(TextPosition::new(1, 7), &lines);
+        assert_eq!(sel.start(), TextPosition::new(0, 6));
+        assert_eq!(sel.end(), TextPosition::new(1, 11));
+        assert_eq!(extract_selected_text(&lines, &sel), "beta\ngamma delta");
+    }
+
+    #[test]
+    fn line_selection_spans_lines() {
+        let lines = vec![
+            Line::from("alpha beta"),
+            Line::from("gamma delta"),
+            Line::from("epsilon"),
+        ];
+        let mut sel = Selection::new_line(TextPosition::new(1, 3));
+        assert_eq!(extract_selected_text(&lines, &sel), "gamma delta");
+        sel.update_cursor(TextPosition::new(2, 1), &lines);
+        assert_eq!(extract_selected_text(&lines, &sel), "gamma delta\nepsilon");
+        sel.update_cursor(TextPosition::new(0, 9), &lines);
+        assert_eq!(
+            extract_selected_text(&lines, &sel),
+            "alpha beta\ngamma delta"
+        );
     }
 
     #[test]

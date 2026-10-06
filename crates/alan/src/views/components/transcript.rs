@@ -224,11 +224,12 @@ fn background_line(
 ) -> Line<'static> {
     let content = format!("{}{}", " ".repeat(theme::CHAT_PADDING), text);
     let used_width = Line::from(content.as_str()).width();
+
     let trailing = " ".repeat(width.saturating_sub(used_width));
-    Line::from(Span::styled(
-        format!("{content}{trailing}"),
-        Style::default().fg(foreground).bg(background),
-    ))
+    Line::from(vec![
+        Span::styled(content, Style::default().fg(foreground).bg(background)),
+        Span::styled(trailing, Style::default().bg(background)),
+    ])
 }
 
 fn indented_line(text: &str, foreground: Color) -> Line<'static> {
@@ -270,10 +271,10 @@ fn tool_line(text: &str, width: usize, foreground: Color, background: Color) -> 
     let content = format!("{}{}", " ".repeat(theme::CHAT_PADDING), text);
     let used_width = Line::from(content.as_str()).width();
     let trailing = " ".repeat(width.saturating_sub(used_width));
-    Line::from(Span::styled(
-        format!("{content}{trailing}"),
-        Style::default().fg(foreground).bg(background),
-    ))
+    Line::from(vec![
+        Span::styled(content, Style::default().fg(foreground).bg(background)),
+        Span::styled(trailing, Style::default().bg(background)),
+    ])
 }
 
 fn tool_detail_line(
@@ -285,10 +286,10 @@ fn tool_detail_line(
     let content = format!("{}{}{}", " ".repeat(theme::CHAT_PADDING), "  ", text);
     let used_width = Line::from(content.as_str()).width();
     let trailing = " ".repeat(width.saturating_sub(used_width));
-    Line::from(Span::styled(
-        format!("{content}{trailing}"),
-        Style::default().fg(foreground).bg(background),
-    ))
+    Line::from(vec![
+        Span::styled(content, Style::default().fg(foreground).bg(background)),
+        Span::styled(trailing, Style::default().bg(background)),
+    ])
 }
 
 fn pad_line(text: &str, width: usize) -> String {
