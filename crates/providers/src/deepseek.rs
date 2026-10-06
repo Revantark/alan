@@ -196,8 +196,16 @@ impl Provider for DeepSeekProvider {
 
     async fn fetch_models(&self) -> Result<(), ProviderError> {
         let _guard = self.fetch_lock.lock().await;
-        let response = reqwest::Client::new()
-            .get(format!("{BASE_URL}/models"))
+        let credential = self
+            .auth
+            .resolve()
+            .await
+            .map_err(|error| ProviderError::Fetch(format!("authentication failed: {error}")))?;
+        let mut request = reqwest::Client::new().get(format!("{BASE_URL}/models"));
+        if let llm::Credential::ApiKey(key) = credential {
+            request = request.bearer_auth(key);
+        }
+        let response = request
             .send()
             .await
             .map_err(|error| ProviderError::Fetch(format!("request failed: {error}")))?;
