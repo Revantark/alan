@@ -20,6 +20,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - Local model overlay background now opaque — no longer shows underlying content.
+- Picker search (models, profiles, local models) now matches characters as an ordered subsequence.
 
 ## 0.1.4 - 2026-10-4
 
