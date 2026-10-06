@@ -10,7 +10,7 @@ use ratatui::layout::Alignment;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, Paragraph};
+use ratatui::widgets::{Block, BorderType, Clear, Paragraph};
 use std::sync::Arc;
 
 const FIELD_COUNT: usize = 4;
@@ -378,6 +378,7 @@ fn render_local_model_overlay(
         width,
         height,
     );
+    frame.render_widget(Clear, popup);
     let accent = Style::default().fg(theme::PROMPT_FG);
     let muted = Style::default().fg(theme::TOOL_FG);
 
