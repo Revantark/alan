@@ -147,21 +147,21 @@ impl AgentMessage {
             Self::Assistant(message) => {
                 let text = message.text();
                 let calls: Vec<ToolCall> = message.tool_calls().cloned().collect();
-                // Reasoning history is never re-sent: it is verbose and the
-                // model does not need its own chain-of-thought back as input.
-                // The transcript on disk still preserves it.
+                // Reasoning is preserved so codecs that re-send it to the
+                // API (DeepSeek requires it with tool calls) can. The
+                // canonical wire format never serializes it.
                 if calls.is_empty() {
                     Message::assistant_with_reasoning(
                         (!text.is_empty()).then_some(text),
-                        None,
-                        Vec::new(),
+                        message.reasoning.clone(),
+                        message.reasoning_details.clone(),
                     )
                 } else {
                     Message::assistant_with_tool_calls_and_reasoning(
                         (!text.is_empty()).then_some(text),
                         calls,
-                        None,
-                        Vec::new(),
+                        message.reasoning.clone(),
+                        message.reasoning_details.clone(),
                     )
                 }
             }
@@ -244,7 +244,7 @@ mod tests {
     }
 
     #[test]
-    fn plain_assistant_message_strips_reasoning() {
+    fn assistant_message_preserves_reasoning() {
         let assistant = LlmResponse {
             content: vec![ContentBlock::Text("hello".into())],
             stop_reason: StopReason::Stop,
@@ -259,8 +259,8 @@ mod tests {
         let message = AgentMessage::Assistant(assistant).to_llm();
 
         assert_eq!(message.content.as_deref(), Some("hello"));
-        assert_eq!(message.reasoning, None);
-        assert!(message.reasoning_details.is_none());
+        assert_eq!(message.reasoning.as_deref(), Some("thought process"));
+        assert_eq!(message.reasoning_details.unwrap().len(), 1);
         assert!(message.tool_calls.is_none());
     }
 }
