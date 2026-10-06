@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- DeepSeek provider (`https://api.deepseek.com`). 
+
 ### Changed
 
 - `/local add` auto-detects models via `/models` and provides a searchable picker for model selection.
@@ -16,6 +20,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - Local model overlay background now opaque — no longer shows underlying content.
+- Picker search (models, profiles, local models) now matches characters as an ordered subsequence.
+- Popup v2 clears before rendering a message such that background text doesn't overlap with popup's message.
 
 ## 0.1.4 - 2026-10-4
 

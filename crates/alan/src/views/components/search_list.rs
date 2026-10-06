@@ -27,6 +27,24 @@ pub struct SearchListOverlay {
     selected: usize,
 }
 
+fn is_subsequence(query: &str, item: &str) -> bool {
+    let query = query.to_lowercase();
+    if query.is_empty() {
+        return true;
+    }
+    let mut want = query.chars();
+    let mut next = want.next();
+    for c in item.to_lowercase().chars() {
+        if Some(c) == next {
+            next = want.next();
+            if next.is_none() {
+                return true;
+            }
+        }
+    }
+    next.is_none()
+}
+
 impl SearchListOverlay {
     pub fn new(title: impl Into<String>, items: Vec<String>) -> Self {
         let filtered = (0..items.len()).collect();
@@ -50,12 +68,11 @@ impl SearchListOverlay {
     }
 
     fn refresh(&mut self) {
-        let query = self.query.to_lowercase();
         self.filtered = self
             .items
             .iter()
             .enumerate()
-            .filter(|(_, item)| query.is_empty() || item.to_lowercase().contains(&query))
+            .filter(|(_, item)| is_subsequence(&self.query, item))
             .map(|(index, _)| index)
             .collect();
         self.selected = self.selected.min(self.filtered.len().saturating_sub(1));
@@ -112,6 +129,14 @@ impl Component<AlanAction> for SearchListOverlay {
                     cx.close_overlay();
                 }
             }
+            KeyCode::Backspace if key.modifiers.contains(KeyModifiers::SUPER) => {
+                self.query.clear();
+                self.refresh();
+            }
+            KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.query.clear();
+                self.refresh();
+            }
             KeyCode::Backspace => {
                 self.query.pop();
                 self.refresh();
@@ -164,7 +189,7 @@ impl SearchListOverlay {
             .title_alignment(Alignment::Center)
             .title_bottom(
                 Line::from(if width >= 60 {
-                    " ↑↓ / C-n C-p move   Enter select   Esc close "
+                    " ↑↓ / C-n C-p move   Enter select   C-⌫ clear   Esc close "
                 } else if width >= 38 {
                     " ↑↓ move · Enter select · Esc close "
                 } else {

@@ -147,21 +147,18 @@ impl AgentMessage {
             Self::Assistant(message) => {
                 let text = message.text();
                 let calls: Vec<ToolCall> = message.tool_calls().cloned().collect();
-                // Reasoning history is never re-sent: it is verbose and the
-                // model does not need its own chain-of-thought back as input.
-                // The transcript on disk still preserves it.
                 if calls.is_empty() {
                     Message::assistant_with_reasoning(
                         (!text.is_empty()).then_some(text),
-                        None,
-                        Vec::new(),
+                        message.reasoning.clone(),
+                        message.reasoning_details.clone(),
                     )
                 } else {
                     Message::assistant_with_tool_calls_and_reasoning(
                         (!text.is_empty()).then_some(text),
                         calls,
-                        None,
-                        Vec::new(),
+                        message.reasoning.clone(),
+                        message.reasoning_details.clone(),
                     )
                 }
             }
@@ -240,27 +237,6 @@ mod tests {
             message,
             Message::assistant_with_reasoning(Some("hello".into()), None, Vec::new())
         );
-        assert!(message.tool_calls.is_none());
-    }
-
-    #[test]
-    fn plain_assistant_message_strips_reasoning() {
-        let assistant = LlmResponse {
-            content: vec![ContentBlock::Text("hello".into())],
-            stop_reason: StopReason::Stop,
-            usage: None,
-            model: None,
-            reasoning: Some("thought process".into()),
-            reasoning_details: vec![
-                serde_json::json!({"type": "reasoning.text", "text": "thought process"}),
-            ],
-        };
-
-        let message = AgentMessage::Assistant(assistant).to_llm();
-
-        assert_eq!(message.content.as_deref(), Some("hello"));
-        assert_eq!(message.reasoning, None);
-        assert!(message.reasoning_details.is_none());
         assert!(message.tool_calls.is_none());
     }
 }

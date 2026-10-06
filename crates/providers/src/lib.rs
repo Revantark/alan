@@ -1,6 +1,7 @@
 mod auth;
 mod catalog;
 mod credentials;
+mod deepseek;
 mod google;
 mod local;
 mod model;
@@ -8,6 +9,8 @@ mod openrouter;
 mod provider;
 mod store;
 mod zai;
+
+pub use deepseek::{DeepSeekBuilder, DeepSeekProvider};
 
 pub use auth::{
     ApiKeyAuth, AuthError, AuthMethod, AuthResolver, AuthResult, CredentialAuth, NoAuth,
