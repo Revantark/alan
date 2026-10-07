@@ -70,7 +70,7 @@ alan --version
 Alan currently supports:
 
 - **OpenRouter**
-- **Google** (beta)
+- **DeepSeek**
 - **Zai** (beta)
 
 Use the `/login` command to sign in to any of the available providers.
