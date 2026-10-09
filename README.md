@@ -21,7 +21,7 @@ A minimal coding agent in your terminal.
 
 ## Features
 
-- **First-class OpenRouter support** — full model catalog, per-model custom provider pinning (`/model-provider`), and reasoning effort control (`/effort`).
+- **First-class OpenRouter support** — full model catalog, per-model custom provider pinning (`/model-providers`), and reasoning effort control (`/effort`).
 - **Paste images** — drop a screenshot from your clipboard straight into the conversation and ask about it.
 - **Compact with focus** — `/summarize-new "focus hint"` summarizes the context and restarts with just what matters.
 - **Steering** — queue a message mid-run and the agent picks it up without waiting for the response to finish.
@@ -75,10 +75,10 @@ Alan currently supports:
 
 Use the `/login` command to sign in to any of the available providers.
 
-For OpenRouter, you can pin a custom provider for the selected model with `/model-provider`, followed by the provider name (no quotes):
+For OpenRouter, you can pin a custom provider for the selected model with `/model-providers`, followed by the provider name (no quotes):
 
-- `/model-provider deepseek`
-- `/model-provider xiaomi/fp8`
+- `/model-providers deepseek`
+- `/model-providers xiaomi/fp8`
 
 ## Usage
 
@@ -96,12 +96,14 @@ For OpenRouter, you can pin a custom provider for the selected model with `/mode
 | `/summarize-new [focus]` | Summarize the context and restart; optionally pass a quoted focus hint, e.g. `/summarize-new "just take the XYZ details"` |
 | `/effort` | Set reasoning effort (`none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`) |
 | `/fork` | Fork the session from a checkpoint |
+| `/rename <name>` | Rename the current session |
 | `/tool-free` | Allow all tool calls without asking |
 | `/tool-slip` | Approve a command family once, allow its siblings |
 | `/tool-strict` | Allow only exact commands already approved |
 | `/local` | Manage local models (add, remove, edit) |
-| `/model-provider <name>` | Pin a custom provider for the current OpenRouter model |
+| `/model-providers <name>` | Pin a custom provider for the current OpenRouter model |
 | `/help` | List available commands |
+| `/quit` | Exit Alan |
 
 ## Permissions
 
@@ -115,9 +117,10 @@ A single tool call may chain several commands (`cargo test && cargo run`, or wit
 
 Grants persist per-project at `<data dir>/projects/<pwd-hash>/permissions.json`. The current policy is shown as a glyph in the status line.
 
-Alan starts in strict policy. Switch with:
+Alan starts in strict policy and remembers the policy you pick across runs. Switch with:
   - `/tool-slip`
   - `/tool-free`
+  - `/tool-strict`
 
 ## Local models
 
@@ -127,7 +130,7 @@ Alan supports OpenAI-compatible local models.
 /local add
 ```
 
-This opens an overlay with fields for Model ID, URL, API, and API Key. Use `/local remove` and `/local edit` to manage your local models. No API key or `/login` is needed for local models.
+This opens an overlay with fields for URL, API, API Key, and Model ID. Alan queries the server's `/models` endpoint and offers the detected models in a searchable picker. Use `/local remove` and `/local edit` to manage your local models. No API key or `/login` is needed for local models.
 
 ## Configuration and data locations
 
@@ -135,14 +138,38 @@ Alan stores everything under `~/.alan/` by default:
 
 - `settings.json` — your current settings and active-profile marker.
 - `profiles.json` — saved named model/reasoning/web settings profiles.
+- `auth.json` — provider credentials saved by `/login`.
+- `local_models.json` — local models added with `/local`.
+- `projects/` — per-project permission grants.
 - `sessions/` — conversation history (append-only JSONL, one file per session).
 - `skills/` — personal skills, available in every project.
 - `logs/` — daily rotating logs.
 
-All of these live in the data directory (`~/.alan` by default). `ALAN_HOME` selects the *parent* of that directory, so `ALAN_HOME=/tmp/x` puts everything in `/tmp/x/.alan`. Two other environment variables are useful:
+All of these live in the data directory (`~/.alan` by default).
 
-- `ALAN_LOG_DIR` — override the log directory.
-- `ALAN_MODEL` — override the default model on startup, e.g. `ALAN_MODEL=openai/gpt-4o-mini alan`.
+### Environment variables
+
+Settings variables override `settings.json` for that run without changing it. Start Alan with `--save` to write them into `settings.json`.
+
+| Variable | Effect |
+| --- | --- |
+| `ALAN_HOME` | Parent of the data directory: `ALAN_HOME=/tmp/x` puts everything in `/tmp/x/.alan`. |
+| `ALAN_PROVIDER` | Provider id: `openrouter`, `deepseek`, `zai`, or `local`. |
+| `ALAN_MODEL` | Model id for that provider, e.g. `ALAN_MODEL=openai/gpt-4o-mini alan`. |
+| `ALAN_REASONING_EFFORT` | `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max`. |
+| `ALAN_OPENROUTER_WEB_FETCH` | Turn OpenRouter's web fetch tool on or off: `true`/`false`, `1`/`0`, `yes`/`no`, `on`/`off`. |
+| `ALAN_OPENROUTER_WEB_SEARCH` | Turn OpenRouter's web search tool on or off, same values. |
+| `ALAN_OR_MODEL_PROVIDER` | Comma-separated OpenRouter provider order for the selected model, e.g. `deepseek,xiaomi/fp8`. |
+| `ALAN_SESSION` | Resume a saved session by id. Alan prints the exact command when it exits. |
+| `ALAN_LOG` | Log filter in `tracing` `EnvFilter` syntax. Falls back to `RUST_LOG`. |
+| `ALAN_LOG_DIR` | Log directory, default `~/.alan/logs`. |
+| `OPENROUTER_API_KEY`, `DEEPSEEK_API_KEY`, `ZAI_API_KEY` | API key for that provider, used when `/login` has not saved one. |
+
+### Flags
+
+- `--save` — write the settings environment variables above into `settings.json`.
+- `--blank` — start without Alan's default system prompt.
+- `--version` — print the installed version.
 
 ## Skills
 
