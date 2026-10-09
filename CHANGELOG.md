@@ -26,7 +26,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Popup v2 clears before rendering a message such that background text doesn't overlap with popup's message.
 - Text selection in the chat history is precise now.
 
-## 0.1.4 - 2026-10-4
+## 0.1.4 - 2026-10-04
 
 ### Added
 
