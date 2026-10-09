@@ -13,5 +13,4 @@ reqwest = { workspace = true }
 tokio = { workspace = true, features = ["sync", "rt"] }
 
 [dev-dependencies]
-futures-util = { workspace = true }
 tokio = { workspace = true }
