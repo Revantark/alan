@@ -4,6 +4,7 @@ pub mod action;
 pub mod chat;
 pub mod command;
 pub mod completion;
+pub mod custom_providers;
 pub mod paths;
 pub mod permissions;
 pub mod permissions_store;

@@ -7,6 +7,7 @@ mod login_overlay;
 mod root;
 mod views;
 
+use crate::core::custom_providers::{self, CustomProviderStore, CustomProviders};
 use crate::core::permissions::AlanPermissionManager;
 use crate::core::permissions::ToolPolicy;
 use crate::core::permissions_store;
@@ -23,7 +24,7 @@ use alan_tui::Runtime;
 use llm::ReasoningEffort;
 use providers::{
     DeepSeekProvider, FileCredentialStore, LocalProvider, ModelOptions, OpenRouterProvider,
-    Provider, ProviderRegistry, ZaiProvider, bind_model,
+    Provider, ProviderId, ProviderRegistry, ZaiProvider, bind_model,
 };
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -56,13 +57,21 @@ async fn main() -> anyhow::Result<()> {
         credential_store.clone() as Arc<dyn providers::CredentialStore>;
     let local_provider = load_local_provider().await?;
     let providers = build_providers(&credential_store_for_providers, &local_provider)?;
-    let session_manager = Arc::new(SessionManager::new(sessions_path()?));
-    let resumed_session = load_resumed_session(&session_manager).await?;
-    let model = select_model(&providers, &settings, resumed_session.as_ref())?;
     let registry = Arc::new(ProviderRegistry::with_local_provider(
         providers,
         Arc::clone(&local_provider),
     ));
+    let custom_providers = Arc::new(CustomProviders::new(
+        CustomProviderStore::new(custom_providers::default_providers_path()?),
+        Arc::clone(&registry),
+        Arc::clone(&credential_store_for_providers),
+    ));
+    if let Err(error) = custom_providers.load().await {
+        tracing::warn!(error = %error, "failed to load custom providers");
+    }
+    let session_manager = Arc::new(SessionManager::new(sessions_path()?));
+    let resumed_session = load_resumed_session(&session_manager).await?;
+    let model = select_model(&registry, &settings, resumed_session.as_ref())?;
 
     let current_dir = std::env::current_dir()?;
 
@@ -170,7 +179,7 @@ async fn load_resumed_session(
 }
 
 fn select_model(
-    providers: &[Arc<dyn Provider>],
+    registry: &ProviderRegistry,
     settings: &Settings,
     resumed_session: Option<&agent::Session>,
 ) -> anyhow::Result<providers::Model> {
@@ -184,9 +193,8 @@ fn select_model(
                 .unwrap_or_else(|| DEFAULT_MODEL.into()),
         ),
     };
-    let provider = providers
-        .iter()
-        .find(|provider| provider.id().0 == provider_id)
+    let provider = registry
+        .get(&ProviderId::new(provider_id))
         .ok_or_else(|| anyhow::anyhow!("Provider not found: {provider_id}"))?;
     let server_tools = server_tools(
         provider.server_tools(),
