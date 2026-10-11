@@ -23,7 +23,7 @@ use alan_tui::Runtime;
 use llm::ReasoningEffort;
 use providers::{
     DeepSeekProvider, FileCredentialStore, LocalProvider, ModelOptions, OpenRouterProvider,
-    Provider, ProviderRegistry, ZaiProvider, bind_model,
+    Provider, ProviderRegistry, ZaiProvider, bind_local_model, bind_model,
 };
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -58,7 +58,12 @@ async fn main() -> anyhow::Result<()> {
     let providers = build_providers(&credential_store_for_providers, &local_provider)?;
     let session_manager = Arc::new(SessionManager::new(sessions_path()?));
     let resumed_session = load_resumed_session(&session_manager).await?;
-    let model = select_model(&providers, &settings, resumed_session.as_ref())?;
+    let model = select_model(
+        &providers,
+        &local_provider,
+        &settings,
+        resumed_session.as_ref(),
+    )?;
     let registry = Arc::new(ProviderRegistry::with_local_provider(
         providers,
         Arc::clone(&local_provider),
@@ -171,6 +176,7 @@ async fn load_resumed_session(
 
 fn select_model(
     providers: &[Arc<dyn Provider>],
+    local_provider: &LocalProvider,
     settings: &Settings,
     resumed_session: Option<&agent::Session>,
 ) -> anyhow::Result<providers::Model> {
@@ -188,20 +194,22 @@ fn select_model(
         .iter()
         .find(|provider| provider.id().0 == provider_id)
         .ok_or_else(|| anyhow::anyhow!("Provider not found: {provider_id}"))?;
-    let server_tools = server_tools(
-        provider.server_tools(),
-        settings.web_fetch == Some(true),
-        settings.web_search == Some(true),
-    );
-    Ok(bind_model(
-        provider.as_ref(),
-        &model_id,
-        ModelOptions {
-            server_tools,
-            reasoning_effort: settings.reasoning.unwrap_or_default(),
-            extensions: settings.extensions(&model_id),
-        },
-    )?)
+    let options = ModelOptions {
+        server_tools: server_tools(
+            provider.server_tools(),
+            settings.web_fetch == Some(true),
+            settings.web_search == Some(true),
+        ),
+        reasoning_effort: settings.reasoning.unwrap_or_default(),
+        extensions: settings.extensions(&model_id),
+    };
+    if provider_id == "local" {
+        let entry = local_provider.find_entry(&model_id).ok_or_else(|| {
+            anyhow::anyhow!("Local model not found: {model_id} (manage it with /local)")
+        })?;
+        return Ok(bind_local_model(&entry, options)?);
+    }
+    Ok(bind_model(provider.as_ref(), &model_id, options)?)
 }
 
 fn build_tool_policy(
