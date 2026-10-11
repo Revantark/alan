@@ -13,7 +13,9 @@ use crate::core::permissions::AlanPermissionManager;
 use crate::core::permissions::ToolPolicy;
 use crate::core::permissions_store;
 use crate::core::server_tools::server_tools;
-use crate::core::settings::{DEFAULT_MODEL, PatchSettings, Settings, SettingsStore};
+use crate::core::settings::{
+    DEFAULT_MODEL, DEFAULT_PROVIDER, PatchSettings, Settings, SettingsStore,
+};
 use crate::core::update::current_version;
 use crate::core::{ChatController, SlashCommand};
 use crate::keymap::AlanKeyMapper;
@@ -72,7 +74,7 @@ async fn main() -> anyhow::Result<()> {
     }
     let session_manager = Arc::new(SessionManager::new(sessions_path()?));
     let resumed_session = load_resumed_session(&session_manager).await?;
-    let model = select_model(&registry, &settings, resumed_session.as_ref())?;
+    let (model, startup_notice) = select_model(&registry, &settings, resumed_session.as_ref())?;
 
     let current_dir = std::env::current_dir()?;
 
@@ -99,6 +101,9 @@ async fn main() -> anyhow::Result<()> {
 
     let model_name = agent.info().await.name;
     let mut controller = ChatController::new(agent, model_name);
+    if let Some(notice) = startup_notice {
+        controller.push_info(notice);
+    }
 
     if was_resumed {
         controller.restore_session_history().await;
@@ -180,30 +185,45 @@ async fn load_resumed_session(
     Ok(Some(session_manager.get_session(&session_id, &cwd).await?))
 }
 
+/// The model to start on, and a notice when the saved provider no longer
+/// exists: removed with `/provider remove`, or a typo in `ALAN_PROVIDER`.
 fn select_model(
     registry: &ProviderRegistry,
     settings: &Settings,
     resumed_session: Option<&agent::Session>,
-) -> anyhow::Result<providers::Model> {
+) -> anyhow::Result<(providers::Model, Option<String>)> {
     let (provider_id, model_id) = match resumed_session {
         Some(session) => (session.provider.as_str(), session.model.clone()),
         None => (
-            settings.provider.as_deref().unwrap_or("openrouter"),
+            settings.provider.as_deref().unwrap_or(DEFAULT_PROVIDER),
             settings
                 .model
                 .clone()
                 .unwrap_or_else(|| DEFAULT_MODEL.into()),
         ),
     };
-    let provider = registry
-        .get(&ProviderId::new(provider_id))
-        .ok_or_else(|| anyhow::anyhow!("Provider not found: {provider_id}"))?;
+    let (provider, model_id, notice) = match registry.get(&ProviderId::new(provider_id)) {
+        Some(provider) => (provider, model_id, None),
+        None => {
+            tracing::warn!(
+                provider = provider_id,
+                "saved provider not found, starting on the default model"
+            );
+            let provider = registry
+                .get(&ProviderId::new(DEFAULT_PROVIDER))
+                .ok_or_else(|| anyhow::anyhow!("Provider not found: {DEFAULT_PROVIDER}"))?;
+            let notice = format!(
+                "provider {provider_id} not found; using {DEFAULT_PROVIDER} — {DEFAULT_MODEL}"
+            );
+            (provider, DEFAULT_MODEL.to_owned(), Some(notice))
+        }
+    };
     let server_tools = server_tools(
         provider.server_tools(),
         settings.web_fetch == Some(true),
         settings.web_search == Some(true),
     );
-    Ok(bind_model(
+    let model = bind_model(
         provider.as_ref(),
         &model_id,
         ModelOptions {
@@ -211,7 +231,8 @@ fn select_model(
             reasoning_effort: settings.reasoning.unwrap_or_default(),
             extensions: settings.extensions(&model_id),
         },
-    )?)
+    )?;
+    Ok((model, notice))
 }
 
 fn build_tool_policy(
@@ -339,4 +360,44 @@ fn configured_session_id() -> anyhow::Result<Option<String>> {
         return Err(anyhow::anyhow!("ALAN_SESSION must not be empty"));
     }
     Ok(Some(id))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn registry() -> ProviderRegistry {
+        let openrouter = OpenRouterProvider::builder("key")
+            .build()
+            .expect("builds without network");
+        ProviderRegistry::new([Arc::new(openrouter) as Arc<dyn Provider>])
+    }
+
+    #[test]
+    fn a_missing_provider_falls_back_to_the_default_model() {
+        let settings = Settings {
+            provider: Some("gone".into()),
+            model: Some("some-model".into()),
+            ..Settings::with_defaults()
+        };
+
+        let (model, notice) = select_model(&registry(), &settings, None).unwrap();
+
+        assert_eq!(model.info().provider, ProviderId::new(DEFAULT_PROVIDER));
+        assert_eq!(model.info().id, DEFAULT_MODEL);
+        assert!(notice.unwrap().contains("gone"));
+    }
+
+    #[test]
+    fn a_known_provider_keeps_the_saved_model() {
+        let settings = Settings {
+            model: Some("some-model".into()),
+            ..Settings::with_defaults()
+        };
+
+        let (model, notice) = select_model(&registry(), &settings, None).unwrap();
+
+        assert_eq!(model.info().id, "some-model");
+        assert!(notice.is_none());
+    }
 }
