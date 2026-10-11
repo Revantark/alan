@@ -1,6 +1,7 @@
 mod auth;
 mod catalog;
 mod credentials;
+mod custom;
 mod deepseek;
 mod google;
 mod local;
@@ -10,6 +11,7 @@ mod provider;
 mod store;
 mod zai;
 
+pub use custom::{CustomProvider, fetch_catalog};
 pub use deepseek::{DeepSeekBuilder, DeepSeekProvider};
 
 pub use auth::{
