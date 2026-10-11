@@ -4,6 +4,7 @@ mod local_model_overlay;
 mod local_model_store;
 mod logging;
 mod login_overlay;
+mod provider_overlay;
 mod root;
 mod views;
 
@@ -110,6 +111,7 @@ async fn main() -> anyhow::Result<()> {
         controller,
         registry,
         credential_store,
+        custom_providers,
         permission_handler,
         policy,
         skill_roots,

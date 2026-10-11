@@ -1,13 +1,6 @@
 //! Providers added with `/provider add`: any server that speaks Chat
 //! Completions. Each is a name and a base URL in `providers.json`. Its key,
 //! if any, lives in `auth.json` under the same name so `/login` can change it.
-#![cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "add, edit and remove are wired to /provider in the next commit"
-    )
-)]
 
 use anyhow::{Context, Result};
 use providers::{

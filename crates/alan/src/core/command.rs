@@ -33,6 +33,8 @@ pub enum SlashCommand {
     // Manage local models (add, remove, edit).
     Local,
     Profile,
+    // Add, edit or remove a Chat Completions provider.
+    Provider,
     Quit,
 }
 
@@ -87,6 +89,7 @@ impl SlashCommand {
                 | Self::Rename
                 | Self::Local
                 | Self::Profile
+                | Self::Provider
         )
     }
 
@@ -109,6 +112,7 @@ impl SlashCommand {
             Self::ToolStrict => "allow only exact commands already approved",
             Self::Local => "manage local models (add, remove, edit)",
             Self::Profile => "save and switch named model profiles",
+            Self::Provider => "add, edit or remove a Chat Completions provider",
             Self::Quit => "abort and quit",
         }
     }
@@ -349,6 +353,17 @@ mod tests {
             Some((SlashCommand::Profile, "replace"))
         );
         assert!(SlashCommand::Profile.takes_args());
+    }
+
+    #[test]
+    fn parses_provider_subcommands() {
+        for sub in ["add", "edit", "remove"] {
+            assert_eq!(
+                SlashCommand::parse_with_args(&format!("/provider {sub}")),
+                Some((SlashCommand::Provider, sub))
+            );
+        }
+        assert!(SlashCommand::Provider.takes_args());
     }
 
     #[test]

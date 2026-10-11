@@ -13,6 +13,7 @@ mod session;
 mod steering;
 
 use crate::core::chat::ChatController;
+use crate::core::custom_providers::CustomProviders;
 use crate::core::permissions::PermissionHandler;
 use crate::core::permissions::PermissionRequest;
 use crate::core::permissions::{Answer, Policy, ToolPolicy};
@@ -56,6 +57,13 @@ pub(crate) enum LocalPick {
     Edit,
 }
 
+/// Action chosen from the custom-provider picker.
+#[derive(Clone, Copy)]
+pub(crate) enum ProviderPick {
+    Edit,
+    Remove,
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct LoginRequested;
 
@@ -71,6 +79,7 @@ pub struct ChatView {
     permission: Option<Entity<permissions::PermissionPrompt>>,
 
     providers: Arc<ProviderRegistry>,
+    custom_providers: Arc<CustomProviders>,
     permission_handler: PermissionHandler,
     policy: ToolPolicy,
     /// Subscription to the permission-request stream.
@@ -90,6 +99,7 @@ impl ChatView {
     pub fn new(
         controller: ChatController,
         providers: Arc<ProviderRegistry>,
+        custom_providers: Arc<CustomProviders>,
         permission_handler: PermissionHandler,
         policy: ToolPolicy,
         skill_roots: Vec<PathBuf>,
@@ -102,6 +112,7 @@ impl ChatView {
             pending_permission: None,
             permission: None,
             providers,
+            custom_providers,
             permission_handler,
             policy,
             permission_subscription: None,
@@ -252,6 +263,7 @@ impl ChatView {
                 Cmd::New => session::start_new_session(self, cx),
                 Cmd::Models => models::open_models_picker(self, cx),
                 Cmd::Local => models::handle_local_command(self, &submission.text, cx),
+                Cmd::Provider => models::handle_provider_command(self, &submission.text, cx),
                 Cmd::Profile => profiles::handle_profile_command(self, &submission.text, cx),
                 Cmd::Quit => cx.quit(),
             }
