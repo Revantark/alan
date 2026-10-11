@@ -51,12 +51,6 @@ const EDITOR_BOTTOM_PAD: u16 = 1;
 /// Fixed-rate repaint interval while an agent stream is in flight.
 const STREAM_REPAINT_INTERVAL: std::time::Duration = std::time::Duration::from_millis(32);
 
-/// Action chosen from the local-model picker.
-pub(crate) enum LocalPick {
-    Remove,
-    Edit,
-}
-
 /// Action chosen from the custom-provider picker.
 #[derive(Clone, Copy)]
 pub(crate) enum ProviderPick {
@@ -262,7 +256,6 @@ impl ChatView {
                 Cmd::Help => controller.push_info(crate::core::SlashCommand::help()),
                 Cmd::New => session::start_new_session(self, cx),
                 Cmd::Models => models::open_models_picker(self, cx),
-                Cmd::Local => models::handle_local_command(self, &submission.text, cx),
                 Cmd::Provider => models::handle_provider_command(self, &submission.text, cx),
                 Cmd::Profile => profiles::handle_profile_command(self, &submission.text, cx),
                 Cmd::Quit => cx.quit(),

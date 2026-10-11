@@ -30,8 +30,6 @@ pub enum SlashCommand {
     ToolFree,
     ToolSlip,
     ToolStrict,
-    // Manage local models (add, remove, edit).
-    Local,
     Profile,
     // Add, edit or remove a Chat Completions provider.
     Provider,
@@ -87,7 +85,6 @@ impl SlashCommand {
                 | Self::ModelProviders
                 | Self::SummarizeNew
                 | Self::Rename
-                | Self::Local
                 | Self::Profile
                 | Self::Provider
         )
@@ -110,7 +107,6 @@ impl SlashCommand {
             Self::ToolFree => "allow all tool calls without asking",
             Self::ToolSlip => "approve a command family once, allow its siblings",
             Self::ToolStrict => "allow only exact commands already approved",
-            Self::Local => "manage local models (add, remove, edit)",
             Self::Profile => "save and switch named model profiles",
             Self::Provider => "add, edit or remove a Chat Completions provider",
             Self::Quit => "abort and quit",
@@ -334,7 +330,6 @@ mod tests {
         assert!(!SlashCommand::Normal.takes_args());
         assert!(!SlashCommand::Help.takes_args());
         // Argument-taking commands.
-        assert!(SlashCommand::Local.takes_args());
         assert!(SlashCommand::Effort.takes_args());
         assert!(SlashCommand::ModelProviders.takes_args());
         assert!(SlashCommand::SummarizeNew.takes_args());
@@ -364,34 +359,5 @@ mod tests {
             );
         }
         assert!(SlashCommand::Provider.takes_args());
-    }
-
-    #[test]
-    fn parses_local_command() {
-        assert_eq!(SlashCommand::parse("/local"), Some(SlashCommand::Local));
-    }
-
-    #[test]
-    fn parses_local_subcommands() {
-        assert_eq!(
-            SlashCommand::parse_with_args("/local add"),
-            Some((SlashCommand::Local, "add"))
-        );
-        assert_eq!(
-            SlashCommand::parse_with_args("/local remove"),
-            Some((SlashCommand::Local, "remove"))
-        );
-        assert_eq!(
-            SlashCommand::parse_with_args("/local edit"),
-            Some((SlashCommand::Local, "edit"))
-        );
-    }
-
-    #[test]
-    fn parses_local_with_empty_args() {
-        assert_eq!(
-            SlashCommand::parse_with_args("/local"),
-            Some((SlashCommand::Local, ""))
-        );
     }
 }

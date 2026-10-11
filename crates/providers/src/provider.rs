@@ -1,7 +1,6 @@
 use crate::Model;
 use crate::auth::AuthResolver;
 use crate::catalog::{ApiId, ModelInfo, ProviderId, ServerToolInfo};
-use crate::local::LocalProvider;
 use crate::model::ModelOptions;
 use async_trait::async_trait;
 use llm::LlmApi;
@@ -52,24 +51,12 @@ pub trait Provider: Send + Sync {
 
 pub struct ProviderRegistry {
     providers: RwLock<Vec<Arc<dyn Provider>>>,
-    local_provider: Option<Arc<LocalProvider>>,
 }
 
 impl ProviderRegistry {
     pub fn new(providers: impl IntoIterator<Item = Arc<dyn Provider>>) -> Self {
         Self {
             providers: RwLock::new(providers.into_iter().collect()),
-            local_provider: None,
-        }
-    }
-
-    pub fn with_local_provider(
-        providers: impl IntoIterator<Item = Arc<dyn Provider>>,
-        local_provider: Arc<LocalProvider>,
-    ) -> Self {
-        Self {
-            providers: RwLock::new(providers.into_iter().collect()),
-            local_provider: Some(local_provider),
         }
     }
 
@@ -107,11 +94,6 @@ impl ProviderRegistry {
         let before = providers.len();
         providers.retain(|provider| provider.id() != *id);
         providers.len() < before
-    }
-
-    /// Return an `Arc` clone of the local provider, if registered.
-    pub fn local(&self) -> Option<Arc<LocalProvider>> {
-        self.local_provider.clone()
     }
 }
 

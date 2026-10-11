@@ -4,11 +4,9 @@ mod credentials;
 mod custom;
 mod deepseek;
 mod google;
-mod local;
 mod model;
 mod openrouter;
 mod provider;
-mod store;
 mod zai;
 
 pub use custom::{CustomProvider, fetch_catalog};
@@ -23,9 +21,7 @@ pub use credentials::{
     FileCredentialStore, InMemoryCredentialStore, SharedCredentialStore,
 };
 pub use google::{GoogleBuilder, GoogleProvider};
-pub use local::{LocalApi, LocalModelEntry, LocalProvider, bind_local_model, list_local_models};
 pub use model::{Model, ModelError, ModelOptions};
 pub use openrouter::{OpenRouterBuilder, OpenRouterProvider, Options as OpenRouterOptions};
 pub use provider::{Provider, ProviderError, ProviderRegistry, bind_model};
-pub use store::LocalModelStore;
 pub use zai::{ZaiBuilder, ZaiProvider};

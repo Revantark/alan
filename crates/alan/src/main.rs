@@ -1,7 +1,5 @@
 mod core;
 mod keymap;
-mod local_model_overlay;
-mod local_model_store;
 mod logging;
 mod login_overlay;
 mod provider_overlay;
@@ -19,15 +17,14 @@ use crate::core::settings::{
 use crate::core::update::current_version;
 use crate::core::{ChatController, SlashCommand};
 use crate::keymap::AlanKeyMapper;
-use crate::local_model_store::JsonLocalModelStore;
 use crate::logging::init;
 use crate::root::AlanRoot;
 use agent::{Agent, SessionManager, ToolPermissionManager, default_tools};
 use alan_tui::Runtime;
 use llm::ReasoningEffort;
 use providers::{
-    DeepSeekProvider, FileCredentialStore, LocalProvider, ModelOptions, OpenRouterProvider,
-    Provider, ProviderId, ProviderRegistry, ZaiProvider, bind_model,
+    DeepSeekProvider, FileCredentialStore, ModelOptions, OpenRouterProvider, Provider, ProviderId,
+    ProviderRegistry, ZaiProvider, bind_model,
 };
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -58,12 +55,8 @@ async fn main() -> anyhow::Result<()> {
     let credential_store = Arc::new(FileCredentialStore::new(auth_path()?));
     let credential_store_for_providers =
         credential_store.clone() as Arc<dyn providers::CredentialStore>;
-    let local_provider = load_local_provider().await?;
-    let providers = build_providers(&credential_store_for_providers, &local_provider)?;
-    let registry = Arc::new(ProviderRegistry::with_local_provider(
-        providers,
-        Arc::clone(&local_provider),
-    ));
+    let providers = build_providers(&credential_store_for_providers)?;
+    let registry = Arc::new(ProviderRegistry::new(providers));
     let custom_providers = Arc::new(CustomProviders::new(
         CustomProviderStore::new(custom_providers::default_providers_path()?),
         Arc::clone(&registry),
@@ -150,20 +143,8 @@ async fn load_or_create_settings(store: &SettingsStore) -> anyhow::Result<Settin
     }
 }
 
-async fn load_local_provider() -> anyhow::Result<Arc<LocalProvider>> {
-    let store = Arc::new(JsonLocalModelStore::new(
-        core::paths::alan_data_dir()?.join("local_models.json"),
-    ));
-    let provider = Arc::new(LocalProvider::new(store));
-    if let Err(error) = provider.load().await {
-        tracing::warn!("failed to load local models: {error}");
-    }
-    Ok(provider)
-}
-
 fn build_providers(
     credential_store: &Arc<dyn providers::CredentialStore>,
-    local_provider: &Arc<LocalProvider>,
 ) -> anyhow::Result<Vec<Arc<dyn Provider>>> {
     Ok(vec![
         Arc::new(ZaiProvider::from_store(Arc::clone(credential_store)).build()?),
@@ -171,7 +152,6 @@ fn build_providers(
         // Arc::new(GoogleProvider::from_store(Arc::clone(credential_store)).build()?),
         Arc::new(OpenRouterProvider::from_store(Arc::clone(credential_store)).build()?),
         Arc::new(DeepSeekProvider::from_store(Arc::clone(credential_store)).build()?),
-        Arc::clone(local_provider) as Arc<dyn Provider>,
     ])
 }
 

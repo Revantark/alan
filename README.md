@@ -13,7 +13,6 @@ A minimal coding agent in your terminal.
 - [Providers](#providers)
 - [Usage](#usage)
 - [Permissions](#permissions)
-- [Local models](#local-models)
 - [Skills](#skills)
 - [Configuration and data locations](#configuration-and-data-locations)
 - [Building from source](#building-from-source)
@@ -26,7 +25,6 @@ A minimal coding agent in your terminal.
 - **Compact with focus** — `/summarize-new "focus hint"` summarizes the context and restarts with just what matters.
 - **Steering** — queue a message mid-run and the agent picks it up without waiting for the response to finish.
 - **Plan and review modes** — cycle through them with `Shift+Tab` when you want the agent to think before it acts.
-- **Local models** — point Alan at any OpenAI-compatible endpoint, no API key required.
 - **Skills** — type `#name` in the prompt to attach a skill's full instructions to that message.
 
 ## Installation
@@ -100,7 +98,6 @@ For OpenRouter, you can pin a custom provider for the selected model with `/mode
 | `/tool-free` | Allow all tool calls without asking |
 | `/tool-slip` | Approve a command family once, allow its siblings |
 | `/tool-strict` | Allow only exact commands already approved |
-| `/local` | Manage local models (add, remove, edit) |
 | `/model-providers <name>` | Pin a custom provider for the current OpenRouter model |
 | `/help` | List available commands |
 | `/quit` | Exit Alan |
@@ -122,16 +119,6 @@ Alan starts in strict policy and remembers the policy you pick across runs. Swit
   - `/tool-free`
   - `/tool-strict`
 
-## Local models
-
-Alan supports OpenAI-compatible local models.
-
-```bash
-/local add
-```
-
-This opens an overlay with fields for URL, API, API Key, and Model ID. Alan queries the server's `/models` endpoint and offers the detected models in a searchable picker. Use `/local remove` and `/local edit` to manage your local models. No API key or `/login` is needed for local models.
-
 ## Configuration and data locations
 
 Alan stores everything under `~/.alan/` by default:
@@ -139,7 +126,6 @@ Alan stores everything under `~/.alan/` by default:
 - `settings.json` — your current settings and active-profile marker.
 - `profiles.json` — saved named model/reasoning/web settings profiles.
 - `auth.json` — provider credentials saved by `/login`.
-- `local_models.json` — local models added with `/local`.
 - `projects/` — per-project permission grants.
 - `sessions/` — conversation history (append-only JSONL, one file per session).
 - `skills/` — personal skills, available in every project.
@@ -154,7 +140,7 @@ Settings variables override `settings.json` for that run without changing it. St
 | Variable | Effect |
 | --- | --- |
 | `ALAN_HOME` | Parent of the data directory: `ALAN_HOME=/tmp/x` puts everything in `/tmp/x/.alan`. |
-| `ALAN_PROVIDER` | Provider id: `openrouter`, `deepseek`, `zai`, or `local`. |
+| `ALAN_PROVIDER` | Provider id: `openrouter`, `deepseek` or `zai`. |
 | `ALAN_MODEL` | Model id for that provider, e.g. `ALAN_MODEL=openai/gpt-4o-mini alan`. |
 | `ALAN_REASONING_EFFORT` | `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max`. |
 | `ALAN_OPENROUTER_WEB_FETCH` | Turn OpenRouter's web fetch tool on or off: `true`/`false`, `1`/`0`, `yes`/`no`, `on`/`off`. |
@@ -220,4 +206,4 @@ cargo run -p alan
 ## Requirements
 
 - Rust 1.88 or newer (only for building from source)
-- An API key for your chosen provider (not needed for local models)
+- An API key for your chosen provider

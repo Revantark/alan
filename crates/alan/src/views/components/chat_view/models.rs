@@ -1,5 +1,5 @@
 //! Model and provider commands: `/models`, `/model-providers`,
-//! `/provider`, `/local`, and the model picker overlays.
+//! `/provider`, and the model picker overlays.
 
 use crate::core::SlashCommand;
 use crate::core::server_tools::server_tools;
@@ -8,22 +8,17 @@ use crate::root::AlanAction;
 use alan_tui::TaskError;
 use alan_tui::context::Context;
 use providers::{
-    Model, ModelInfo, ModelOptions, OpenRouterOptions, Provider, ProviderId, ProviderRegistry,
-    bind_local_model, bind_model,
+    Model, ModelInfo, ModelOptions, OpenRouterOptions, ProviderId, ProviderRegistry, bind_model,
 };
 use std::sync::Arc;
 
-use super::{LocalPick, ProviderPick};
+use super::ProviderPick;
 use crate::views::components::{SearchListEvent, SearchListOverlay};
 
 use super::{ChatView, parse_provider_order, persist_provider_order};
 
 use crate::core::custom_providers::{CustomProviderEntry, ProviderName};
-use crate::local_model_overlay::LocalModelOverlay;
 use crate::provider_overlay::ProviderOverlay;
-
-/// Provider id reserved for locally-hosted models.
-const LOCAL_PROVIDER_ID: &str = "local";
 
 /// `/models`: open the model picker overlay.
 pub(crate) fn open_models_picker(view: &mut ChatView, cx: &mut Context<'_, ChatView, AlanAction>) {
@@ -202,23 +197,6 @@ pub(crate) fn apply_model_provider(
     );
 }
 
-/// `/local`: dispatch local model sub-commands.
-pub(crate) fn handle_local_command(
-    view: &mut ChatView,
-    text: &str,
-    cx: &mut Context<'_, ChatView, AlanAction>,
-) {
-    let args = SlashCommand::parse_with_args(text).map(|(_, a)| a.trim().to_owned());
-    match args.as_deref() {
-        Some("add") => open_local_model_overlay(view, cx, None),
-        Some("remove") => open_local_remove_picker(view, cx),
-        Some("edit") => open_local_edit_picker(view, cx),
-        _ => view
-            .controller
-            .push_info("usage: /local <add|remove|edit>".to_owned()),
-    }
-}
-
 /// `/provider`: add, edit or remove a custom provider.
 pub(crate) fn handle_provider_command(
     view: &mut ChatView,
@@ -367,118 +345,6 @@ fn remove_idle_provider(
     );
 }
 
-/// Open the local model overlay (for adding or editing).
-pub(crate) fn open_local_model_overlay(
-    view: &mut ChatView,
-    cx: &mut Context<'_, ChatView, AlanAction>,
-    edit_entry: Option<providers::LocalModelEntry>,
-) {
-    let Some(local_provider) = view.providers.local() else {
-        view.controller
-            .push_info("Local provider not available".to_owned());
-        return;
-    };
-    cx.open_overlay(LocalModelOverlay::new(local_provider, edit_entry));
-}
-
-/// Open a picker to remove a local model.
-fn open_local_remove_picker(view: &mut ChatView, cx: &mut Context<'_, ChatView, AlanAction>) {
-    open_local_picker(
-        view,
-        cx,
-        "Remove Local Model",
-        "No local models to remove.",
-        LocalPick::Remove,
-    );
-}
-
-/// Open a picker to edit a local model.
-fn open_local_edit_picker(view: &mut ChatView, cx: &mut Context<'_, ChatView, AlanAction>) {
-    open_local_picker(
-        view,
-        cx,
-        "Edit Local Model",
-        "No local models to edit.",
-        LocalPick::Edit,
-    );
-}
-
-/// Open a `SearchListOverlay` over the local catalog and run `on_pick` with the
-/// chosen entry's index. Shared by the remove and edit flows.
-fn open_local_picker(
-    view: &mut ChatView,
-    cx: &mut Context<'_, ChatView, AlanAction>,
-    title: &str,
-    empty_message: &str,
-    pick: LocalPick,
-) {
-    let Some(local) = view.providers.local() else {
-        view.controller.push_info(empty_message.to_owned());
-        return;
-    };
-    let models: Vec<String> = local
-        .models()
-        .iter()
-        .map(|m| format!("local — {}", m.name))
-        .collect();
-    if models.is_empty() {
-        view.controller.push_info(empty_message.to_owned());
-        return;
-    }
-    let picker = cx.open_overlay(SearchListOverlay::new(title, models));
-    let local = local.clone();
-    cx.subscribe_once::<SearchListEvent, SearchListOverlay, _>(
-        picker,
-        move |event, _view, _picker, cx| {
-            let SearchListEvent::Chosen(index) = event else {
-                return;
-            };
-            let Some(model_info) = local.models().into_iter().nth(*index) else {
-                return;
-            };
-            match &pick {
-                LocalPick::Remove => {
-                    let local = Arc::clone(&local);
-                    let model_id = model_info.id.clone();
-                    let display_id = model_id.clone();
-                    cx.spawn(
-                        async move {
-                            local
-                                .remove_model(&model_id)
-                                .await
-                                .map_err(|e| TaskError(e.to_string().into()))?;
-                            Ok::<(), TaskError>(())
-                        },
-                        move |result, view, _cx| match result {
-                            Ok(()) => {
-                                view.controller
-                                    .push_info(format!("Removed local model: {display_id}"));
-                            }
-                            Err(e) => view.controller.push_info(format!("Failed to remove: {e}")),
-                        },
-                    );
-                }
-                LocalPick::Edit => {
-                    let local = Arc::clone(&local);
-                    cx.spawn(
-                        async move {
-                            local.find_entry(&model_info.id).ok_or_else(|| {
-                                TaskError(
-                                    format!("Local model not found: {}", model_info.id).into(),
-                                )
-                            })
-                        },
-                        move |result, view, cx| match result {
-                            Ok(entry) => open_local_model_overlay(view, cx, Some(entry)),
-                            Err(e) => view.controller.push_info(e.to_string()),
-                        },
-                    );
-                }
-            }
-        },
-    );
-}
-
 pub(crate) async fn fetch_all_models(providers: &ProviderRegistry) {
     for provider in providers.providers() {
         if let Err(e) = provider.fetch_models().await {
@@ -527,23 +393,12 @@ pub(crate) fn server_tools_for_provider(
         })
 }
 
-/// Bind a catalog entry to a live model. Local entries bind through the
-/// registry's local provider; everything else through the named provider.
+/// Bind a catalog entry to a live model through its provider.
 pub(crate) fn bind_model_info(
     providers: &ProviderRegistry,
     model_info: &ModelInfo,
     options: ModelOptions,
 ) -> Result<Model, TaskError> {
-    if model_info.provider.0 == LOCAL_PROVIDER_ID {
-        let local = providers
-            .local()
-            .ok_or_else(|| TaskError("local provider not available".into()))?;
-        let entry = local
-            .find_entry(&model_info.id)
-            .ok_or_else(|| TaskError(format!("local model not found: {}", model_info.id).into()))?;
-        return bind_local_model(&entry, options).map_err(|e| TaskError(e.into()));
-    }
-
     let provider = providers
         .get(&model_info.provider)
         .ok_or_else(|| TaskError(format!("provider not found: {}", model_info.provider).into()))?;
@@ -562,7 +417,7 @@ pub(crate) async fn persist_model(model_id: &str, provider_id: &ProviderId) -> a
 #[cfg(test)]
 mod tests {
     use super::*;
-    use providers::{CustomProvider, InMemoryCredentialStore};
+    use providers::{CustomProvider, InMemoryCredentialStore, Provider};
 
     fn provider(name: &str, model: &str) -> Arc<dyn Provider> {
         Arc::new(CustomProvider::new(
