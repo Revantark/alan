@@ -12,10 +12,10 @@
 //! Sign-in mechanics live in [`crate::oauth`]; this module supplies the
 //! ChatGPT configuration and turns issued tokens into stored credentials.
 
-use crate::oauth::{self, OAuthConfig, OAuthError, Tokens};
+use crate::oauth::{self, OAuthConfig, Tokens, unix_now};
 use crate::{
-    ApiId, AuthError, AuthMethod, AuthResolver, Credential, CredentialStore, ModelInfo, Provider,
-    ProviderError, ProviderId, Resolved, ServerToolInfo, SignInStart,
+    ApiId, Auth, AuthError, AuthMethod, AuthResolver, Credential, CredentialStore, ModelInfo,
+    Provider, ProviderError, ProviderId, Resolved, ServerToolInfo,
 };
 use async_trait::async_trait;
 use constants::{
@@ -24,10 +24,8 @@ use constants::{
 use llm::{HttpClient, LlmApi, ResponsesApi};
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
 use thiserror::Error;
 
-/// The sign-in half of [`constants`].
 pub fn oauth_config() -> OAuthConfig {
     OAuthConfig {
         authorize_url: constants::AUTHORIZE_URL,
@@ -75,14 +73,12 @@ pub mod constants {
     pub const PROTOCOL_VERSION: &str = "0.161.0";
     /// Beta opt-in header sent with every request.
     pub const OPENAI_BETA: &str = "responses=experimental";
-    /// Shown before the browser sign-in starts.
-    pub const SIGN_IN_NOTICE: &str = "Unofficial client. Personal use only; access depends on OpenAI's terms and may stop working at any time.";
 }
 
 #[derive(Debug, Error)]
 pub enum ChatGptError {
-    #[error(transparent)]
-    SignIn(#[from] OAuthError),
+    #[error("sign-in failed: {0}")]
+    SignIn(String),
     #[error("no ChatGPT account id found in the issued tokens")]
     MissingAccount,
 }
@@ -108,7 +104,7 @@ pub fn account_id_from_token(token: &str) -> Option<String> {
 
 /// Stored ChatGPT credentials with the account id resolved from the token.
 #[derive(Debug, Clone)]
-pub struct OAuthSecrets {
+struct OAuthSecrets {
     pub access_token: String,
     pub refresh_token: String,
     pub id_token: String,
@@ -121,11 +117,12 @@ impl OAuthSecrets {
         let account_id = account_id_from_token(&tokens.id_token)
             .or_else(|| account_id_from_token(&tokens.access_token))
             .ok_or(ChatGptError::MissingAccount)?;
+        let expires_at = tokens.expires_at();
         Ok(Self {
             access_token: tokens.access_token,
             refresh_token: tokens.refresh_token,
             id_token: tokens.id_token,
-            expires_at: unix_now() + tokens.expires_in.saturating_sub(EXPIRY_MARGIN_SECS),
+            expires_at,
             account_id,
         })
     }
@@ -138,15 +135,6 @@ impl OAuthSecrets {
     pub fn to_metadata(&self) -> BTreeMap<String, String> {
         BTreeMap::from([(ACCOUNT_ID_METADATA_KEY.to_string(), self.account_id.clone())])
     }
-}
-
-const EXPIRY_MARGIN_SECS: u64 = 120;
-
-fn unix_now() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_secs())
-        .unwrap_or(0)
 }
 
 /// Auth resolver for the ChatGPT provider: reads stored OAuth credentials and
@@ -374,12 +362,17 @@ impl Provider for ChatGptProvider {
         &[]
     }
 
-    fn auth_methods(&self) -> Vec<AuthMethod> {
-        vec![AuthMethod::OAuth]
-    }
-
     fn apis(&self) -> &HashMap<ApiId, Arc<dyn LlmApi>> {
         &self.apis
+    }
+}
+
+#[async_trait]
+impl Auth for ChatGptProvider {
+    fn auth_methods(&self) -> Vec<AuthMethod> {
+        vec![AuthMethod::OAuth {
+            config: oauth_config(),
+        }]
     }
 
     fn auth(&self) -> Arc<dyn AuthResolver> {
@@ -388,30 +381,24 @@ impl Provider for ChatGptProvider {
 
     async fn validate_auth(
         &self,
-        _auth_result: &crate::AuthResult,
+        auth_result: &crate::auth::AuthResult,
     ) -> Result<(), crate::auth::AuthError> {
-        // The sign-in flow already proved the credentials, and every request
-        // exercises the stored token; a live probe would need another
-        // unpublished endpoint.
-        Ok(())
+        match auth_result {
+            // The sign-in flow already proved the credentials, and every
+            // request exercises the stored token; a live probe would need
+            // another unpublished endpoint.
+            crate::auth::AuthResult::OAuth => Ok(()),
+            // ChatGPT authenticates with a browser sign-in only.
+            crate::auth::AuthResult::ApiKey(_) => Err(crate::auth::AuthError::Missing),
+        }
     }
 
-    fn sign_in_notice(&self) -> Option<&'static str> {
-        Some(constants::SIGN_IN_NOTICE)
-    }
-
-    async fn start_sign_in(&self) -> Result<SignInStart, ProviderError> {
-        oauth::start_sign_in(&oauth_config())
-            .await
-            .map_err(|error| ProviderError::SignIn(Box::new(error)))
-    }
-
-    async fn finish_sign_in(&self, start: SignInStart) -> Result<Credential, ProviderError> {
-        let tokens = oauth::finish_sign_in(&oauth_config(), start)
-            .await
-            .map_err(|error| ProviderError::SignIn(Box::new(error)))?;
+    fn credential_from_tokens(
+        &self,
+        tokens: crate::oauth::Tokens,
+    ) -> Result<Credential, ProviderError> {
         let secrets = OAuthSecrets::from_tokens(tokens)
-            .map_err(|error| ProviderError::SignIn(error.into()))?;
+            .map_err(|error| ProviderError::SignIn(error.to_string()))?;
         let metadata = secrets.to_metadata();
         Ok(Credential::OAuth {
             access_token: secrets.access_token,

@@ -1,6 +1,6 @@
 use crate::{
-    ApiId, ApiKeyAuth, AuthError, AuthResolver, CredentialAuth, ModelInfo, ModelPricing, Provider,
-    ProviderError, ProviderId, ServerToolInfo,
+    ApiId, ApiKeyAuth, Auth, AuthError, AuthResolver, CredentialAuth, ModelInfo, ModelPricing,
+    Provider, ProviderError, ProviderId, ServerToolInfo,
 };
 use async_trait::async_trait;
 use llm::apis::chat_completions::{BaseRequest, BaseResponse, WireUsage, decode_stream_response};
@@ -257,27 +257,8 @@ impl Provider for OpenRouterProvider {
         &self.server_tools
     }
 
-    fn auth_methods(&self) -> Vec<crate::auth::AuthMethod> {
-        vec![crate::auth::AuthMethod::ApiKey]
-    }
-
     fn apis(&self) -> &HashMap<ApiId, Arc<dyn LlmApi>> {
         &self.apis
-    }
-
-    fn auth(&self) -> Arc<dyn AuthResolver> {
-        self.auth.clone()
-    }
-
-    async fn validate_auth(
-        &self,
-        auth_result: &crate::auth::AuthResult,
-    ) -> Result<(), crate::auth::AuthError> {
-        match auth_result {
-            crate::auth::AuthResult::ApiKey(key) => validate_api_key(key).await,
-            // OAuth is handled by the ChatGPT provider's own resolver.
-            crate::auth::AuthResult::OAuth => Err(crate::auth::AuthError::Missing),
-        }
     }
 
     async fn fetch_models(&self) -> Result<(), ProviderError> {
@@ -300,6 +281,27 @@ impl Provider for OpenRouterProvider {
         let models = parse_catalog(&self.id, &payload)?;
         *self.models.write().unwrap_or_else(|e| e.into_inner()) = models;
         Ok(())
+    }
+}
+
+#[async_trait]
+impl Auth for OpenRouterProvider {
+    fn auth_methods(&self) -> Vec<crate::auth::AuthMethod> {
+        vec![crate::auth::AuthMethod::ApiKey]
+    }
+
+    fn auth(&self) -> Arc<dyn AuthResolver> {
+        self.auth.clone()
+    }
+
+    async fn validate_auth(
+        &self,
+        auth_result: &crate::auth::AuthResult,
+    ) -> Result<(), crate::auth::AuthError> {
+        match auth_result {
+            crate::auth::AuthResult::ApiKey(key) => validate_api_key(key).await,
+            _ => Err(crate::auth::AuthError::Missing),
+        }
     }
 }
 

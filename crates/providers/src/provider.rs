@@ -19,54 +19,59 @@ pub enum ProviderError {
     MissingAuth,
     #[error("failed to fetch models: {0}")]
     Fetch(String),
-    #[error("this provider does not support browser sign-in")]
-    NoBrowserSignIn,
-    #[error("browser sign-in failed: {0}")]
-    SignIn(#[source] Box<dyn std::error::Error + Send + Sync>),
+    #[error("issued OAuth tokens did not contain a usable credential: {0}")]
+    SignIn(String),
 }
 
 #[async_trait]
-pub trait Provider: Send + Sync {
+pub trait Auth: Send + Sync {
+    /// The auth resolver used to obtain credentials for requests.
+    fn auth(&self) -> Arc<dyn AuthResolver>;
+
+    /// The authentication methods this provider supports.
+    fn auth_methods(&self) -> Vec<crate::auth::AuthMethod>;
+
+    /// Validate a credential the user just supplied: an API key, or the
+    /// result of a browser sign-in.
+    async fn validate_auth(
+        &self,
+        result: &crate::auth::AuthResult,
+    ) -> Result<(), crate::auth::AuthError>;
+
+    /// Turn issued OAuth tokens into the credential to store. The default
+    /// stores the raw tokens; a provider with provider-specific claims
+    /// (e.g. an account id claim) overrides it to resolve them.
+    fn credential_from_tokens(
+        &self,
+        tokens: crate::oauth::Tokens,
+    ) -> Result<crate::Credential, ProviderError> {
+        let expires_at = tokens.expires_at();
+        Ok(crate::Credential::OAuth {
+            access_token: tokens.access_token,
+            refresh_token: tokens.refresh_token,
+            id_token: tokens.id_token,
+            expires_at,
+            metadata: Default::default(),
+        })
+    }
+}
+
+/// A model provider: identity, model catalog, and the API routing used to
+/// bind a catalog entry to a live [`crate::Model`].
+///
+/// Every provider is also an [`Auth`] — binding a model requires its
+/// credential resolver — but the two responsibilities are kept in separate
+/// traits.
+#[async_trait]
+pub trait Provider: Auth + Send + Sync {
     fn id(&self) -> ProviderId;
 
     fn models(&self) -> Vec<ModelInfo>;
 
     fn server_tools(&self) -> &[ServerToolInfo];
 
-    fn auth_methods(&self) -> Vec<crate::auth::AuthMethod>;
-
     /// The LLM API implementations this provider can route to, keyed by API id.
     fn apis(&self) -> &HashMap<ApiId, Arc<dyn LlmApi>>;
-
-    /// The auth resolver used to obtain credentials for requests.
-    fn auth(&self) -> Arc<dyn AuthResolver>;
-
-    async fn validate_auth(
-        &self,
-        auth_result: &crate::auth::AuthResult,
-    ) -> Result<(), crate::auth::AuthError>;
-
-    /// One-line notice shown before a browser sign-in starts, e.g. an
-    /// unofficial-client disclaimer. `None` renders nothing.
-    fn sign_in_notice(&self) -> Option<&'static str> {
-        None
-    }
-
-    /// Bind the provider's redirect port and build the authorization URL.
-    /// The default implementation rejects: only a provider that declares
-    /// [`crate::AuthMethod::OAuth`] supports the browser flow.
-    async fn start_sign_in(&self) -> Result<crate::oauth::SignInStart, ProviderError> {
-        Err(ProviderError::NoBrowserSignIn)
-    }
-
-    /// Open the browser, await the callback, exchange the code, and return the
-    /// credential to store.
-    async fn finish_sign_in(
-        &self,
-        _start: crate::oauth::SignInStart,
-    ) -> Result<crate::Credential, ProviderError> {
-        Err(ProviderError::NoBrowserSignIn)
-    }
 
     /// Refresh the provider's model catalog from its source, updating the
     /// catalog returned by [`Provider::models`]. Providers without a live

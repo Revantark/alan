@@ -1,7 +1,7 @@
 use crate::store::LocalModelStore;
 use crate::{
-    ApiId, ApiKeyAuth, AuthResolver, ModelInfo, ModelOptions, NoAuth, Provider, ProviderError,
-    ProviderId, ServerToolInfo,
+    ApiId, ApiKeyAuth, Auth, AuthResolver, ModelInfo, ModelOptions, NoAuth, Provider,
+    ProviderError, ProviderId, ServerToolInfo,
 };
 use async_trait::async_trait;
 use llm::{ChatCompletionsApi, HttpClient, LlmApi};
@@ -142,10 +142,6 @@ impl Provider for LocalProvider {
         &[]
     }
 
-    fn auth_methods(&self) -> Vec<crate::auth::AuthMethod> {
-        vec![]
-    }
-
     fn apis(&self) -> &HashMap<ApiId, Arc<dyn LlmApi>> {
         // Local models bind per-entry via `bind_local_model`, which reads the
         // URL from the chosen `LocalModelEntry`. This provider-level entry is a
@@ -160,6 +156,17 @@ impl Provider for LocalProvider {
         &APIS
     }
 
+    async fn fetch_models(&self) -> Result<(), ProviderError> {
+        self.load().await
+    }
+}
+
+#[async_trait]
+impl Auth for LocalProvider {
+    fn auth_methods(&self) -> Vec<crate::auth::AuthMethod> {
+        vec![]
+    }
+
     fn auth(&self) -> Arc<dyn AuthResolver> {
         Arc::new(NoAuth)
     }
@@ -169,10 +176,6 @@ impl Provider for LocalProvider {
         _auth_result: &crate::auth::AuthResult,
     ) -> Result<(), crate::auth::AuthError> {
         Ok(())
-    }
-
-    async fn fetch_models(&self) -> Result<(), ProviderError> {
-        self.load().await
     }
 }
 

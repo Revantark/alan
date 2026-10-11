@@ -6,15 +6,18 @@ use std::env;
 use std::sync::Arc;
 use thiserror::Error;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AuthMethod {
     ApiKey,
-    OAuth,
+    OAuth { config: crate::oauth::OAuthConfig },
 }
 
+/// A credential the user just supplied through the login flow.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AuthResult {
+    /// An API key pasted into the prompt.
     ApiKey(String),
+    /// A browser sign-in completed; the tokens were exchanged successfully.
     OAuth,
 }
 

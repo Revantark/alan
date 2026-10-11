@@ -4,7 +4,10 @@ use crate::views::theme;
 use alan_tui::context::Context;
 use alan_tui::{ActionStatus, Component, RenderContext};
 use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers};
-use providers::{AuthMethod, AuthResult, CredentialStore, ProviderId, ProviderRegistry};
+use providers::{
+    AuthMethod, AuthResult, Credential, CredentialStore, OAuthConfig, ProviderId, ProviderRegistry,
+    finish_oauth_sign_in, start_oauth_sign_in,
+};
 use ratatui::Frame;
 use ratatui::layout::Alignment;
 use ratatui::layout::Rect;
@@ -27,7 +30,6 @@ enum LoginState {
     },
     Prompting {
         provider_id: ProviderId,
-        auth_method: providers::AuthMethod,
         input: String,
     },
     /// A browser sign-in is running; the URL is shown in case the
@@ -35,8 +37,6 @@ enum LoginState {
     AwaitingBrowser {
         provider_id: ProviderId,
         url: String,
-        /// Provider's own sign-in notice, repeated under the URL when set.
-        notice: Option<&'static str>,
     },
     Validating {
         message: String,
@@ -90,19 +90,8 @@ impl LoginOverlay {
     }
 
     fn submit_input(&mut self, cx: &mut Context<'_, Self, AlanAction>) {
-        let LoginState::Prompting {
-            provider_id,
-            auth_method,
-            input,
-        } = &mut self.state
-        else {
+        let LoginState::Prompting { provider_id, input } = &mut self.state else {
             return;
-        };
-
-        let auth_result = match auth_method {
-            AuthMethod::ApiKey => providers::AuthResult::ApiKey(std::mem::take(input)),
-            // Browser sign-in never reaches the key-input path.
-            AuthMethod::OAuth => return,
         };
 
         let Some(provider) = self.providers.get(provider_id) else {
@@ -111,6 +100,8 @@ impl LoginOverlay {
             return;
         };
 
+        let api_key = std::mem::take(input);
+        let auth_result = AuthResult::ApiKey(api_key.clone());
         let provider = Arc::clone(&provider);
         let credentials = Arc::clone(&self.credentials);
 
@@ -121,15 +112,9 @@ impl LoginOverlay {
                     .await
                     .map_err(|e| alan_tui::TaskError(e.into()))?;
 
-                match auth_result {
-                    AuthResult::ApiKey(key) => {
-                        let credential = providers::Credential::ApiKey { key };
-                        if let Err(e) = credentials.put(&provider.id(), credential).await {
-                            return Err(alan_tui::TaskError(e.into()));
-                        }
-                    }
-                    // Browser sign-in stores its credentials in its own task.
-                    AuthResult::OAuth => {}
+                let credential = Credential::ApiKey { key: api_key };
+                if let Err(e) = credentials.put(&provider.id(), credential).await {
+                    return Err(alan_tui::TaskError(e.into()));
                 }
 
                 Ok(())
@@ -179,23 +164,22 @@ impl LoginOverlay {
                     return;
                 };
 
-                let auth_method = provider.auth_methods().into_iter().next();
-
-                if auth_method.is_none() {
+                let Some(auth_method) = provider.auth_methods().into_iter().next() else {
                     self.state = LoginState::Error("No authentication methods available".into());
                     cx.notify();
                     return;
-                }
+                };
 
-                match auth_method.unwrap() {
+                match auth_method {
                     AuthMethod::ApiKey => {
                         self.state = LoginState::Prompting {
                             provider_id,
-                            auth_method: AuthMethod::ApiKey,
                             input: String::new(),
                         };
                     }
-                    AuthMethod::OAuth => self.start_browser_sign_in(provider_id, cx),
+                    AuthMethod::OAuth { config } => {
+                        self.start_browser_sign_in(provider_id, config, cx)
+                    }
                 }
                 cx.notify();
             }
@@ -207,12 +191,10 @@ impl LoginOverlay {
         }
     }
 
-    /// Run the OAuth browser sign-in through the provider's own flow as a
-    /// two-stage background task: bind the redirect port and show the URL
-    /// first, then open the browser and wait for the callback.
     fn start_browser_sign_in(
         &mut self,
         provider_id: ProviderId,
+        config: OAuthConfig,
         cx: &mut Context<'_, Self, AlanAction>,
     ) {
         let Some(provider) = self.providers.get(&provider_id) else {
@@ -220,19 +202,13 @@ impl LoginOverlay {
             cx.notify();
             return;
         };
-        let notice = provider.sign_in_notice();
         self.state = LoginState::Validating {
-            message: match notice {
-                Some(notice) => format!("Starting sign-in…\n{notice}"),
-                None => "Starting sign-in…".to_string(),
-            },
+            message: "Starting sign-in…".to_string(),
         };
 
-        let phase_one_provider = Arc::clone(&provider);
         let task = cx.spawn(
             async move {
-                phase_one_provider
-                    .start_sign_in()
+                start_oauth_sign_in(&config)
                     .await
                     .map_err(|error| alan_tui::TaskError(error.into()))
             },
@@ -242,13 +218,15 @@ impl LoginOverlay {
                         overlay.state = LoginState::AwaitingBrowser {
                             provider_id: provider_id.clone(),
                             url: start.url.clone(),
-                            notice,
                         };
                         let credentials = Arc::clone(&overlay.credentials);
+                        let provider = Arc::clone(&provider);
                         let future = async move {
-                            let credential = provider
-                                .finish_sign_in(start)
+                            let tokens = finish_oauth_sign_in(&config, start)
                                 .await
+                                .map_err(|error| alan_tui::TaskError(error.into()))?;
+                            let credential = provider
+                                .credential_from_tokens(tokens)
                                 .map_err(|error| alan_tui::TaskError(error.into()))?;
                             credentials
                                 .put(&provider_id, credential)
@@ -481,13 +459,8 @@ fn render_login(frame: &mut Frame, area: Rect, state: &LoginState) {
             );
             frame.set_cursor_position((content.x + 3 + visible as u16, content.y));
         }
-        LoginState::AwaitingBrowser { url, notice, .. } => {
-            let message = match notice {
-                Some(notice) => {
-                    format!("Complete the sign-in in your browser, or open:\n{url}\n\n{notice}")
-                }
-                None => format!("Complete the sign-in in your browser, or open:\n{url}"),
-            };
+        LoginState::AwaitingBrowser { url, .. } => {
+            let message = format!("Complete the sign-in in your browser, or open:\n{url}");
             render_message(frame, content, &message, muted);
         }
         LoginState::Validating { message } => render_message(frame, content, message, muted),
@@ -561,7 +534,6 @@ mod tests {
         let states = [
             LoginState::Prompting {
                 provider_id: ProviderId("example".into()),
-                auth_method: AuthMethod::ApiKey,
                 input: "secret-key".repeat(80),
             },
             LoginState::Selecting {
@@ -574,7 +546,6 @@ mod tests {
             LoginState::AwaitingBrowser {
                 provider_id: ProviderId("chatgpt".into()),
                 url: "https://auth.openai.com/oauth/authorize?x=1".into(),
-                notice: Some("Unofficial client. Personal use only."),
             },
             LoginState::Success,
             LoginState::Error("Could not authenticate. Check your API key.".into()),

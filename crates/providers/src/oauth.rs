@@ -8,14 +8,14 @@
 use base64::Engine;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use thiserror::Error;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
 /// Values tied to a provider's registered client (client id, redirect port,
 /// scopes) or to a published endpoint, so each is `'static`.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct OAuthConfig {
     pub authorize_url: &'static str,
     pub token_url: &'static str,
@@ -88,6 +88,22 @@ pub struct Tokens {
     pub refresh_token: String,
     pub id_token: String,
     pub expires_in: u64,
+}
+
+impl Tokens {
+    pub fn expires_at(&self) -> u64 {
+        unix_now() + self.expires_in.saturating_sub(EXPIRY_MARGIN_SECS)
+    }
+}
+
+const EXPIRY_MARGIN_SECS: u64 = 120;
+
+/// Unix now in seconds.
+pub fn unix_now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0)
 }
 
 pub async fn exchange_code(
