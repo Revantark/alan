@@ -116,6 +116,8 @@ impl Provider for GoogleProvider {
     ) -> Result<(), crate::auth::AuthError> {
         match auth_result {
             crate::auth::AuthResult::ApiKey(key) => validate_api_key(key).await,
+            // OAuth is handled by the ChatGPT provider's own resolver.
+            crate::auth::AuthResult::OAuth => Err(crate::auth::AuthError::Missing),
         }
     }
 

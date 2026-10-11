@@ -1,7 +1,7 @@
 use crate::auth::{AuthError, AuthResolver};
 use crate::catalog::ModelInfo;
 use llm::{
-    CompletionInput, Extensions, LlmApi, LlmError, LlmRequest, LlmResponse, LlmStream,
+    CompletionInput, Extensions, Headers, LlmApi, LlmError, LlmRequest, LlmResponse, LlmStream,
     ReasoningEffort, ServerTool, ToolSpec,
 };
 use std::sync::Arc;
@@ -89,36 +89,38 @@ impl Model {
     }
 
     pub async fn complete(&self, input: CompletionInput<'_>) -> Result<LlmResponse, ModelError> {
-        let credential = self.auth.resolve().await?;
+        let resolved = self.auth.resolve().await?;
         let tools = self.tools(input.tools);
-        let mut extensions = self.extensions.clone();
-        extensions.merge(input.extensions);
-        let request = LlmRequest {
-            model_id: &self.info.id,
-            messages: input.messages,
-            tools: &tools,
-            options: input.options,
-            credential: Some(&credential),
-            reasoning_effort: self.reasoning_effort,
-            extensions,
-        };
+        let request = self.build_request(&resolved, input, &tools);
         Ok(self.api.complete(request).await?)
     }
 
     pub async fn stream(&self, input: CompletionInput<'_>) -> Result<LlmStream, ModelError> {
-        let credential = self.auth.resolve().await?;
+        let resolved = self.auth.resolve().await?;
         let tools = self.tools(input.tools);
+        let request = self.build_request(&resolved, input, &tools);
+        Ok(self.api.stream(request).await?)
+    }
+
+    fn build_request<'a>(
+        &'a self,
+        resolved: &'a crate::auth::Resolved,
+        input: CompletionInput<'a>,
+        tools: &'a [ToolSpec],
+    ) -> LlmRequest<'a> {
         let mut extensions = self.extensions.clone();
         extensions.merge(input.extensions);
-        let request = LlmRequest {
+        if !resolved.headers.is_empty() {
+            extensions.insert(Headers(resolved.headers.clone()));
+        }
+        LlmRequest {
             model_id: &self.info.id,
             messages: input.messages,
-            tools: &tools,
+            tools,
             options: input.options,
-            credential: Some(&credential),
+            credential: Some(&resolved.credential),
             reasoning_effort: self.reasoning_effort,
             extensions,
-        };
-        Ok(self.api.stream(request).await?)
+        }
     }
 }

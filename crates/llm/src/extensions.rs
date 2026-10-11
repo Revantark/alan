@@ -37,6 +37,10 @@ impl Extensions {
 /// `prompt_cache_key`, vanilla OpenAI-compatible APIs as `prompt_cache_key`.
 pub struct SessionId(pub String);
 
+/// Extra HTTP headers to send with a request, attached per request by the
+/// caller (for example a ChatGPT account id obtained from auth).
+pub struct Headers(pub Vec<(String, String)>);
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -71,6 +75,17 @@ mod tests {
         detached.insert(SessionId("other".into()));
         assert_eq!(extensions.get::<SessionId>().unwrap().0, "abc");
         assert_eq!(detached.get::<SessionId>().unwrap().0, "other");
+    }
+
+    #[test]
+    fn headers_round_trip() {
+        let mut extensions = Extensions::default();
+        extensions.insert(Headers(vec![("a".into(), "1".into())]));
+
+        assert_eq!(
+            extensions.get::<Headers>().unwrap().0,
+            vec![("a".into(), "1".into())]
+        );
     }
 
     #[test]

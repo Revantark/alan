@@ -72,6 +72,10 @@ Alan currently supports:
 - **OpenRouter**
 - **DeepSeek**
 - **Zai** (beta)
+- **ChatGPT** (beta, unofficial): signs in with your own ChatGPT subscription
+  account through the browser. OpenAI has not published this backend, so
+  access depends on OpenAI's terms and may stop working at any time. Personal
+  use only; not for hosted or multi-user apps.
 
 Use the `/login` command to sign in to any of the available providers.
 

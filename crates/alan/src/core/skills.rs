@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 
 /// Maximum characters of instructions kept per skill. A skill whose
 /// body is longer is skipped entirely.
-const MAX_INSTRUCTIONS: usize = 25_000;
+const MAX_INSTRUCTIONS: usize = 50_000;
 
 /// Maximum characters kept for a description. Descriptions are popup text, not
 /// instructions, so a long one is a sign of a malformed file.

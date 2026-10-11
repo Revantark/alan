@@ -1,3 +1,4 @@
+use crate::apis::stream::WireError;
 use crate::{
     ContentPart, LlmError, LlmRequest, Message, ReasoningEffort, Role, StopReason, ToolCall,
     ToolSpec, Usage,
@@ -78,12 +79,6 @@ pub(crate) struct WireInteraction {
     #[serde(default)]
     pub(crate) steps: Vec<WireStep>,
     pub(crate) usage: Option<WireUsage>,
-}
-
-#[derive(Debug, Deserialize)]
-pub(crate) struct WireError {
-    pub(crate) code: Option<serde_json::Value>,
-    pub(crate) message: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]

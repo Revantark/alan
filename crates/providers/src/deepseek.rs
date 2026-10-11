@@ -194,6 +194,8 @@ impl Provider for DeepSeekProvider {
     ) -> Result<(), crate::auth::AuthError> {
         match auth_result {
             crate::auth::AuthResult::ApiKey(key) => validate_api_key(key).await,
+            // OAuth is handled by the ChatGPT provider's own resolver.
+            crate::auth::AuthResult::OAuth => Err(crate::auth::AuthError::Missing),
         }
     }
 
@@ -203,7 +205,8 @@ impl Provider for DeepSeekProvider {
             .auth
             .resolve()
             .await
-            .map_err(|error| ProviderError::Fetch(format!("authentication failed: {error}")))?;
+            .map_err(|error| ProviderError::Fetch(format!("authentication failed: {error}")))?
+            .credential;
         let mut request = reqwest::Client::new().get(format!("{BASE_URL}/models"));
         if let llm::Credential::ApiKey(key) = credential {
             request = request.bearer_auth(key);

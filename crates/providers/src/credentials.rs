@@ -13,7 +13,21 @@ use thiserror::Error;
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Credential {
-    ApiKey { key: String },
+    ApiKey {
+        key: String,
+    },
+    /// Generic OAuth credentials. Provider-specific claims (for example a
+    /// ChatGPT account id) live in `metadata`; secret material there is
+    /// shielded by the manual `Debug` impl below.
+    OAuth {
+        access_token: String,
+        refresh_token: String,
+        id_token: String,
+        /// Unix timestamp (seconds) after which the access token must be
+        /// refreshed.
+        expires_at: u64,
+        metadata: BTreeMap<String, String>,
+    },
 }
 
 impl fmt::Debug for Credential {
@@ -24,6 +38,7 @@ impl fmt::Debug for Credential {
                 "type",
                 &match self {
                     Self::ApiKey { .. } => "api_key",
+                    Self::OAuth { .. } => "oauth",
                 },
             )
             .finish()
@@ -39,6 +54,7 @@ pub struct CredentialInfo {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CredentialKind {
     ApiKey,
+    OAuth,
 }
 
 #[derive(Debug, Error)]
@@ -100,6 +116,7 @@ impl CredentialStore for InMemoryCredentialStore {
                 provider: ProviderId::new(provider),
                 kind: match credential {
                     Credential::ApiKey { .. } => CredentialKind::ApiKey,
+                    Credential::OAuth { .. } => CredentialKind::OAuth,
                 },
             })
             .collect())
@@ -152,7 +169,24 @@ impl FileCredentialStore {
 
     fn read_all(&self) -> Result<BTreeMap<String, Credential>, CredentialError> {
         match fs::read_to_string(&self.path) {
-            Ok(contents) => serde_json::from_str(&contents).map_err(CredentialError::Serialization),
+            Ok(contents) => {
+                // Migrate before typing: pre-rename files carry the old
+                // `chat_gpt_o_auth` tag and a flat `account_id` field, which
+                // would otherwise fail to parse or be silently dropped.
+                let mut entries: BTreeMap<String, serde_json::Value> =
+                    serde_json::from_str(&contents).map_err(CredentialError::Serialization)?;
+                for entry in entries.values_mut() {
+                    migrate_legacy_oauth(entry);
+                }
+                entries
+                    .into_iter()
+                    .map(|(provider, entry)| {
+                        let credential: Credential = serde_json::from_value(entry)
+                            .map_err(CredentialError::Serialization)?;
+                        Ok((provider, credential))
+                    })
+                    .collect()
+            }
             Err(error) if error.kind() == ErrorKind::NotFound => Ok(BTreeMap::new()),
             Err(error) => Err(CredentialError::Io(error)),
         }
@@ -205,6 +239,7 @@ impl CredentialStore for FileCredentialStore {
                 provider: ProviderId::new(provider),
                 kind: match credential {
                     Credential::ApiKey { .. } => CredentialKind::ApiKey,
+                    Credential::OAuth { .. } => CredentialKind::OAuth,
                 },
             })
             .collect())
@@ -266,9 +301,179 @@ fn set_unix_mode(path: &Path, mode: u32) -> std::io::Result<()> {
     fs::set_permissions(path, fs::Permissions::from_mode(mode))
 }
 
+/// Migrate one legacy credential entry in place: files written before the
+/// OAuth rename serialize `Credential::ChatGptOAuth` as
+/// `{"type": "chat_gpt_o_auth", ..., "account_id": "..."}`; the current
+/// variant is `"oauth"` with provider claims in a nested `metadata` map.
+fn migrate_legacy_oauth(entry: &mut serde_json::Value) {
+    let Some(object) = entry.as_object_mut() else {
+        return;
+    };
+    let is_legacy = object
+        .get("type")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|tag| tag == "chat_gpt_o_auth" || tag == "chatgpt_oauth");
+    if !is_legacy {
+        return;
+    }
+    object.insert(
+        "type".to_string(),
+        // serde's snake_case of the `OAuth` variant is `o_auth`.
+        serde_json::Value::String("o_auth".to_string()),
+    );
+    let account_id = object.remove("account_id");
+    if let Some(account_id) = account_id {
+        let mut metadata = serde_json::Map::new();
+        metadata.insert("account_id".to_string(), account_id);
+        object.insert("metadata".to_string(), serde_json::Value::Object(metadata));
+    }
+}
+
 #[cfg(not(unix))]
 fn set_unix_mode(_path: &Path, _mode: u32) -> std::io::Result<()> {
     Ok(())
 }
 
 pub type SharedCredentialStore = Arc<dyn CredentialStore>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("alan-credentials-test-{name}"));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn legacy_oauth_files_still_parse() {
+        let dir = temp_dir("legacy-oauth");
+        let path = dir.join("credentials.json");
+        // Written by the pre-rename binary: serde's snake_case of the old
+        // `ChatGptOAuth` variant.
+        fs::write(
+            &path,
+            r#"{"chatgpt": {"type": "chat_gpt_o_auth", "access_token": "at", "refresh_token": "rt", "id_token": "it", "expires_at": 12345, "account_id": "acc"}}"#,
+        )
+        .unwrap();
+
+        let store = FileCredentialStore::new(&path);
+        let read = tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(store.read(&ProviderId::new("chatgpt")))
+            .unwrap();
+        assert!(
+            matches!(read, Some(Credential::OAuth { ref metadata, .. })
+                if metadata.get("account_id").map(String::as_str) == Some("acc")),
+            "legacy OAuth entry must still parse, got {read:?}"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn legacy_api_key_files_still_parse() {
+        let dir = temp_dir("legacy");
+        let path = dir.join("credentials.json");
+        fs::write(
+            &path,
+            r#"{"deepseek": {"type": "api_key", "key": "sk-old"}}"#,
+        )
+        .unwrap();
+
+        let store = FileCredentialStore::new(&path);
+        let read = tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(store.read(&ProviderId::new("deepseek")))
+            .unwrap();
+        assert!(
+            matches!(read, Some(Credential::ApiKey { ref key }) if key == "sk-old"),
+            "legacy ApiKey entry must still parse, got {read:?}"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    fn oauth_credential() -> Credential {
+        Credential::OAuth {
+            access_token: "at".into(),
+            refresh_token: "rt".into(),
+            id_token: "it".into(),
+            expires_at: 12345,
+            metadata: BTreeMap::from([("account_id".to_string(), "acc".to_string())]),
+        }
+    }
+
+    #[test]
+    fn oauth_credentials_round_trip_through_the_file() {
+        let dir = temp_dir("oauth");
+        let path = dir.join("credentials.json");
+        let store = FileCredentialStore::new(&path);
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+
+        runtime
+            .block_on(store.put(&ProviderId::new("chatgpt"), oauth_credential()))
+            .unwrap();
+        let read = runtime
+            .block_on(store.read(&ProviderId::new("chatgpt")))
+            .unwrap();
+        let Some(Credential::OAuth { metadata, .. }) = &read else {
+            panic!("expected an OAuth credential, got {read:?}");
+        };
+        // Provider-specific metadata survives the round trip.
+        assert_eq!(metadata.get("account_id").map(String::as_str), Some("acc"));
+
+        // Both variants coexist in one file.
+        runtime
+            .block_on(store.put(
+                &ProviderId::new("deepseek"),
+                Credential::ApiKey { key: "sk".into() },
+            ))
+            .unwrap();
+        let kinds = runtime.block_on(store.list()).unwrap();
+        assert_eq!(kinds.len(), 2);
+        assert!(kinds.iter().any(|info| info.kind == CredentialKind::OAuth));
+        assert!(kinds.iter().any(|info| info.kind == CredentialKind::ApiKey));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn file_is_written_owner_only() {
+        let dir = temp_dir("mode");
+        let path = dir.join("credentials.json");
+        let store = FileCredentialStore::new(&path);
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+
+        runtime
+            .block_on(store.put(
+                &ProviderId::new("chatgpt"),
+                Credential::ApiKey { key: "k".into() },
+            ))
+            .unwrap();
+
+        use std::os::unix::fs::PermissionsExt;
+        let mode = fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn debug_never_shows_token_values() {
+        let api_key = Credential::ApiKey {
+            key: "super-secret-key".into(),
+        };
+        let oauth = Credential::OAuth {
+            access_token: "secret-access".into(),
+            refresh_token: "secret-refresh".into(),
+            id_token: "secret-id".into(),
+            expires_at: 1,
+            metadata: BTreeMap::from([("account_id".to_string(), "secret-account".to_string())]),
+        };
+        let rendered = format!("{api_key:?} {oauth:?}");
+        assert!(rendered.contains("api_key"));
+        assert!(rendered.contains("oauth"));
+        assert!(!rendered.contains("secret"));
+        assert!(!rendered.contains("super-secret-key"));
+    }
+}

@@ -9,11 +9,13 @@ use thiserror::Error;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AuthMethod {
     ApiKey,
+    OAuth,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AuthResult {
     ApiKey(String),
+    OAuth,
 }
 
 #[derive(Debug, Error)]
@@ -26,9 +28,19 @@ pub enum AuthError {
     Storage(#[from] CredentialError),
 }
 
+/// Credentials resolved for one request: the request credential plus any
+/// provider-specific headers to send (for example a ChatGPT account id learned
+/// at sign-in). Resolving is a pure read — callers attach the headers to the
+/// request; nothing is mutated in shared state.
+#[derive(Debug, Clone)]
+pub struct Resolved {
+    pub credential: RequestCredential,
+    pub headers: Vec<(String, String)>,
+}
+
 #[async_trait]
 pub trait AuthResolver: Send + Sync {
-    async fn resolve(&self) -> Result<RequestCredential, AuthError>;
+    async fn resolve(&self) -> Result<Resolved, AuthError>;
 }
 
 pub struct ApiKeyAuth {
@@ -43,11 +55,14 @@ impl ApiKeyAuth {
 
 #[async_trait]
 impl AuthResolver for ApiKeyAuth {
-    async fn resolve(&self) -> Result<RequestCredential, AuthError> {
+    async fn resolve(&self) -> Result<Resolved, AuthError> {
         if self.key.is_empty() {
             Err(AuthError::Missing)
         } else {
-            Ok(RequestCredential::ApiKey(self.key.clone()))
+            Ok(Resolved {
+                credential: RequestCredential::ApiKey(self.key.clone()),
+                headers: Vec::new(),
+            })
         }
     }
 }
@@ -56,8 +71,11 @@ pub struct NoAuth;
 
 #[async_trait]
 impl AuthResolver for NoAuth {
-    async fn resolve(&self) -> Result<RequestCredential, AuthError> {
-        Ok(RequestCredential::None)
+    async fn resolve(&self) -> Result<Resolved, AuthError> {
+        Ok(Resolved {
+            credential: RequestCredential::None,
+            headers: Vec::new(),
+        })
     }
 }
 
@@ -83,11 +101,18 @@ impl CredentialAuth {
 
 #[async_trait]
 impl AuthResolver for CredentialAuth {
-    async fn resolve(&self) -> Result<RequestCredential, AuthError> {
+    async fn resolve(&self) -> Result<Resolved, AuthError> {
         if let Some(credential) = self.store.read(&self.provider).await? {
             return match credential {
-                Credential::ApiKey { key } if !key.is_empty() => Ok(RequestCredential::ApiKey(key)),
+                Credential::ApiKey { key } if !key.is_empty() => Ok(Resolved {
+                    credential: RequestCredential::ApiKey(key),
+                    headers: Vec::new(),
+                }),
                 Credential::ApiKey { .. } => Err(AuthError::Missing),
+                // OAuth credentials are resolved by their provider's own
+                // resolver (`ChatGptAuth` for ChatGPT), never by this
+                // API-key resolver.
+                Credential::OAuth { .. } => Err(AuthError::Missing),
             };
         }
 
@@ -95,7 +120,10 @@ impl AuthResolver for CredentialAuth {
             && let Ok(key) = env::var(variable)
             && !key.is_empty()
         {
-            return Ok(RequestCredential::ApiKey(key));
+            return Ok(Resolved {
+                credential: RequestCredential::ApiKey(key),
+                headers: Vec::new(),
+            });
         }
 
         Err(AuthError::Missing)
