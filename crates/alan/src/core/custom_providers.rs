@@ -8,9 +8,10 @@ use providers::{
     fetch_catalog,
 };
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::fmt;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use crate::core::paths;
 use crate::core::store::JsonStore;
@@ -24,7 +25,7 @@ const RESERVED_NAMES: [&str; 4] = ["openrouter", "deepseek", "zai", "google"];
 
 /// A custom provider's name, and its id in `/models`, `auth.json`,
 /// `settings.json` and `ALAN_PROVIDER`.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
 pub struct ProviderName(String);
 
@@ -141,6 +142,8 @@ pub struct CustomProviders {
     store: CustomProviderStore,
     registry: Arc<ProviderRegistry>,
     credentials: Arc<dyn CredentialStore>,
+    /// The registered instances, typed, so an edit can update one in place.
+    registered: Mutex<HashMap<ProviderName, Arc<CustomProvider>>>,
 }
 
 impl CustomProviders {
@@ -153,6 +156,7 @@ impl CustomProviders {
             store,
             registry,
             credentials,
+            registered: Mutex::new(HashMap::new()),
         }
     }
 
@@ -208,6 +212,10 @@ impl CustomProviders {
         );
         self.store.remove(name).await?;
         self.credentials.delete(&name.id()).await?;
+        self.registered
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(name);
         self.registry.remove(&name.id());
         Ok(())
     }
@@ -233,12 +241,21 @@ impl CustomProviders {
     }
 
     fn register(&self, entry: &CustomProviderEntry, models: Vec<ModelInfo>) {
-        self.registry.insert(Arc::new(CustomProvider::new(
+        let mut registered = self.registered.lock().unwrap_or_else(|e| e.into_inner());
+        // A bound model keeps its provider's API client: replacing the
+        // provider on an edit would leave the running model on the old URL.
+        if let Some(provider) = registered.get(&entry.name) {
+            provider.set_base_url(entry.url.clone());
+            return;
+        }
+        let provider = Arc::new(CustomProvider::new(
             entry.name.id(),
             entry.url.clone(),
             Arc::clone(&self.credentials),
             models,
-        )));
+        ));
+        registered.insert(entry.name.clone(), Arc::clone(&provider));
+        self.registry.insert(provider);
     }
 }
 
@@ -302,6 +319,32 @@ mod tests {
             socket.write_all(response.as_bytes()).await.unwrap();
         });
         format!("http://{address}/v1/")
+    }
+
+    // Replies `OK_TWO_MODELS` to `count` connections, hands back each request.
+    async fn serve_many(count: usize) -> (String, tokio::task::JoinHandle<Vec<String>>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let mut requests = Vec::new();
+            for _ in 0..count {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = Vec::new();
+                let mut buffer = [0; 4096];
+                while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    let read = socket.read(&mut buffer).await.unwrap();
+                    assert!(read > 0);
+                    request.extend_from_slice(&buffer[..read]);
+                }
+                socket.write_all(OK_TWO_MODELS.as_bytes()).await.unwrap();
+                requests.push(String::from_utf8(request).unwrap());
+            }
+            requests
+        });
+        (format!("http://{address}/v1/"), server)
     }
 
     #[test]
@@ -460,6 +503,40 @@ mod tests {
         providers.update(name("grok"), &url, None).await.unwrap();
 
         assert!(providers.key(&name("grok")).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn update_moves_models_already_bound_to_the_new_url() {
+        let (providers, registry, _credentials) = service("edit-bound");
+        let old_url = serve_once(OK_TWO_MODELS).await;
+        providers.add(name("grok"), &old_url, None).await.unwrap();
+        let provider = registry.get(&name("grok").id()).unwrap();
+        let model = providers::bind_model(provider.as_ref(), "m1", Default::default()).unwrap();
+
+        // The new server answers the edit's check, then the chat request.
+        let (new_url, server) = serve_many(2).await;
+        providers
+            .update(name("grok"), &new_url, None)
+            .await
+            .unwrap();
+        let messages = [llm::Message::user("hi")];
+        let _ = model
+            .stream(llm::CompletionInput {
+                messages: &messages,
+                tools: &[],
+                options: &Default::default(),
+                extensions: &Default::default(),
+            })
+            .await;
+
+        let requests = tokio::time::timeout(std::time::Duration::from_secs(5), server)
+            .await
+            .expect("the chat request never reached the new URL")
+            .unwrap();
+        assert!(
+            requests[1].starts_with("POST /v1/chat/completions"),
+            "{requests:?}"
+        );
     }
 
     #[tokio::test]

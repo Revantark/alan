@@ -6,7 +6,10 @@ use crate::{
     Provider, ProviderError, ProviderId, ServerToolInfo,
 };
 use async_trait::async_trait;
-use llm::{ChatCompletionsApi, Credential as RequestCredential, HttpClient, LlmApi};
+use llm::{
+    ChatCompletionsApi, Credential as RequestCredential, HttpClient, LlmApi, LlmError, LlmRequest,
+    LlmStream,
+};
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
@@ -22,7 +25,9 @@ const CONTEXT_FIELDS: [&str; 4] = [
 
 pub struct CustomProvider {
     id: ProviderId,
-    base_url: String,
+    /// Shared with the API client, so models already bound to this provider
+    /// follow [`set_base_url`](Self::set_base_url), as they follow key changes.
+    base_url: Arc<RwLock<String>>,
     models: RwLock<Vec<ModelInfo>>,
     apis: HashMap<ApiId, Arc<dyn LlmApi>>,
     auth: Arc<dyn AuthResolver>,
@@ -37,11 +42,11 @@ impl CustomProvider {
         credentials: Arc<dyn CredentialStore>,
         models: Vec<ModelInfo>,
     ) -> Self {
-        let base_url = base_url.into();
-        let api: Arc<dyn LlmApi> = Arc::new(ChatCompletionsApi::new(
-            base_url.clone(),
-            Arc::new(HttpClient::new()),
-        ));
+        let base_url = Arc::new(RwLock::new(base_url.into()));
+        let api: Arc<dyn LlmApi> = Arc::new(LiveUrlApi {
+            base_url: Arc::clone(&base_url),
+            http: Arc::new(HttpClient::new()),
+        });
         Self {
             auth: Arc::new(StoredKeyAuth {
                 provider: id.clone(),
@@ -52,6 +57,39 @@ impl CustomProvider {
             base_url,
             id,
         }
+    }
+
+    /// Point the provider, and every model already bound to it, at `base_url`.
+    pub fn set_base_url(&self, base_url: impl Into<String>) {
+        *self.base_url.write().unwrap_or_else(|e| e.into_inner()) = base_url.into();
+    }
+
+    fn base_url(&self) -> String {
+        self.base_url
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+}
+
+/// Chat Completions against the provider's URL as it is when each request
+/// starts.
+struct LiveUrlApi {
+    base_url: Arc<RwLock<String>>,
+    http: Arc<HttpClient>,
+}
+
+#[async_trait]
+impl LlmApi for LiveUrlApi {
+    async fn stream(&self, request: LlmRequest<'_>) -> Result<LlmStream, LlmError> {
+        let base_url = self
+            .base_url
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        ChatCompletionsApi::new(base_url, Arc::clone(&self.http))
+            .stream(request)
+            .await
     }
 }
 
@@ -86,7 +124,7 @@ impl Provider for CustomProvider {
 
     async fn validate_auth(&self, auth_result: &AuthResult) -> Result<(), AuthError> {
         match auth_result {
-            AuthResult::ApiKey(key) => fetch_catalog(&self.id, &self.base_url, Some(key))
+            AuthResult::ApiKey(key) => fetch_catalog(&self.id, &self.base_url(), Some(key))
                 .await
                 .map(drop)
                 .map_err(|error| AuthError::Validation(error.to_string())),
@@ -103,7 +141,7 @@ impl Provider for CustomProvider {
             RequestCredential::ApiKey(key) => Some(key),
             _ => None,
         };
-        let models = fetch_catalog(&self.id, &self.base_url, key.as_deref()).await?;
+        let models = fetch_catalog(&self.id, &self.base_url(), key.as_deref()).await?;
         *self.models.write().unwrap_or_else(|e| e.into_inner()) = models;
         Ok(())
     }
