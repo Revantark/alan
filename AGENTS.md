@@ -2,13 +2,16 @@
 
 ## Project
 
-Alan is minimal coding-agent written in rust.
+Alan is a minimal coding agent written in Rust.
 
 Workspace crates:
 
 - `crates/llm/` — provider-independent LLM protocol types and API clients.
 - `crates/providers/` — provider/model binding and authentication.
+- `crates/tools/` — built-in file system and shell tools.
 - `crates/agent/` — conversation state, tool calls, system prompt, agent loop.
+- `crates/tui/` — package `alan-tui`, a standalone Ratatui runtime: components,
+  event loop, terminal lifecycle. Published to crates.io.
 - `crates/alan/` — interactive ratatui REPL frontend.
 
 Workspace manifest: `Cargo.toml`.
@@ -36,15 +39,17 @@ cargo check -p alan
 cargo test -p agent
 cargo test -p llm
 cargo test -p providers
+cargo test -p tools
+cargo test -p alan-tui
 ```
 
 Run formatting and checks after Rust code changes. Do not run release or destructive Git commands unless requested.
 
 ### Model selection
 
-`/models` opens a picker backed by the OpenRouter model catalog. The catalog
-is fetched on first use and cached; selecting a model switches the active
-conversation model and updates the session header.
+`/models` opens a picker over the model catalogs of every registered provider.
+Selecting a model switches the active conversation model and updates the
+session header.
 
 Profiles save the current provider/model, reasoning effort, and web-fetch/search
 settings. Use `/profile save <name>` to create one, `/profile` to switch, and
@@ -53,7 +58,9 @@ settings for future launches; manual settings changes clear its active-profile
 marker. Profiles are stored separately in `<data dir>/profiles.json`. See
 `core::paths` for how the data directory is resolved.
 
-Alan currently uses OpenRouter:
+`build_providers` in `crates/alan/src/main.rs` lists the registered providers.
+The `providers` crate also has a Google provider that is not registered. Sign in
+with `/login`, or set the provider's API key variable:
 
 ```bash
 OPENROUTER_API_KEY=... cargo run -p alan
@@ -65,7 +72,8 @@ Optional model override:
 ALAN_MODEL=openai/gpt-4o-mini cargo run -p alan
 ```
 
-Current default model is `openai/gpt-4o-mini`.
+With no saved settings, Alan uses the `openrouter` provider and
+`DEFAULT_MODEL` from `crates/alan/src/core/settings.rs`.
 
 ## Architecture
 
@@ -73,28 +81,40 @@ Keep dependency direction one-way:
 
 ```text
 llm <- providers <- agent <- alan
+llm <- tools     <- agent
+alan-tui               <- alan
 ```
 
 `llm` must not depend on providers, agent, or UI.
 
 `agent` must not depend on ratatui or crossterm.
 
-`alan` owns terminal setup, key mapping, and ratatui rendering.
+`alan-tui` must not depend on other workspace crates.
+
+`alan-tui` owns terminal setup and the event loop. `alan` owns key mapping and
+ratatui rendering.
 
 ### Alan frontend boundary
 
 ```text
 crates/alan/src/main.rs
-  terminal lifecycle and crossterm event polling
+  provider setup, model selection, runtime launch
+
+crates/alan/src/keymap.rs
+  crossterm events to `AlanAction`
+
+crates/alan/src/root.rs
+  root component: routes `AlanAction` to children, lays out the screen
 
 crates/alan/src/core/
-  UI-independent actions, controller, transcript, agent execution
+  UI-independent chat controller, transcript, commands, settings,
+  permissions, skills
 
 crates/alan/src/views/
-  ratatui adapter, UI state, layout, rendering
+  ratatui components and theme
 ```
 
-`core` must stay frontend-independent. Future GPUI frontend should reuse `Controller`, `Entry`, and `Action`, then provide its own event mapping and renderer.
+`core` must stay frontend-independent. A future GPUI frontend should reuse `ChatController` and `Entry`, then provide its own event mapping and renderer.
 
 Do not add ratatui/crossterm types to `crates/alan/src/core/`.
 
@@ -111,7 +131,7 @@ auto-includes it in release archives.
 
 ## Current Alan UI
 
-`crates/alan/src/views/mod.rs` provides minimal borderless ratatui UI:
+`crates/alan/src/views/components/` provides minimal borderless ratatui UI:
 
 - Header.
 - Scrollable chat history.
@@ -121,27 +141,15 @@ auto-includes it in release archives.
 - Status line above editor.
 - Input cursor placement.
 
-`UiState` owns frontend interaction state:
-
-- input text
-- transcript scroll offset
-- auto-follow output state
-
-`Action` is UI-independent input intent:
-
-- `Quit`
-- `Submit`
-- `ClearInput`
-- `Backspace`
-- `Insert(char)`
-- `ScrollUp`
-- `ScrollDown`
+`ChatView` (`views/components/chat_view/`) owns the chat session: the
+`ChatController` and the agent stream. `PromptEditor` owns input. Overlays
+such as login and local models live beside `root.rs`.
 
 Keep UI simple. Avoid borders, unnecessary widgets, and premature abstraction.
 
 ## Current Agent Behavior
 
-`crates/agent/src/agent.rs` currently:
+`crates/agent/src/agent/` currently:
 
 - Stores conversation history in memory.
 - Sends prompts through bound `providers::Model`.
@@ -198,11 +206,9 @@ skip is `tracing::warn!`-logged.
 ## UI Rules
 
 - No core dependency on terminal framework.
-- Frontend converts native events into `Action`.
+- Frontend converts native events into `AlanAction`.
 - Renderer reads state; it should not perform network calls.
-- Controller owns agent interaction and transcript state.
-- Keep visual constants centralized in view module.
+- `ChatController` owns agent interaction and transcript state.
+- Keep visual constants centralized in `views/theme.rs`.
 - Use terminal display width for cursor/layout calculations, not byte count.
 - Keep auto-scroll behavior explicit.
-
-Implement in this order unless user requests different scope. Keep each step usable.

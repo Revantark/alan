@@ -2,7 +2,7 @@
 //! greets you and echoes what you typed.
 //!
 //! The editor is configured the same way alan configures its prompt
-//! (`UiState::new_editor`): word wrap, hidden in-widget cursor, and the real
+//! (`PromptEditor::new_editor`): word wrap, hidden in-widget cursor, and the real
 //! terminal cursor positioned from `rendered_cursor_position`.
 
 use std::time::Duration;
@@ -24,7 +24,7 @@ struct Greet {
 }
 
 impl Greet {
-    /// Same configuration as alan's `UiState::new_editor`.
+    /// Same configuration as alan's `PromptEditor::new_editor`.
     fn new_editor() -> TextArea<'static> {
         let mut editor = TextArea::default();
         editor.set_style(Style::default());

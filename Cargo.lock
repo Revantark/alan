@@ -1394,9 +1394,6 @@ dependencies = [
  "serde_json",
  "thiserror",
  "tokio",
- "tracing",
- "tracing-appender",
- "tracing-subscriber",
 ]
 
 [[package]]
@@ -1812,7 +1809,6 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "base64",
- "futures-util",
  "llm",
  "reqwest",
  "serde",
