@@ -13,6 +13,7 @@ A minimal coding agent in your terminal.
 - [Providers](#providers)
 - [Usage](#usage)
 - [Permissions](#permissions)
+- [Custom providers](#custom-providers)
 - [Skills](#skills)
 - [Configuration and data locations](#configuration-and-data-locations)
 - [Building from source](#building-from-source)
@@ -26,6 +27,7 @@ A minimal coding agent in your terminal.
 - **Steering** — queue a message mid-run and the agent picks it up without waiting for the response to finish.
 - **Plan and review modes** — cycle through them with `Shift+Tab` when you want the agent to think before it acts.
 - **Skills** — type `#name` in the prompt to attach a skill's full instructions to that message.
+- **Custom providers** — add any Chat Completions server, hosted or on your machine, with `/provider add`; all of its models appear in `/models`.
 
 ## Installation
 
@@ -73,6 +75,8 @@ Alan currently supports:
 
 Use the `/login` command to sign in to any of the available providers.
 
+Any other Chat Completions server can be added with `/provider add` (see [Custom providers](#custom-providers)).
+
 For OpenRouter, you can pin a custom provider for the selected model with `/model-providers`, followed by the provider name (no quotes):
 
 - `/model-providers deepseek`
@@ -86,6 +90,9 @@ For OpenRouter, you can pin a custom provider for the selected model with `/mode
 | `/profile` | Open the profile picker to switch profiles (`Ctrl+P`, or `Cmd+Option+P` where the terminal passes it through) |
 | `/profile save <name>` | Save current model/provider, reasoning, and web settings as a new profile |
 | `/profile delete` | Pick a saved profile to delete |
+| `/provider add` | Add a Chat Completions provider: name, URL and optional API key |
+| `/provider edit` | Change a provider's URL or API key |
+| `/provider remove` | Remove a provider and its API key |
 | `/plan` | Toggle plan mode (also `Shift+Tab`) |
 | `/review` | Toggle review mode (also `Shift+Tab`) |
 | `/normal` | Turn off plan and review mode |
@@ -119,6 +126,14 @@ Alan starts in strict policy and remembers the policy you pick across runs. Swit
   - `/tool-free`
   - `/tool-strict`
 
+## Custom providers
+
+Any server that speaks the Chat Completions API can be a provider: hosted APIs such as Groq, xAI or Mistral, or a model server on your machine such as Ollama or LM Studio.
+
+`/provider add` asks for a name, the base URL (the part before `/chat/completions`, e.g. `https://api.groq.com/openai/v1` or `http://localhost:11434/v1`) and an API key if the server needs one. Alan calls `<url>/models` to check the URL and key, and saves the provider only when that call works. Every model the server lists then appears in `/models`, including ones it adds later.
+
+The key is stored in `auth.json` with the other providers' keys, so `/login` can change it too. `/provider edit` changes the URL or key; the name is fixed. `/provider remove` deletes the provider and its key. If one of its models is in use, Alan first asks which model to switch to.
+
 ## Configuration and data locations
 
 Alan stores everything under `~/.alan/` by default:
@@ -126,6 +141,7 @@ Alan stores everything under `~/.alan/` by default:
 - `settings.json` — your current settings and active-profile marker.
 - `profiles.json` — saved named model/reasoning/web settings profiles.
 - `auth.json` — provider credentials saved by `/login`.
+- `providers.json` — providers added with `/provider add`.
 - `projects/` — per-project permission grants.
 - `sessions/` — conversation history (append-only JSONL, one file per session).
 - `skills/` — personal skills, available in every project.
@@ -140,7 +156,7 @@ Settings variables override `settings.json` for that run without changing it. St
 | Variable | Effect |
 | --- | --- |
 | `ALAN_HOME` | Parent of the data directory: `ALAN_HOME=/tmp/x` puts everything in `/tmp/x/.alan`. |
-| `ALAN_PROVIDER` | Provider id: `openrouter`, `deepseek` or `zai`. |
+| `ALAN_PROVIDER` | Provider id: `openrouter`, `deepseek`, `zai`, or a name added with `/provider add`. |
 | `ALAN_MODEL` | Model id for that provider, e.g. `ALAN_MODEL=openai/gpt-4o-mini alan`. |
 | `ALAN_REASONING_EFFORT` | `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max`. |
 | `ALAN_OPENROUTER_WEB_FETCH` | Turn OpenRouter's web fetch tool on or off: `true`/`false`, `1`/`0`, `yes`/`no`, `on`/`off`. |
