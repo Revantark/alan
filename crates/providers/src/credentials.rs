@@ -16,9 +16,6 @@ pub enum Credential {
     ApiKey {
         key: String,
     },
-    /// Generic OAuth credentials. Provider-specific claims (for example a
-    /// ChatGPT account id) live in `metadata`; secret material there is
-    /// shielded by the manual `Debug` impl below.
     OAuth {
         access_token: String,
         refresh_token: String,
@@ -170,9 +167,6 @@ impl FileCredentialStore {
     fn read_all(&self) -> Result<BTreeMap<String, Credential>, CredentialError> {
         match fs::read_to_string(&self.path) {
             Ok(contents) => {
-                // Migrate before typing: pre-rename files carry the old
-                // `chat_gpt_o_auth` tag and a flat `account_id` field, which
-                // would otherwise fail to parse or be silently dropped.
                 let mut entries: BTreeMap<String, serde_json::Value> =
                     serde_json::from_str(&contents).map_err(CredentialError::Serialization)?;
                 for entry in entries.values_mut() {
@@ -301,10 +295,6 @@ fn set_unix_mode(path: &Path, mode: u32) -> std::io::Result<()> {
     fs::set_permissions(path, fs::Permissions::from_mode(mode))
 }
 
-/// Migrate one legacy credential entry in place: files written before the
-/// OAuth rename serialize `Credential::ChatGptOAuth` as
-/// `{"type": "chat_gpt_o_auth", ..., "account_id": "..."}`; the current
-/// variant is `"oauth"` with provider claims in a nested `metadata` map.
 fn migrate_legacy_oauth(entry: &mut serde_json::Value) {
     let Some(object) = entry.as_object_mut() else {
         return;

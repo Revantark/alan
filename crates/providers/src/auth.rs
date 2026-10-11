@@ -31,10 +31,6 @@ pub enum AuthError {
     Storage(#[from] CredentialError),
 }
 
-/// Credentials resolved for one request: the request credential plus any
-/// provider-specific headers to send (for example a ChatGPT account id learned
-/// at sign-in). Resolving is a pure read — callers attach the headers to the
-/// request; nothing is mutated in shared state.
 #[derive(Debug, Clone)]
 pub struct Resolved {
     pub credential: RequestCredential,
@@ -112,9 +108,6 @@ impl AuthResolver for CredentialAuth {
                     headers: Vec::new(),
                 }),
                 Credential::ApiKey { .. } => Err(AuthError::Missing),
-                // OAuth credentials are resolved by their provider's own
-                // resolver (`ChatGptAuth` for ChatGPT), never by this
-                // API-key resolver.
                 Credential::OAuth { .. } => Err(AuthError::Missing),
             };
         }

@@ -32,8 +32,6 @@ enum LoginState {
         provider_id: ProviderId,
         input: String,
     },
-    /// A browser sign-in is running; the URL is shown in case the
-    /// browser did not open.
     AwaitingBrowser {
         provider_id: ProviderId,
         url: String,
@@ -49,7 +47,6 @@ pub struct LoginOverlay {
     providers: Arc<ProviderRegistry>,
     credentials: Arc<dyn CredentialStore>,
     state: LoginState,
-    /// The running browser sign-in, cancellable with Esc.
     browser_task: Option<alan_tui::TaskHandle>,
 }
 
@@ -219,6 +216,7 @@ impl LoginOverlay {
                             provider_id: provider_id.clone(),
                             url: start.url.clone(),
                         };
+
                         let credentials = Arc::clone(&overlay.credentials);
                         let provider = Arc::clone(&provider);
                         let future = async move {

@@ -31,8 +31,6 @@ pub trait Auth: Send + Sync {
     /// The authentication methods this provider supports.
     fn auth_methods(&self) -> Vec<crate::auth::AuthMethod>;
 
-    /// Validate a credential the user just supplied: an API key, or the
-    /// result of a browser sign-in.
     async fn validate_auth(
         &self,
         result: &crate::auth::AuthResult,

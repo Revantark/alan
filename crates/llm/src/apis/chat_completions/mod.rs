@@ -103,8 +103,7 @@ impl StreamHandler for ChatHandler {
         {
             self.stop_reason = Some(stop_reason);
         }
-        // Emit usage *after* the chunk's text/reasoning/tool-call deltas
-        // so consumers see content before the summary.
+
         let mut events = chunk.events;
         if let Some(usage) = chunk.usage {
             events.push(LlmEvent::Usage { usage });
