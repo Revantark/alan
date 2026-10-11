@@ -184,10 +184,8 @@ fn user_item(message: &Message) -> Result<serde_json::Value, LlmError> {
         for part in parts {
             match part {
                 ContentPart::Text { text } => content.push(input_text(text)),
-                ContentPart::Image { .. } => {
-                    return Err(LlmError::InvalidResponse(
-                        "images are not supported by the ChatGPT provider".into(),
-                    ));
+                ContentPart::Image { image_url } => {
+                    content.push(input_image(&image_url.url));
                 }
             }
         }
@@ -205,6 +203,14 @@ fn user_item(message: &Message) -> Result<serde_json::Value, LlmError> {
 
 fn input_text(text: &str) -> serde_json::Value {
     serde_json::json!({ "type": "input_text", "text": text })
+}
+
+/// Base64 data URIs and direct URLs both serialize as `input_image` items.
+fn input_image(url: &str) -> serde_json::Value {
+    serde_json::json!({
+        "type": "input_image",
+        "image_url": url,
+    })
 }
 
 /// Assistant turns replay as: reasoning items (verbatim, original position),
@@ -527,14 +533,34 @@ mod tests {
     }
 
     #[test]
-    fn images_are_rejected() {
-        let messages = [Message::user_with_parts(vec![ContentPart::Image {
-            image_url: crate::ImageUrl {
-                url: "https://example.invalid/a.png".into(),
+    fn user_images_serialize_as_input_image_items() {
+        let data_uri = "data:image/png;base64,iVBORw0KGgo=";
+        let messages = [Message::user_with_parts(vec![
+            ContentPart::Text {
+                text: "What's in this image?".into(),
             },
-        }])];
-        let error = request_with(&messages, &[], ReasoningEffort::None).unwrap_err();
+            ContentPart::Image {
+                image_url: crate::ImageUrl {
+                    url: "https://example.invalid/a.png".into(),
+                },
+            },
+            ContentPart::Image {
+                image_url: crate::ImageUrl {
+                    url: data_uri.into(),
+                },
+            },
+        ])];
+        let body = body_for(&messages);
+        let input = body["input"].as_array().unwrap();
 
-        assert!(error.to_string().contains("images are not supported"));
+        assert_eq!(input.len(), 1);
+        let content = input[0]["content"].as_array().unwrap();
+        assert_eq!(content.len(), 3);
+        assert_eq!(content[0]["type"], "input_text");
+        assert_eq!(content[0]["text"], "What's in this image?");
+        assert_eq!(content[1]["type"], "input_image");
+        assert_eq!(content[1]["image_url"], "https://example.invalid/a.png");
+        assert_eq!(content[2]["type"], "input_image");
+        assert_eq!(content[2]["image_url"], data_uri);
     }
 }
