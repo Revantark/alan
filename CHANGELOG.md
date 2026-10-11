@@ -9,12 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- ChatGPT subscription provider (`chatgpt.com` Codex backend, OpenAI Responses
-  wire protocol) with browser sign-in: OAuth PKCE on a fixed loopback port,
-  automatic token refresh, and credentials stored with owner-only permissions.
-  **Unofficial client, personal use only**: it calls a backend OpenAI has not
-  published, so access depends on OpenAI's terms and may stop working at any
-  time.
+- ChatGPT subscription provider
+
+### Fixed
+
+- Fix local model binding on startup
 
 ## 0.1.5 - 2026-10-07
 
