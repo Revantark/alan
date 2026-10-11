@@ -4,7 +4,10 @@ use crate::views::theme;
 use alan_tui::context::Context;
 use alan_tui::{ActionStatus, Component, RenderContext};
 use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers};
-use providers::{AuthMethod, AuthResult, CredentialStore, ProviderId, ProviderRegistry};
+use providers::{
+    AuthMethod, AuthResult, Credential, CredentialStore, OAuthConfig, ProviderId, ProviderRegistry,
+    finish_oauth_sign_in, start_oauth_sign_in,
+};
 use ratatui::Frame;
 use ratatui::layout::Alignment;
 use ratatui::layout::Rect;
@@ -27,8 +30,11 @@ enum LoginState {
     },
     Prompting {
         provider_id: ProviderId,
-        auth_method: providers::AuthMethod,
         input: String,
+    },
+    AwaitingBrowser {
+        provider_id: ProviderId,
+        url: String,
     },
     Validating {
         message: String,
@@ -41,6 +47,7 @@ pub struct LoginOverlay {
     providers: Arc<ProviderRegistry>,
     credentials: Arc<dyn CredentialStore>,
     state: LoginState,
+    browser_task: Option<alan_tui::TaskHandle>,
 }
 
 impl LoginOverlay {
@@ -60,6 +67,7 @@ impl LoginOverlay {
                 providers: list,
                 selected: 0,
             },
+            browser_task: None,
         }
     }
 
@@ -79,17 +87,8 @@ impl LoginOverlay {
     }
 
     fn submit_input(&mut self, cx: &mut Context<'_, Self, AlanAction>) {
-        let LoginState::Prompting {
-            provider_id,
-            auth_method,
-            input,
-        } = &mut self.state
-        else {
+        let LoginState::Prompting { provider_id, input } = &mut self.state else {
             return;
-        };
-
-        let auth_result = match auth_method {
-            AuthMethod::ApiKey => providers::AuthResult::ApiKey(std::mem::take(input)),
         };
 
         let Some(provider) = self.providers.get(provider_id) else {
@@ -98,6 +97,8 @@ impl LoginOverlay {
             return;
         };
 
+        let api_key = std::mem::take(input);
+        let auth_result = AuthResult::ApiKey(api_key.clone());
         let provider = Arc::clone(&provider);
         let credentials = Arc::clone(&self.credentials);
 
@@ -108,13 +109,9 @@ impl LoginOverlay {
                     .await
                     .map_err(|e| alan_tui::TaskError(e.into()))?;
 
-                match auth_result {
-                    AuthResult::ApiKey(key) => {
-                        let credential = providers::Credential::ApiKey { key };
-                        if let Err(e) = credentials.put(&provider.id(), credential).await {
-                            return Err(alan_tui::TaskError(e.into()));
-                        }
-                    }
+                let credential = Credential::ApiKey { key: api_key };
+                if let Err(e) = credentials.put(&provider.id(), credential).await {
+                    return Err(alan_tui::TaskError(e.into()));
                 }
 
                 Ok(())
@@ -139,6 +136,10 @@ impl LoginOverlay {
     }
 
     fn dismiss(&mut self, cx: &mut Context<'_, Self, AlanAction>) {
+        // Free the fixed redirect port if a browser sign-in is still waiting.
+        if let Some(task) = self.browser_task.take() {
+            task.cancel();
+        }
         cx.close_overlay();
     }
 
@@ -160,27 +161,95 @@ impl LoginOverlay {
                     return;
                 };
 
-                let auth_method = provider.auth_methods().into_iter().next();
-
-                if auth_method.is_none() {
+                let Some(auth_method) = provider.auth_methods().into_iter().next() else {
                     self.state = LoginState::Error("No authentication methods available".into());
                     cx.notify();
                     return;
-                }
-
-                self.state = LoginState::Prompting {
-                    provider_id,
-                    auth_method: auth_method.unwrap(),
-                    input: String::new(),
                 };
+
+                match auth_method {
+                    AuthMethod::ApiKey => {
+                        self.state = LoginState::Prompting {
+                            provider_id,
+                            input: String::new(),
+                        };
+                    }
+                    AuthMethod::OAuth { config } => {
+                        self.start_browser_sign_in(provider_id, config, cx)
+                    }
+                }
                 cx.notify();
             }
             LoginState::Prompting { .. } => self.submit_input(cx),
-            LoginState::Validating { .. } => {}
+            LoginState::AwaitingBrowser { .. } | LoginState::Validating { .. } => {}
             LoginState::Success | LoginState::Error(_) => {
                 self.dismiss(cx);
             }
         }
+    }
+
+    fn start_browser_sign_in(
+        &mut self,
+        provider_id: ProviderId,
+        config: OAuthConfig,
+        cx: &mut Context<'_, Self, AlanAction>,
+    ) {
+        let Some(provider) = self.providers.get(&provider_id) else {
+            self.state = LoginState::Error("Provider not found".into());
+            cx.notify();
+            return;
+        };
+        self.state = LoginState::Validating {
+            message: "Starting sign-in…".to_string(),
+        };
+
+        let task = cx.spawn(
+            async move {
+                start_oauth_sign_in(&config)
+                    .await
+                    .map_err(|error| alan_tui::TaskError(error.into()))
+            },
+            move |result, overlay: &mut Self, cx| {
+                match result {
+                    Ok(start) => {
+                        overlay.state = LoginState::AwaitingBrowser {
+                            provider_id: provider_id.clone(),
+                            url: start.url.clone(),
+                        };
+
+                        let credentials = Arc::clone(&overlay.credentials);
+                        let provider = Arc::clone(&provider);
+                        let future = async move {
+                            let tokens = finish_oauth_sign_in(&config, start)
+                                .await
+                                .map_err(|error| alan_tui::TaskError(error.into()))?;
+                            let credential = provider
+                                .credential_from_tokens(tokens)
+                                .map_err(|error| alan_tui::TaskError(error.into()))?;
+                            credentials
+                                .put(&provider_id, credential)
+                                .await
+                                .map_err(|error| alan_tui::TaskError(error.into()))?;
+                            Ok(())
+                        };
+                        let task = cx.spawn(future, |result, overlay: &mut Self, cx| {
+                            overlay.browser_task = None;
+                            match result {
+                                Ok(()) => overlay.state = LoginState::Success,
+                                Err(error) => overlay.state = LoginState::Error(error.to_string()),
+                            }
+                            cx.notify();
+                        });
+                        overlay.browser_task = Some(task);
+                    }
+                    Err(error) => {
+                        overlay.state = LoginState::Error(error.to_string());
+                    }
+                }
+                cx.notify();
+            },
+        );
+        self.browser_task = Some(task);
     }
 }
 
@@ -291,6 +360,9 @@ fn render_login(frame: &mut Frame, area: Rect, state: &LoginState) {
             },
         ),
         LoginState::Validating { .. } => ("Signing in…".to_owned(), " Esc close "),
+        LoginState::AwaitingBrowser { .. } => {
+            ("Waiting for browser sign-in…".to_owned(), " Esc cancel ")
+        }
         LoginState::Success => ("Signed in".to_owned(), " Enter / Esc close "),
         LoginState::Error(_) => ("Sign-in failed".to_owned(), " Enter / Esc close "),
     };
@@ -385,6 +457,10 @@ fn render_login(frame: &mut Frame, area: Rect, state: &LoginState) {
             );
             frame.set_cursor_position((content.x + 3 + visible as u16, content.y));
         }
+        LoginState::AwaitingBrowser { url, .. } => {
+            let message = format!("Complete the sign-in in your browser, or open:\n{url}");
+            render_message(frame, content, &message, muted);
+        }
         LoginState::Validating { message } => render_message(frame, content, message, muted),
         LoginState::Success => render_message(
             frame,
@@ -456,7 +532,6 @@ mod tests {
         let states = [
             LoginState::Prompting {
                 provider_id: ProviderId("example".into()),
-                auth_method: AuthMethod::ApiKey,
                 input: "secret-key".repeat(80),
             },
             LoginState::Selecting {
@@ -465,6 +540,10 @@ mod tests {
             },
             LoginState::Validating {
                 message: "Validating credentials…".into(),
+            },
+            LoginState::AwaitingBrowser {
+                provider_id: ProviderId("chatgpt".into()),
+                url: "https://auth.openai.com/oauth/authorize?x=1".into(),
             },
             LoginState::Success,
             LoginState::Error("Could not authenticate. Check your API key.".into()),

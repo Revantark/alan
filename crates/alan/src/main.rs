@@ -22,8 +22,8 @@ use agent::{Agent, SessionManager, ToolPermissionManager, default_tools};
 use alan_tui::Runtime;
 use llm::ReasoningEffort;
 use providers::{
-    DeepSeekProvider, FileCredentialStore, LocalProvider, ModelOptions, OpenRouterProvider,
-    Provider, ProviderRegistry, ZaiProvider, bind_local_model, bind_model,
+    ChatGptProvider, DeepSeekProvider, FileCredentialStore, LocalProvider, ModelOptions,
+    OpenRouterProvider, Provider, ProviderRegistry, ZaiProvider, bind_local_model, bind_model,
 };
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -160,6 +160,7 @@ fn build_providers(
         // Arc::new(GoogleProvider::from_store(Arc::clone(credential_store)).build()?),
         Arc::new(OpenRouterProvider::from_store(Arc::clone(credential_store)).build()?),
         Arc::new(DeepSeekProvider::from_store(Arc::clone(credential_store)).build()?),
+        Arc::new(ChatGptProvider::from_store(Arc::clone(credential_store)).build()),
         Arc::clone(local_provider) as Arc<dyn Provider>,
     ])
 }

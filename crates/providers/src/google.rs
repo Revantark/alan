@@ -1,6 +1,6 @@
 use crate::{
-    ApiId, ApiKeyAuth, AuthError, AuthResolver, CredentialAuth, ModelInfo, ModelPricing, Provider,
-    ProviderError, ProviderId, ServerToolInfo,
+    ApiId, ApiKeyAuth, Auth, AuthError, AuthResolver, CredentialAuth, ModelInfo, ModelPricing,
+    Provider, ProviderError, ProviderId, ServerToolInfo,
 };
 use async_trait::async_trait;
 use llm::{HttpClient, InteractionsApi, LlmApi};
@@ -98,12 +98,19 @@ impl Provider for GoogleProvider {
         &self.server_tools
     }
 
-    fn auth_methods(&self) -> Vec<crate::auth::AuthMethod> {
-        vec![crate::auth::AuthMethod::ApiKey]
-    }
-
     fn apis(&self) -> &HashMap<ApiId, Arc<dyn LlmApi>> {
         &self.apis
+    }
+
+    async fn fetch_models(&self) -> Result<(), ProviderError> {
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl Auth for GoogleProvider {
+    fn auth_methods(&self) -> Vec<crate::auth::AuthMethod> {
+        vec![crate::auth::AuthMethod::ApiKey]
     }
 
     fn auth(&self) -> Arc<dyn AuthResolver> {
@@ -116,12 +123,9 @@ impl Provider for GoogleProvider {
     ) -> Result<(), crate::auth::AuthError> {
         match auth_result {
             crate::auth::AuthResult::ApiKey(key) => validate_api_key(key).await,
+            // OAuth is handled by the ChatGPT provider's own resolver.
+            crate::auth::AuthResult::OAuth => Err(crate::auth::AuthError::Missing),
         }
-    }
-
-    async fn fetch_models(&self) -> Result<(), ProviderError> {
-        // Models are pre-configured in from_store, no need to fetch
-        Ok(())
     }
 }
 
