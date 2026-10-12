@@ -22,6 +22,7 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::Style;
 use ratatui::widgets::{Paragraph, Widget};
+use std::cell::RefCell;
 use std::collections::VecDeque;
 use strum::IntoEnumIterator;
 use tui_textarea::{CursorMove, CursorRenderMode, TextArea, WrapMode};
@@ -59,6 +60,7 @@ pub struct PromptEditor {
     /// resolved from the catalog at submit time, so the text stays the single
     /// source of truth for what is attached.
     skills: Vec<String>,
+    layout_cache: RefCell<Option<(Vec<String>, u16, u16)>>,
 }
 
 impl PromptEditor {
@@ -95,6 +97,7 @@ impl PromptEditor {
             history_index: None,
             pending_steer: None,
             skills: Vec::new(),
+            layout_cache: RefCell::new(None),
         }
     }
 
@@ -116,10 +119,21 @@ impl PromptEditor {
         self.history_index = None;
     }
 
-    /// Rows the prompt needs at `width`, accounting for soft wrapping. Mutable
-    /// because `TextArea::measure` caches the result.
+    /// Rows the prompt needs at `width`, accounting for soft wrapping.
     pub fn rows(&self, width: u16) -> u16 {
-        self.editor.clone().measure(width.max(1)).preferred_rows
+        let width = width.max(1);
+        let lines = self.editor.lines();
+        let cached = self.layout_cache.borrow();
+        if let Some((cached_lines, cached_width, rows)) = cached.as_ref()
+            && *cached_width == width
+            && cached_lines == lines
+        {
+            return *rows;
+        }
+        drop(cached);
+        let rows = self.editor.clone().measure(width).preferred_rows;
+        *self.layout_cache.borrow_mut() = Some((lines.to_vec(), width, rows));
+        rows
     }
 
     pub fn attachments(&self) -> &[ImageAttachment] {
