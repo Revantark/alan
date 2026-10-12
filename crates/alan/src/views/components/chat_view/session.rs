@@ -3,7 +3,7 @@
 
 use super::ChatView;
 use crate::root::AlanAction;
-use crate::views::components::{ForkEvent, ForkOverlay};
+use crate::views::components::{SearchListEvent, SearchListOverlay, derive_checkpoints};
 use alan_tui::context::Context;
 
 /// `/new`: reset to a fresh, empty session.
@@ -192,51 +192,83 @@ pub(crate) fn start_summarize_new(
     );
 }
 
-/// Open the `/fork` overlay.
+/// Open the `/fork` picker.
 pub(crate) fn open_fork_overlay(view: &mut ChatView, cx: &mut Context<'_, ChatView, AlanAction>) {
     let agent = view.controller.agent();
-    view.fork_in_flight = true;
-    let picker = cx.open_overlay(ForkOverlay::new(std::sync::Arc::clone(&agent)));
-    cx.subscribe_once::<crate::views::components::ForkEvent, crate::views::components::ForkOverlay, _>(picker, move |_event, view, _picker, cx| {
-        let ForkEvent::Chosen { end_index } = *_event else {
-            // Closing the picker without choosing must release the
-            // latch, otherwise every later `/fork` is rejected.
-            view.fork_in_flight = false;
-            return;
-        };
-        let agent = view.controller.agent();
-        let _ = cx.spawn(
-            async move {
-                agent
-                    .fork_session(end_index)
-                    .await
-                    .map_err(|e| alan_tui::TaskError(Box::new(e)))?;
-                let messages = agent.messages().await;
-                Ok::<_, alan_tui::TaskError>(messages)
-            },
-            move |result, view, cx| {
-                view.fork_in_flight = false;
-                match result {
-                    Ok(messages) => {
-                        view.controller.apply_restored(
-                            messages,
-                            llm::Usage::default(),
-                            view.controller.model_name(),
-                            view.controller.max_context(),
-                        );
-                        view.controller.push_info("forked session".to_owned());
-                        if let Some(editor) = view.editor {
-                            let prompts = super::recall_prompts(view.controller.entries());
-                            cx.update(editor, |e| e.seed_history(prompts));
-                        }
+    cx.spawn(
+        async move {
+            let messages = agent.messages().await;
+            Ok::<_, alan_tui::TaskError>(derive_checkpoints(&messages))
+        },
+        move |result, _view, cx| {
+            let mut end_indices = Vec::new();
+            let mut labels = Vec::new();
+            let empty_message = match result {
+                Ok(checkpoints) if !checkpoints.is_empty() => {
+                    for checkpoint in checkpoints {
+                        end_indices.push(checkpoint.end_index);
+                        labels.push(checkpoint.label);
                     }
-                    Err(error) => {
-                        view.controller
-                            .push_info(format!("failed to fork: {error}"));
+                    None
+                }
+
+                Ok(_) => Some("No checkpoints to fork from".to_owned()),
+                Err(error) => Some(format!("failed to load conversation: {error}")),
+            };
+
+            let mut picker = SearchListOverlay::new("Fork Session", labels);
+            if let Some(message) = empty_message {
+                picker.set_empty_message(message);
+            }
+            let popup = cx.open_overlay(picker);
+            cx.subscribe_once::<SearchListEvent, SearchListOverlay, _>(
+                popup,
+                move |event, view, _picker, cx| {
+                    let SearchListEvent::Chosen(index) = *event else {
+                        return;
+                    };
+                    if let Some(&end_index) = end_indices.get(index) {
+                        fork_from(view, end_index, cx);
+                    }
+                },
+            );
+        },
+    );
+}
+
+/// Run the fork at `end_index` and apply the result to the view.
+fn fork_from(view: &mut ChatView, end_index: usize, cx: &mut Context<'_, ChatView, AlanAction>) {
+    let agent = view.controller.agent();
+    cx.spawn(
+        async move {
+            agent
+                .fork_session(end_index)
+                .await
+                .map_err(|error| alan_tui::TaskError(Box::new(error)))?;
+            let messages = agent.messages().await;
+            Ok::<_, alan_tui::TaskError>(messages)
+        },
+        move |result, view, cx| {
+            match result {
+                Ok(messages) => {
+                    view.controller.apply_restored(
+                        messages,
+                        llm::Usage::default(),
+                        view.controller.model_name(),
+                        view.controller.max_context(),
+                    );
+                    view.controller.push_info("forked session".to_owned());
+                    if let Some(editor) = view.editor {
+                        let prompts = super::recall_prompts(view.controller.entries());
+                        cx.update(editor, |e| e.seed_history(prompts));
                     }
                 }
-                cx.notify();
-            },
-        );
-    });
+                Err(error) => {
+                    view.controller
+                        .push_info(format!("failed to fork: {error}"));
+                }
+            }
+            cx.notify();
+        },
+    );
 }

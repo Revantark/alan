@@ -11,6 +11,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - ChatGPT subscription provider
 
+### Changed
+
+- `/fork` now uses the shared searchable picker overlay
+
 ### Fixed
 
 - Fix local model binding on startup

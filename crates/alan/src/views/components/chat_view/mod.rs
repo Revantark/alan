@@ -81,7 +81,6 @@ pub struct ChatView {
     /// Fixed-rate repaint ticker, alive only while the agent is streaming.
     /// Keeps render cadence independent of the token rate.
     stream_repaint: Option<Subscription>,
-    fork_in_flight: bool,
     skills: Vec<agent::Skill>,
     skill_roots: Vec<PathBuf>,
 }
@@ -108,7 +107,6 @@ impl ChatView {
             model_subscription: None,
             prompt: None,
             stream_repaint: None,
-            fork_in_flight: false,
             skills: Vec::new(),
             skill_roots,
         }
