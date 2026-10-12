@@ -16,6 +16,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - `/fork` now uses the shared searchable picker overlay
+- SSE stream decoding now compacts its buffer once per chunk instead of per line, avoiding quadratic copies
 
 ### Fixed
 
