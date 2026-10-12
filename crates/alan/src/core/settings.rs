@@ -11,12 +11,14 @@
 //!   - ALAN_REASONING_EFFORT
 //!   - ALAN_OR_MODEL_PROVIDER
 //!   - ALAN_PROVIDER
+//!   - ALAN_PROFILE
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
 use crate::core::paths;
 use crate::core::permissions;
+use crate::core::profile::{self, ProfileStore};
 use crate::core::store::JsonStore;
 
 const SETTINGS_KEY: &str = "settings";
@@ -201,6 +203,23 @@ impl Settings {
             self.active_profile = None;
         }
     }
+}
+
+pub async fn patch_from_profile(name: &str) -> anyhow::Result<PatchSettings> {
+    let store = ProfileStore::new(profile::default_profiles_path()?);
+    let profiles = store.load().await?;
+    let profile = profiles
+        .get(name)
+        .with_context(|| format!("profile not found: {name}"))?;
+
+    Ok(PatchSettings {
+        provider: Some(profile.provider.clone()),
+        model: Some(profile.model.clone()),
+        reasoning: Some(profile.reasoning),
+        web_fetch: Some(profile.web_fetch),
+        web_search: Some(profile.web_search),
+        ..PatchSettings::default()
+    })
 }
 
 pub async fn get_settings() -> anyhow::Result<Settings> {

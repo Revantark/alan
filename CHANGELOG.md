@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Headless mode: `alan -p "prompt"` (or `-p=prompt`) runs one prompt without the TUI, with all tool permissions approved, and prints the final answer to stdout
+- `ALAN_PROFILE=<name>` overrides alan settings with profile settings but not persisted.
 - ChatGPT subscription provider
 
 ### Changed

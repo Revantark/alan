@@ -109,6 +109,27 @@ For OpenRouter, you can pin a custom provider for the selected model with `/mode
 | `/help` | List available commands |
 | `/quit` | Exit Alan |
 
+### Profiles
+
+A profile is a named snapshot of the provider, model, reasoning effort, and web tool settings. Save one with `/profile save <name>`, switch between them with `/profile` (the picker also opens with `Ctrl+P`), and remove one with `/profile delete`. Profiles live in `<data dir>/profiles.json`.
+
+To start Alan with a profile without touching your saved settings, use the `ALAN_PROFILE` environment variable — handy for running different models per project or in scripts:
+
+```bash
+ALAN_PROFILE=deep-reasoning alan
+ALAN_PROFILE=fast alan -p "Summarize the failing test"
+```
+
+Note: ALAN_PROFILE overrides other env variables.
+
+### Headless mode
+
+Run a single prompt without the TUI. All tool calls are approved without asking; only the final answer is printed to stdout.
+
+```bash
+alan -p "Fix the failing test"
+```
+
 ## Permissions
 
 Alan provides three policies to handle tool call permissions.
@@ -160,6 +181,7 @@ Settings variables override `settings.json` for that run without changing it. St
 | `ALAN_HOME` | Parent of the data directory: `ALAN_HOME=/tmp/x` puts everything in `/tmp/x/.alan`. |
 | `ALAN_PROVIDER` | Provider id: `openrouter`, `deepseek`, `zai`, or `local`. |
 | `ALAN_MODEL` | Model id for that provider, e.g. `ALAN_MODEL=openai/gpt-4o-mini alan`. |
+| `ALAN_PROFILE` | Select a saved profile by name for this run without changing `settings.json`. |
 | `ALAN_REASONING_EFFORT` | `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max`. |
 | `ALAN_OPENROUTER_WEB_FETCH` | Turn OpenRouter's web fetch tool on or off: `true`/`false`, `1`/`0`, `yes`/`no`, `on`/`off`. |
 | `ALAN_OPENROUTER_WEB_SEARCH` | Turn OpenRouter's web search tool on or off, same values. |
