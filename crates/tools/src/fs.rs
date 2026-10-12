@@ -131,12 +131,13 @@ impl ToolExecutor for FileReadExecutor {
             .await
             .map_err(|e| ToolError(format!("failed to read file {path}: {e}")))?;
         let mut reader = BufReader::new(file);
+
         let mut lines: Vec<String> = Vec::new();
         let mut line = String::new();
+        let mut total_lines = 0u64;
         let mut total_bytes = 0usize;
 
         loop {
-            line.clear();
             let bytes_read = reader
                 .read_line(&mut line)
                 .await
@@ -150,22 +151,24 @@ impl ToolExecutor for FileReadExecutor {
                     "file content exceeds {MAX_FILE_SIZE} byte limit"
                 )));
             }
-            lines.push(line.clone());
+            total_lines += 1;
+            if total_lines <= effective_end {
+                lines.push(std::mem::take(&mut line));
+            }
         }
 
-        let total = lines.len() as u64;
-        if total == 0 {
+        if total_lines == 0 {
             return Ok(ToolOutput::Text(format!(
                 "[read {path} empty file (0 lines)]\n"
             )));
         }
-        if line_start > total {
+        if line_start > total_lines {
             return Err(ToolError(format!(
-                "line_start {line_start} beyond end of file ({total} lines)"
+                "line_start {line_start} beyond end of file ({total_lines} lines)"
             )));
         }
 
-        let actual_end = effective_end.min(total);
+        let actual_end = effective_end.min(total_lines);
         let mut content = String::new();
         for number in line_start..=actual_end {
             let index = (number - 1) as usize;
@@ -176,11 +179,11 @@ impl ToolExecutor for FileReadExecutor {
         }
         if truncated {
             content.push_str(&format!(
-                "[read {path} lines {line_start}-{actual_end} of {total} \u{2014} requested lines {line_start}-{requested_end} exceeds {MAX_READ_LINES} line limit, capped to {MAX_READ_LINES} lines \u{2014} use line_start/line_end to page]\n"
+                "[read {path} lines {line_start}-{actual_end} of {total_lines} \u{2014} requested lines {line_start}-{requested_end} exceeds {MAX_READ_LINES} line limit, capped to {MAX_READ_LINES} lines \u{2014} use line_start/line_end to page]\n"
             ));
         } else {
             content.push_str(&format!(
-                "[read {path} lines {line_start}-{actual_end} of {total} \u{2014} use line_start/line_end to page]\n"
+                "[read {path} lines {line_start}-{actual_end} of {total_lines} \u{2014} use line_start/line_end to page]\n"
             ));
         }
 
@@ -446,6 +449,49 @@ mod tests {
         };
         assert!(text.starts_with("151:line 151\n"), "got: {text}");
         assert!(text.contains("200:line 200\n"), "got: {text}");
+        tokio::fs::remove_file(path).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn large_file_footer_reports_total_line_count() {
+        let path = temp_path();
+        let body = (1..=10_000)
+            .map(|n| format!("line {n}\n"))
+            .collect::<String>();
+        tokio::fs::write(&path, body).await.unwrap();
+
+        let call = tool_call(&path, r#""line_start":151,"line_end":200"#);
+        let result = FileReadExecutor.execute(&call).await.unwrap();
+
+        let ToolOutput::Text(text) = result else {
+            panic!("expected text, got {result:?}");
+        };
+        assert!(text.starts_with("151:line 151\n"), "got: {text}");
+        assert!(text.contains("200:line 200\n"), "got: {text}");
+        assert!(
+            text.contains(&format!("[read {} lines 151-200 of 10000", path.display())),
+            "got: {text}"
+        );
+        tokio::fs::remove_file(path).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn empty_file_reports_zero_lines() {
+        let path = temp_path();
+        tokio::fs::write(&path, "").await.unwrap();
+
+        let result = FileReadExecutor
+            .execute(&tool_call(&path, ""))
+            .await
+            .unwrap();
+
+        let ToolOutput::Text(text) = result else {
+            panic!("expected text, got {result:?}");
+        };
+        assert!(
+            text.contains(&format!("[read {} empty file (0 lines)]", path.display())),
+            "got: {text}"
+        );
         tokio::fs::remove_file(path).await.unwrap();
     }
 
