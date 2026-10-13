@@ -31,6 +31,7 @@ pub struct CustomProvider {
     models: RwLock<Vec<ModelInfo>>,
     apis: HashMap<ApiId, Arc<dyn LlmApi>>,
     auth: Arc<dyn AuthResolver>,
+    fetch_lock: tokio::sync::Mutex<()>,
 }
 
 impl CustomProvider {
@@ -54,6 +55,7 @@ impl CustomProvider {
             }),
             apis: HashMap::from([(ApiId::ChatCompletions, api)]),
             models: RwLock::new(models),
+            fetch_lock: tokio::sync::Mutex::new(()),
             base_url,
             id,
         }
@@ -132,6 +134,7 @@ impl Provider for CustomProvider {
     }
 
     async fn fetch_models(&self) -> Result<(), ProviderError> {
+        let _guard = self.fetch_lock.lock().await;
         let credential = self
             .auth
             .resolve()
