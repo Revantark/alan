@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## 0.1.6 - 2026-10-13
+
 ### Added
 
 - Headless mode: `alan -p "prompt"` (or `-p=prompt`) runs one prompt without the TUI, with all tool permissions approved, and prints the final answer to stdout
