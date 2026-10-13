@@ -23,7 +23,7 @@ use agent::{Agent, SessionManager, ToolPermissionManager, default_tools};
 use alan_tui::Runtime;
 use llm::ReasoningEffort;
 use providers::{
-    DeepSeekProvider, FileCredentialStore, ModelOptions, OpenRouterProvider, Provider,
+    DeepSeekProvider, FileCredentialStore, ModelOptions, OpenRouterProvider, Provider, ProviderId,
     ProviderRegistry, ZaiProvider, bind_model,
 };
 use std::path::PathBuf;
@@ -67,7 +67,7 @@ async fn main() -> anyhow::Result<()> {
     }
     let session_manager = Arc::new(SessionManager::new(sessions_path()?));
     let resumed_session = load_resumed_session(&session_manager).await?;
-    let (model, startup_notice) = select_model(&registry, &settings, resumed_session.as_ref())?;
+    let model = select_model(&registry, &settings, resumed_session.as_ref())?;
 
     let current_dir = std::env::current_dir()?;
 
@@ -94,9 +94,6 @@ async fn main() -> anyhow::Result<()> {
 
     let model_name = agent.info().await.name;
     let mut controller = ChatController::new(agent, model_name);
-    if let Some(notice) = startup_notice {
-        controller.push_info(notice);
-    }
 
     if was_resumed {
         controller.restore_session_history().await;
@@ -169,7 +166,7 @@ fn select_model(
     registry: &ProviderRegistry,
     settings: &Settings,
     resumed_session: Option<&agent::Session>,
-) -> anyhow::Result<(providers::Model, Option<String>)> {
+) -> anyhow::Result<providers::Model> {
     let (provider_id, model_id) = match resumed_session {
         Some(session) => (session.provider.as_str(), session.model.clone()),
         None => (
@@ -180,14 +177,15 @@ fn select_model(
                 .unwrap_or_else(|| DEFAULT_MODEL.into()),
         ),
     };
-    let (provider, model_id, notice) =
-        core::settings::startup_provider(registry, provider_id, model_id)?;
+    let provider = registry
+        .get(&ProviderId::new(provider_id))
+        .ok_or_else(|| missing_provider(provider_id, resumed_session))?;
     let server_tools = server_tools(
         provider.server_tools(),
         settings.web_fetch == Some(true),
         settings.web_search == Some(true),
     );
-    let model = bind_model(
+    Ok(bind_model(
         provider.as_ref(),
         &model_id,
         ModelOptions {
@@ -195,8 +193,20 @@ fn select_model(
             reasoning_effort: settings.reasoning.unwrap_or_default(),
             extensions: settings.extensions(&model_id),
         },
-    )?;
-    Ok((model, notice))
+    )?)
+}
+
+/// Alan exits here before `/models` can be opened, so the error says how to
+/// start again.
+fn missing_provider(provider_id: &str, resumed_session: Option<&agent::Session>) -> anyhow::Error {
+    match resumed_session {
+        Some(_) => anyhow::anyhow!(
+            "this session used provider {provider_id}, which no longer exists; add it again with /provider add, then resume"
+        ),
+        None => anyhow::anyhow!(
+            "provider {provider_id} not found; start with `ALAN_PROVIDER={DEFAULT_PROVIDER} ALAN_MODEL={DEFAULT_MODEL} alan` and pick a model with /models"
+        ),
+    }
 }
 
 fn build_tool_policy(
