@@ -31,7 +31,6 @@ pub enum SlashCommand {
     ToolSlip,
     ToolStrict,
     Profile,
-    // Add, edit or remove a Chat Completions provider.
     Provider,
     Quit,
 }
@@ -102,13 +101,13 @@ impl SlashCommand {
             Self::Effort => "set reasoning effort (e.g. /effort high)",
             Self::Fork => "fork this session from a checkpoint",
             Self::Help => "list the available commands",
-            Self::ModelProviders => "pick a provider from openrouter for the selected model",
+            Self::ModelProviders => "openrouter only: pick which upstream serves this model",
             Self::Rename => "rename the current session",
             Self::ToolFree => "allow all tool calls without asking",
             Self::ToolSlip => "approve a command family once, allow its siblings",
             Self::ToolStrict => "allow only exact commands already approved",
             Self::Profile => "save and switch named model profiles",
-            Self::Provider => "add, edit or remove a Chat Completions provider",
+            Self::Provider => "add, edit or remove your own Chat Completions server",
             Self::Quit => "abort and quit",
         }
     }
