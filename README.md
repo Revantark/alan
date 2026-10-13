@@ -222,4 +222,4 @@ cargo run -p alan
 ## Requirements
 
 - Rust 1.88 or newer (only for building from source)
-- An API key for your chosen provider
+- An API key for your chosen provider, if it needs one
