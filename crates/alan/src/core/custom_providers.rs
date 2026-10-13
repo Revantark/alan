@@ -188,7 +188,7 @@ impl CustomProviders {
     pub async fn add(&self, name: ProviderName, url: &str, key: Option<String>) -> Result<usize> {
         anyhow::ensure!(
             self.registry.get(&name.id()).is_none(),
-            "a provider named {name} already exists"
+            "provider already exists: {name}"
         );
         self.save(name, url, key).await
     }
@@ -270,13 +270,23 @@ mod tests {
     const OK_TWO_MODELS: &str =
         "HTTP/1.1 200 OK\r\nconnection: close\r\n\r\n{\"data\":[{\"id\":\"m1\"},{\"id\":\"m2\"}]}";
 
-    fn temp_path(name: &str) -> PathBuf {
-        let path = temp_dir().join(format!(
+    fn store_path(name: &str) -> PathBuf {
+        temp_dir().join(format!(
             "alan-custom-providers-test-{}-{name}.json",
             std::process::id()
-        ));
+        ))
+    }
+
+    fn temp_path(name: &str) -> PathBuf {
+        let path = store_path(name);
         let _ = std::fs::remove_file(&path);
         path
+    }
+
+    fn cleanup(name: &str) {
+        let path = store_path(name);
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(format!("{}.lock", path.display()));
     }
 
     fn name(value: &str) -> ProviderName {
@@ -300,7 +310,7 @@ mod tests {
         (providers, registry, credentials)
     }
 
-    // one-shot server: replies `response`, hands back the raw request.
+    // one-shot server: replies `response`.
     async fn serve_once(response: &'static str) -> String {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
@@ -392,6 +402,7 @@ mod tests {
             .map(|e| e.url)
             .collect();
         assert_eq!(urls, ["http://three", "http://two"]);
+        cleanup("put");
     }
 
     #[tokio::test]
@@ -407,6 +418,7 @@ mod tests {
         assert!(store.remove(&name("a")).await.unwrap());
         assert!(!store.remove(&name("a")).await.unwrap());
         assert!(store.load().await.unwrap().is_empty());
+        cleanup("remove");
     }
 
     #[tokio::test]
@@ -420,6 +432,7 @@ mod tests {
             .await
             .unwrap();
         assert!(CustomProviderStore::new(path).load().await.is_err());
+        cleanup("corrupt");
     }
 
     #[tokio::test]
@@ -448,6 +461,7 @@ mod tests {
         );
         let provider = registry.get(&name("grok").id()).unwrap();
         assert_eq!(provider.models().len(), 2);
+        cleanup("add");
     }
 
     #[tokio::test]
@@ -470,6 +484,7 @@ mod tests {
                 .is_none()
         );
         assert!(registry.get(&name("grok").id()).is_none());
+        cleanup("add-fails");
     }
 
     #[tokio::test]
@@ -488,7 +503,7 @@ mod tests {
             .await
             .unwrap_err();
 
-        assert!(error.to_string().contains("already exists"), "{error:#}");
+        assert_eq!(error.to_string(), "provider already exists: taken");
     }
 
     #[tokio::test]
@@ -503,6 +518,7 @@ mod tests {
         providers.update(name("grok"), &url, None).await.unwrap();
 
         assert!(providers.key(&name("grok")).await.unwrap().is_none());
+        cleanup("update");
     }
 
     #[tokio::test]
@@ -537,6 +553,7 @@ mod tests {
             requests[1].starts_with("POST /v1/chat/completions"),
             "{requests:?}"
         );
+        cleanup("edit-bound");
     }
 
     #[tokio::test]
@@ -556,6 +573,7 @@ mod tests {
         assert!(providers.entries().await.unwrap().is_empty());
         assert!(providers.key(&name("grok")).await.unwrap().is_none());
         assert!(registry.get(&name("grok").id()).is_none());
+        cleanup("remove-all");
     }
 
     #[tokio::test]
@@ -571,6 +589,7 @@ mod tests {
 
         assert!(error.to_string().contains("in use"), "{error:#}");
         assert_eq!(providers.entries().await.unwrap().len(), 1);
+        cleanup("remove-active");
     }
 
     #[tokio::test]
@@ -594,5 +613,6 @@ mod tests {
 
         let provider = registry.get(&name("grok").id()).unwrap();
         assert!(provider.models().is_empty());
+        cleanup("load");
     }
 }

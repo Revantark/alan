@@ -12,6 +12,7 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Clear, Paragraph, Wrap};
 use std::sync::Arc;
+use unicode_width::UnicodeWidthStr;
 
 const FIELD_COUNT: usize = 4;
 const FIELD_LABELS: [&str; FIELD_COUNT] = ["Name", "URL", "API", "API Key"];
@@ -347,7 +348,7 @@ fn render_fields(
 ) {
     let max_label = FIELD_LABELS
         .iter()
-        .map(|label| label.len())
+        .map(|label| label.width())
         .max()
         .unwrap_or(0);
     for (i, label) in FIELD_LABELS.iter().enumerate() {
@@ -370,10 +371,10 @@ fn render_fields(
             _ if fields.field(i).is_empty() => Span::styled("required", muted),
             _ => Span::styled(fields.field(i), value_style),
         };
-        let line = Line::from(vec![
+        let mut spans = vec![
             Span::styled(if is_focused { " › " } else { "   " }, accent),
             Span::styled(
-                format!("{label:>max_label$}  "),
+                format!("{}{label}  ", " ".repeat(max_label - label.width())),
                 if is_focused {
                     accent.add_modifier(Modifier::BOLD)
                 } else {
@@ -381,8 +382,10 @@ fn render_fields(
                 },
             ),
             Span::styled(": ", muted),
-            value,
-        ]);
+        ];
+        let value_column: usize = spans.iter().map(Span::width).sum();
+        spans.push(value);
+        let line = Line::from(spans);
         frame.render_widget(
             Paragraph::new(line).style(if is_focused {
                 Style::default().bg(theme::SELECTION_BG)
@@ -397,7 +400,7 @@ fn render_fields(
                 Paragraph::new(Span::styled(
                     format!(
                         "{}the part before /chat/completions, e.g. https…/v1",
-                        " ".repeat(max_label + 7)
+                        " ".repeat(value_column)
                     ),
                     muted,
                 )),

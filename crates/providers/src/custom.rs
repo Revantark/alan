@@ -1,6 +1,3 @@
-//! A provider the user adds at runtime: any server that speaks Chat
-//! Completions, known by a name and a base URL.
-
 use crate::{
     ApiId, AuthError, AuthMethod, AuthResolver, AuthResult, Credential, CredentialStore, ModelInfo,
     Provider, ProviderError, ProviderId, ServerToolInfo,
@@ -23,6 +20,8 @@ const CONTEXT_FIELDS: [&str; 4] = [
     "max_model_len",
 ];
 
+/// A provider the user adds at runtime: any server that speaks Chat
+/// Completions, known by a name and a base URL.
 pub struct CustomProvider {
     id: ProviderId,
     /// Shared with the API client, so models already bound to this provider
