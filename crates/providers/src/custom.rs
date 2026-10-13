@@ -206,8 +206,9 @@ fn parse_catalog(provider: &ProviderId, payload: &str) -> Result<Vec<ModelInfo>,
         data: Vec<serde_json::Value>,
     }
 
-    let listing: Listing = serde_json::from_str(payload)
-        .map_err(|_| ProviderError::Fetch("not an OpenAI-style model list".into()))?;
+    let listing: Listing = serde_json::from_str(payload).map_err(|error| {
+        ProviderError::Fetch(format!("not an OpenAI-style model list: {error}"))
+    })?;
     let mut models: Vec<ModelInfo> = listing
         .data
         .iter()
@@ -340,7 +341,13 @@ mod tests {
     fn parse_catalog_rejects_empty_and_other_shapes() {
         assert!(parse_catalog(&id(), r#"{"data":[]}"#).is_err());
         assert!(parse_catalog(&id(), r#"{"models":[{"name":"models/gemini"}]}"#).is_err());
-        assert!(parse_catalog(&id(), "<html>404</html>").is_err());
+        let error = parse_catalog(&id(), "<html>404</html>").unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("not an OpenAI-style model list: "),
+            "{error}"
+        );
     }
 
     #[tokio::test]
