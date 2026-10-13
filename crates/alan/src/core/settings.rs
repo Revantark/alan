@@ -22,9 +22,10 @@ use crate::core::store::JsonStore;
 const SETTINGS_KEY: &str = "settings";
 use anyhow::Context as _;
 use llm::ReasoningEffort;
-use providers::OpenRouterOptions;
+use providers::{OpenRouterOptions, Provider, ProviderId, ProviderRegistry};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 /// Public Settings representing current configuration. All fields are optional so
 /// that we can distinguish between a field that has not been provided by the
@@ -129,6 +130,29 @@ pub fn default_settings_path() -> Result<PathBuf> {
 pub const DEFAULT_MODEL: &str = "openai/gpt-4o-mini";
 pub const DEFAULT_PROVIDER: &str = "openrouter";
 
+/// The provider and model to start on, and a notice when the saved provider
+/// no longer exists: removed with `/provider remove`, or a typo in
+/// `ALAN_PROVIDER`.
+pub fn startup_provider(
+    registry: &ProviderRegistry,
+    provider_id: &str,
+    model_id: String,
+) -> Result<(Arc<dyn Provider>, String, Option<String>)> {
+    if let Some(provider) = registry.get(&ProviderId::new(provider_id)) {
+        return Ok((provider, model_id, None));
+    }
+    tracing::warn!(
+        provider = provider_id,
+        "saved provider not found, starting on the default model"
+    );
+    let provider = registry
+        .get(&ProviderId::new(DEFAULT_PROVIDER))
+        .with_context(|| format!("Provider not found: {DEFAULT_PROVIDER}"))?;
+    let notice =
+        format!("provider {provider_id} not found; using {DEFAULT_PROVIDER} — {DEFAULT_MODEL}");
+    Ok((provider, DEFAULT_MODEL.to_owned(), Some(notice)))
+}
+
 impl Settings {
     /// Settings used on first run (and to seed a missing settings.json):
     /// the hardcoded fallback model and a low reasoning effort.
@@ -211,6 +235,34 @@ pub async fn get_settings() -> anyhow::Result<Settings> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use providers::{OpenRouterProvider, ProviderId};
+
+    fn registry() -> ProviderRegistry {
+        let openrouter = OpenRouterProvider::builder("key")
+            .build()
+            .expect("builds without network");
+        ProviderRegistry::new([std::sync::Arc::new(openrouter) as std::sync::Arc<dyn Provider>])
+    }
+
+    #[test]
+    fn a_missing_provider_falls_back_to_the_default_model() {
+        let (provider, model, notice) =
+            startup_provider(&registry(), "gone", "some-model".into()).unwrap();
+
+        assert_eq!(provider.id(), ProviderId::new(DEFAULT_PROVIDER));
+        assert_eq!(model, DEFAULT_MODEL);
+        assert!(notice.unwrap().contains("gone"));
+    }
+
+    #[test]
+    fn a_known_provider_keeps_the_saved_model() {
+        let (provider, model, notice) =
+            startup_provider(&registry(), DEFAULT_PROVIDER, "some-model".into()).unwrap();
+
+        assert_eq!(provider.id(), ProviderId::new(DEFAULT_PROVIDER));
+        assert_eq!(model, "some-model");
+        assert!(notice.is_none());
+    }
 
     fn test_store_path(label: &str) -> PathBuf {
         std::env::temp_dir().join(format!("alan-profiles-{}-{label}.json", std::process::id()))

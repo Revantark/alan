@@ -23,7 +23,7 @@ use agent::{Agent, SessionManager, ToolPermissionManager, default_tools};
 use alan_tui::Runtime;
 use llm::ReasoningEffort;
 use providers::{
-    DeepSeekProvider, FileCredentialStore, ModelOptions, OpenRouterProvider, Provider, ProviderId,
+    DeepSeekProvider, FileCredentialStore, ModelOptions, OpenRouterProvider, Provider,
     ProviderRegistry, ZaiProvider, bind_model,
 };
 use std::path::PathBuf;
@@ -63,7 +63,7 @@ async fn main() -> anyhow::Result<()> {
         Arc::clone(&credential_store_for_providers),
     ));
     if let Err(error) = custom_providers.load().await {
-        tracing::warn!(error = %error, "failed to load custom providers");
+        tracing::warn!(%error, "failed to load custom providers");
     }
     let session_manager = Arc::new(SessionManager::new(sessions_path()?));
     let resumed_session = load_resumed_session(&session_manager).await?;
@@ -165,8 +165,6 @@ async fn load_resumed_session(
     Ok(Some(session_manager.get_session(&session_id, &cwd).await?))
 }
 
-/// The model to start on, and a notice when the saved provider no longer
-/// exists: removed with `/provider remove`, or a typo in `ALAN_PROVIDER`.
 fn select_model(
     registry: &ProviderRegistry,
     settings: &Settings,
@@ -182,22 +180,8 @@ fn select_model(
                 .unwrap_or_else(|| DEFAULT_MODEL.into()),
         ),
     };
-    let (provider, model_id, notice) = match registry.get(&ProviderId::new(provider_id)) {
-        Some(provider) => (provider, model_id, None),
-        None => {
-            tracing::warn!(
-                provider = provider_id,
-                "saved provider not found, starting on the default model"
-            );
-            let provider = registry
-                .get(&ProviderId::new(DEFAULT_PROVIDER))
-                .ok_or_else(|| anyhow::anyhow!("Provider not found: {DEFAULT_PROVIDER}"))?;
-            let notice = format!(
-                "provider {provider_id} not found; using {DEFAULT_PROVIDER} — {DEFAULT_MODEL}"
-            );
-            (provider, DEFAULT_MODEL.to_owned(), Some(notice))
-        }
-    };
+    let (provider, model_id, notice) =
+        core::settings::startup_provider(registry, provider_id, model_id)?;
     let server_tools = server_tools(
         provider.server_tools(),
         settings.web_fetch == Some(true),
@@ -340,44 +324,4 @@ fn configured_session_id() -> anyhow::Result<Option<String>> {
         return Err(anyhow::anyhow!("ALAN_SESSION must not be empty"));
     }
     Ok(Some(id))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn registry() -> ProviderRegistry {
-        let openrouter = OpenRouterProvider::builder("key")
-            .build()
-            .expect("builds without network");
-        ProviderRegistry::new([Arc::new(openrouter) as Arc<dyn Provider>])
-    }
-
-    #[test]
-    fn a_missing_provider_falls_back_to_the_default_model() {
-        let settings = Settings {
-            provider: Some("gone".into()),
-            model: Some("some-model".into()),
-            ..Settings::with_defaults()
-        };
-
-        let (model, notice) = select_model(&registry(), &settings, None).unwrap();
-
-        assert_eq!(model.info().provider, ProviderId::new(DEFAULT_PROVIDER));
-        assert_eq!(model.info().id, DEFAULT_MODEL);
-        assert!(notice.unwrap().contains("gone"));
-    }
-
-    #[test]
-    fn a_known_provider_keeps_the_saved_model() {
-        let settings = Settings {
-            model: Some("some-model".into()),
-            ..Settings::with_defaults()
-        };
-
-        let (model, notice) = select_model(&registry(), &settings, None).unwrap();
-
-        assert_eq!(model.info().id, "some-model");
-        assert!(notice.is_none());
-    }
 }
