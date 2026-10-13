@@ -59,7 +59,6 @@ fn open_model_picker(
         },
     );
 
-    let custom_providers = Arc::clone(&view.custom_providers);
     view.model_subscription = Some(cx.subscribe::<SearchListEvent, SearchListOverlay, _>(
         picker,
         move |event, view, _picker, cx| {
@@ -74,8 +73,8 @@ fn open_model_picker(
             };
             let agent = view.controller.agent();
             let providers = Arc::clone(&providers);
-            let custom_providers = Arc::clone(&custom_providers);
             let replacing = replacing.clone();
+            let chosen_provider = model_info.provider.clone();
             let _ = cx.spawn(
                 async move {
                     let mut options = agent.model_options().await;
@@ -96,34 +95,18 @@ fn open_model_picker(
                     persist_model(&model_info.id, &model_info.provider)
                         .await
                         .map_err(|e| TaskError(e.into()))?;
-
-                    // Only after the switch: until then the old provider's
-                    // key is still the one requests go out with.
-                    let removal = match replacing {
-                        Some(replaced) => {
-                            let result = custom_providers
-                                .remove(&replaced, &model_info.provider)
-                                .await;
-                            Some(result.map(|()| replaced).map_err(|e| format!("{e:#}")))
-                        }
-                        None => None,
-                    };
-                    Ok((name, max_context, reasoning_effort, removal))
+                    Ok((name, max_context, reasoning_effort))
                 },
                 move |result, view, cx| {
                     match result {
-                        Ok((name, max_context, reasoning_effort, removal)) => {
+                        Ok((name, max_context, reasoning_effort)) => {
                             view.controller.set_max_context(max_context);
                             view.controller.set_reasoning_effort(reasoning_effort);
                             view.controller.apply_model_switch(name);
-                            match removal {
-                                Some(Ok(replaced)) => view
-                                    .controller
-                                    .push_info(format!("removed provider: {replaced}")),
-                                Some(Err(error)) => view.controller.push_info(format!(
-                                    "switched models, but failed to remove the provider: {error}"
-                                )),
-                                None => {}
+                            // Only once the switch succeeded: until then the
+                            // old provider's key is the one requests go out with.
+                            if let Some(replaced) = replacing {
+                                remove_idle_provider(view, cx, replaced, chosen_provider);
                             }
                         }
                         Err(e) => view.controller.apply_model_switch_failed(e.to_string()),
