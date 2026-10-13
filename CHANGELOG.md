@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `/fork-command` copies the whole conversation into a new session file and prints the command to open it in another terminal.
+
 ## 0.1.6 - 2026-10-13
 
 ### Added

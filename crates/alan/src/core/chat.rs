@@ -717,4 +717,52 @@ mod tests {
         assert!(controller.agent().take_pending_steer().is_none());
         drop(stream);
     }
+
+    /// `/fork-command` end to end at the controller boundary: forking after a
+    /// turn must leave the session untouched and put the exact
+    /// `ALAN_SESSION=<new id> alan` resume command into the transcript.
+    #[tokio::test]
+    async fn fork_command_prints_resume_command_and_keeps_session() {
+        use agent::SessionManager;
+
+        let root = std::env::temp_dir().join(format!("alan-fork-cmd-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let manager = std::sync::Arc::new(SessionManager::new(&root));
+        let agent = Agent::builder(test_model())
+            .session_manager(manager)
+            .build()
+            .unwrap();
+        let mut controller = ChatController::new(agent, "Test".to_string());
+
+        // One real (fake-API) turn so a session exists to fork.
+        let agent = controller.agent();
+        agent
+            .ask(agent.prompt().content("hello"))
+            .unwrap()
+            .into_response()
+            .await
+            .unwrap();
+        let before = agent.session_id().await.unwrap();
+        let before_messages = agent.messages().await;
+        assert_eq!(before_messages.len(), 2);
+
+        let forked = agent.fork_session_new().await.unwrap();
+        assert_ne!(forked.id, before);
+
+        // Same shape as the `request_fork_command` handler prints.
+        controller.push_info(format!(
+            "Forked the whole session into a new file. Open it in a new terminal:\n\nALAN_SESSION={id} alan",
+            id = forked.id
+        ));
+        match controller.entries().last().expect("info entry") {
+            Entry::Info(text) => {
+                assert!(text.ends_with(&format!("ALAN_SESSION={} alan", forked.id)));
+            }
+            other => panic!("expected info entry, got {other:?}"),
+        }
+
+        // The controller's session must not have switched.
+        assert_eq!(agent.session_id().await.as_deref(), Some(before.as_str()));
+        assert_eq!(agent.messages().await, before_messages);
+    }
 }

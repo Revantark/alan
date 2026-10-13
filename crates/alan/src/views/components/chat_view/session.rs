@@ -52,6 +52,49 @@ pub(crate) fn request_fork(
     open_fork_overlay(view, cx);
 }
 
+/// `/fork-command`: persist the whole conversation to a new session file and
+/// print the command to open it in another terminal.
+pub(crate) fn request_fork_command(
+    view: &mut ChatView,
+    text: &str,
+    cx: &mut Context<'_, ChatView, AlanAction>,
+) {
+    if view.controller.is_busy() {
+        view.controller
+            .push_info("cannot fork while a response is streaming".to_owned());
+        return;
+    }
+    if let Some((_, args)) = crate::core::SlashCommand::parse_with_args(text)
+        && !args.trim().is_empty()
+    {
+        view.controller.push_info("usage: /fork-command".to_owned());
+        return;
+    }
+    let agent = view.controller.agent();
+    cx.spawn(
+        async move {
+            let forked = agent
+                .fork_session_new()
+                .await
+                .map_err(|error| alan_tui::TaskError(Box::new(error)))?;
+            Ok::<_, alan_tui::TaskError>(forked.id)
+        },
+        move |result, view, cx| match result {
+            Ok(id) => {
+                view.controller.push_info(format!(
+                    "Forked the whole session into a new file. Open it in a new terminal:\n\nALAN_SESSION={id} alan"
+                ));
+                cx.notify();
+            }
+            Err(error) => {
+                view.controller
+                    .push_info(format!("failed to fork: {error}"));
+                cx.notify();
+            }
+        },
+    );
+}
+
 /// `/effort`: set the reasoning effort.
 pub(crate) fn apply_effort(
     view: &mut ChatView,

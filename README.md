@@ -100,6 +100,7 @@ For OpenRouter, you can pin a custom provider for the selected model with `/mode
 | `/summarize-new [focus]` | Summarize the context and restart; optionally pass a quoted focus hint, e.g. `/summarize-new "just take the XYZ details"` |
 | `/effort` | Set reasoning effort (`none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`) |
 | `/fork` | Fork the session from a checkpoint |
+| `/fork-command` | Copy the whole session to a new file and print the command to open it |
 | `/rename <name>` | Rename the current session |
 | `/tool-free` | Allow all tool calls without asking |
 | `/tool-slip` | Approve a command family once, allow its siblings |

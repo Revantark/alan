@@ -18,6 +18,8 @@ pub enum SlashCommand {
     Plan,
     // Fork this session from a checkpoint.
     Fork,
+    // Fork the whole session into a new file and print the command to open it.
+    ForkCommand,
     // Specific to openrouter
     ModelProviders,
     Review,
@@ -101,6 +103,9 @@ impl SlashCommand {
             Self::Normal => "turn off plan and review mode",
             Self::Effort => "set reasoning effort (e.g. /effort high)",
             Self::Fork => "fork this session from a checkpoint",
+            Self::ForkCommand => {
+                "fork the whole session into a new file and print a command to open it"
+            }
             Self::Help => "list the available commands",
             Self::ModelProviders => "pick a provider from openrouter for the selected model",
             Self::Rename => "rename the current session",
@@ -176,6 +181,18 @@ mod tests {
     fn parses_fork_command_with_and_without_argument() {
         assert_eq!(SlashCommand::parse("/fork"), Some(SlashCommand::Fork));
         assert_eq!(SlashCommand::parse("/fork now"), Some(SlashCommand::Fork));
+    }
+
+    #[test]
+    fn parses_fork_command_distinct_from_fork() {
+        assert_eq!(
+            SlashCommand::parse("/fork-command"),
+            Some(SlashCommand::ForkCommand)
+        );
+        assert_eq!(SlashCommand::parse("/fork"), Some(SlashCommand::Fork));
+        assert!(!SlashCommand::ForkCommand.takes_args());
+        // Must appear in the derived `/help` listing.
+        assert!(SlashCommand::help().contains("/fork-command"));
     }
 
     /// Otherwise everything after the break is silently discarded. A bare `\r`

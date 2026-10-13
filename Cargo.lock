@@ -65,6 +65,7 @@ dependencies = [
  "tui-markdown",
  "tui-textarea-2",
  "unicode-width",
+ "uuid",
 ]
 
 [[package]]

@@ -237,6 +237,7 @@ impl ChatView {
                 Cmd::Normal => controller.set_mode(agent::Mode::Normal),
 
                 Cmd::Fork => session::request_fork(self, &submission.text, cx),
+                Cmd::ForkCommand => session::request_fork_command(self, &submission.text, cx),
                 Cmd::Effort => session::apply_effort(self, &submission.text, cx),
                 Cmd::SummarizeNew => session::start_summarize_new(self, cx, &submission.text),
                 Cmd::ModelProviders => models::apply_model_provider(self, cx, &submission.text),

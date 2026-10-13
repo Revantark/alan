@@ -245,6 +245,32 @@ impl Agent {
         Ok(forked)
     }
 
+    /// Persist a copy of the entire active conversation to a new session
+    /// file without switching the agent to it.
+    pub async fn fork_session_new(&self) -> Result<Session, AgentError> {
+        let manager = self
+            .session_manager
+            .as_ref()
+            .ok_or_else(|| no_session_error("no session manager configured"))?;
+        let source = self.active_session.lock().await.clone();
+        let Some(source) = source else {
+            return Err(no_session_error("no active session to fork"));
+        };
+
+        let context = self.context.lock().await;
+        let (messages, usage) = (context.messages.clone(), context.usage.clone());
+        drop(context);
+        let forked = manager.fork(&source, &messages, messages.len()).await?;
+        manager
+            .append_usage(&forked.id, &forked.pwd, &usage)
+            .await?;
+
+        let mut forked = forked;
+        forked.usage = usage;
+
+        Ok(forked)
+    }
+
     pub fn set_mode(&self, mode: Mode) {
         self.mode.store(mode.as_u8(), Ordering::Release);
         self.review_intro_pending

@@ -1061,6 +1061,104 @@ async fn reset_session_with_seeds_the_new_session() {
     );
 }
 
+#[tokio::test]
+async fn fork_session_new_copies_whole_conversation_without_switching() {
+    let root = std::env::temp_dir().join(format!("alan-plan1-forknew-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&root).unwrap();
+    let manager = Arc::new(SessionManager::new(&root));
+
+    let a = Arc::new(
+        Agent::builder(model_with_api(Arc::new(ToolCallingApi {
+            calls: AtomicUsize::new(0),
+        })))
+        .session_manager(manager.clone())
+        .with_tools([bash_tool()])
+        .build()
+        .unwrap(),
+    );
+
+    let _ = a
+        .ask(a.prompt().content("run echo hi"))
+        .unwrap()
+        .into_response()
+        .await
+        .unwrap();
+    let original_id = a
+        .session_id()
+        .await
+        .expect("session created by first prompt");
+    let original = a.messages().await;
+    let original_usage = a.usage().await;
+    assert!(
+        original_usage.input_tokens > 0 && original_usage.output_tokens > 0,
+        "source must have a non-zero usage counter, got {original_usage:?}"
+    );
+
+    let forked = a.fork_session_new().await.expect("fork");
+    assert_ne!(forked.id, original_id, "fork must get a fresh id");
+    assert_eq!(forked.parent.as_deref(), Some(original_id.as_str()));
+    assert_eq!(
+        (forked.provider.as_str(), forked.model.as_str()),
+        ("openrouter", "test"),
+        "fork must inherit the source model identity"
+    );
+    assert_eq!(
+        forked.usage, original_usage,
+        "fork must inherit the usage counter"
+    );
+
+    // The live agent must not have switched: same id, same messages, same usage.
+    assert_eq!(a.session_id().await, Some(original_id.clone()));
+    assert_eq!(a.messages().await, original);
+    assert_eq!(a.usage().await, original_usage);
+
+    // Resume the fork with a fresh agent (what `ALAN_SESSION=<id> alan` does):
+    // it must load the full history, the inherited counter, and pass the
+    // model-identity check.
+    let cwd = std::env::current_dir().unwrap();
+    let on_disk = manager
+        .get_session(&forked.id, &cwd)
+        .await
+        .expect("load fork");
+    assert_eq!(
+        on_disk.messages, original,
+        "fork file must hold the whole conversation"
+    );
+    assert_eq!(
+        on_disk.usage, original_usage,
+        "fork file must carry the usage"
+    );
+    let resumed = Arc::new(
+        Agent::builder(model_with_api(Arc::new(ToolCallingApi {
+            calls: AtomicUsize::new(0),
+        })))
+        .session_manager(manager.clone())
+        .resume_session(on_disk)
+        .build()
+        .expect("resume fork with the same model"),
+    );
+    assert_eq!(resumed.session_id().await, Some(forked.id.clone()));
+    assert_eq!(resumed.messages().await, original);
+    assert_eq!(resumed.usage().await, original_usage);
+    // The original session is still resumable and unchanged.
+    let original_loaded = manager
+        .get_session(&original_id, &cwd)
+        .await
+        .expect("load original");
+    assert_eq!(original_loaded.messages, original);
+    assert_eq!(original_loaded.usage, original_usage);
+}
+
+/// Forking before any prompt (no active session file) is an error, mirroring
+/// `/fork`.
+#[tokio::test]
+async fn fork_session_new_without_active_session_is_error() {
+    let root = std::env::temp_dir().join(format!("alan-plan1-forknone-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&root).unwrap();
+    let a = agent_with_manager(model(), Arc::new(SessionManager::new(&root)));
+    assert!(a.fork_session_new().await.is_err());
+}
+
 /// A reset-with-seed records the previous session id as the parent of the new
 /// one, so a summarized session stays traceable to its origin.
 #[tokio::test]
