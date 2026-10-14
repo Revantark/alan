@@ -11,6 +11,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `/fork-command` copies the whole conversation into a new session file and prints the command to open it in another terminal.
 
+### Changed
+
+- The terminal now attaches the working directory and the active mode's instruction as a machine-readable `<attached_context>` block on user messages, instead of plain-text trailers.
+
+### Fixed
+
+- Resumed sessions now show tool outputs clipped to the last 5 lines, matching the live stream instead of dumping the full stored output.
+- Resumed and forked transcripts no longer render machine-appended text (plan/review mode instructions, working-directory trailer, skills) in user prompts.
+
 ## 0.1.6 - 2026-10-13
 
 ### Added

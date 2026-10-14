@@ -112,9 +112,9 @@ impl ChatController {
 
         for message in messages {
             match message {
-                agent::AgentMessage::User { text, .. } => self
-                    .entries
-                    .push(Entry::Prompt(agent::strip_inline_skills(&text).to_owned())),
+                agent::AgentMessage::User { text, .. } => self.entries.push(Entry::Prompt(
+                    agent::strip_attached_context(&text).to_owned(),
+                )),
                 agent::AgentMessage::Assistant(response) => {
                     if let Some(reasoning) = response.reasoning.as_deref()
                         && !reasoning.is_empty()
@@ -148,7 +148,7 @@ impl ChatController {
                             matches!(entry, Entry::ToolCall { id, .. } if id == &tool_call_id)
                         })
                     {
-                        *output = content;
+                        *output = agent::tail_lines(&content, agent::TOOL_OUTPUT_TAIL_LINES);
                     }
                 }
             }
@@ -557,6 +557,75 @@ mod tests {
     fn make_controller(name: &str) -> ChatController {
         let agent = Agent::builder(test_model()).build().unwrap();
         ChatController::new(agent, name.to_string())
+    }
+
+    /// Restoring a stored session must look like the live transcript:
+    /// machine-appended blocks are cut from prompts and tool output is
+    /// clipped to the same tail the live `ToolCallFinished` event carries.
+    #[test]
+    fn apply_restored_strips_attached_blocks_and_tails_tool_output() {
+        use agent::{attach_context_tag, format_inline_skills};
+
+        // Skills ride inside the context block, as `attach_context` builds it.
+        let skills = format_inline_skills(&[agent::Skill {
+            name: "deploy".into(),
+            description: "d".into(),
+            instructions: "i".into(),
+        }])
+        .unwrap();
+        let body = format!("{skills}\n\n/tmp/project\n\nPlan mode is on");
+        let context = attach_context_tag(&body).unwrap();
+        let stored_prompt = format!("ship it #deploy\n\n{context}");
+
+        let mut full_output = Vec::new();
+        for n in 1..=9 {
+            full_output.push(format!("l{n}"));
+        }
+        let full_output = full_output.join("\n");
+
+        let mut controller = make_controller("m");
+        controller.apply_restored(
+            vec![
+                agent::AgentMessage::user(stored_prompt.clone()),
+                agent::AgentMessage::Assistant(llm::LlmResponse::from_message(
+                    llm::Message::assistant_with_tool_calls_and_reasoning(
+                        None,
+                        vec![llm::ToolCall {
+                            id: "call-1".into(),
+                            name: "long".into(),
+                            arguments: "{}".into(),
+                            signature: None,
+                        }],
+                        None,
+                        Vec::new(),
+                    ),
+                )),
+                agent::AgentMessage::tool_result_with_parts("call-1", &full_output, Vec::new()),
+            ],
+            Default::default(),
+            "m".to_string(),
+            Some(1),
+        );
+
+        let entries = controller.entries().to_vec();
+        assert_eq!(entries.len(), 2, "one prompt entry, one tool entry");
+        match &entries[0] {
+            Entry::Prompt(text) => {
+                assert_eq!(text, "ship it #deploy", "blocks must be stripped");
+                assert!(!text.contains("<attached_"));
+            }
+            other => panic!("expected prompt entry, got {other:?}"),
+        }
+        match &entries[1] {
+            Entry::ToolCall { output, status, .. } => {
+                assert_eq!(
+                    output, "l5\nl6\nl7\nl8\nl9",
+                    "restored output must match the live event's tail, got {output:?}"
+                );
+                assert!(matches!(status, ToolStatus::Completed));
+            }
+            other => panic!("expected tool entry, got {other:?}"),
+        }
     }
 
     #[test]
