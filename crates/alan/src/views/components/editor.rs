@@ -823,6 +823,16 @@ impl Component<AlanAction> for PromptEditor {
                 self.pending_steer = text.clone();
                 ActionStatus::Handled
             }
+            AlanAction::Quit => {
+                if !self.editor.is_empty() || !self.attachments.is_empty() {
+                    self.editor.clear();
+                    self.attachments.clear();
+                    self.history_index = None;
+                    ActionStatus::Handled
+                } else {
+                    ActionStatus::Continue
+                }
+            }
             _ => ActionStatus::Continue,
         };
         if status == ActionStatus::Handled {
