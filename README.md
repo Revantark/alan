@@ -130,7 +130,7 @@ Alan starts in strict policy and remembers the policy you pick across runs. Swit
 
 Any server that speaks the Chat Completions API can be a provider: hosted APIs such as Groq, xAI or Mistral, or a model server on your machine such as Ollama or LM Studio.
 
-`/provider add` asks for a name, the base URL (the part before `/chat/completions`, e.g. `https://api.groq.com/openai/v1` or `http://localhost:11434/v1`) and an API key if the server needs one. Alan calls `<url>/models` to check the URL and key, and saves the provider only when that call works. Every model the server lists then appears in `/models`, including ones it adds later.
+`/provider add` asks for a name (not one a built-in provider already uses), the base URL (the part before `/chat/completions`, e.g. `https://api.groq.com/openai/v1` or `http://localhost:11434/v1`) and an API key if the server needs one. Alan calls `<url>/models` to check the URL and key, and saves the provider only when that call works. Every model the server lists then appears in `/models`, including ones it adds later.
 
 The key is stored in `auth.json` with the other providers' keys, so `/login` can change it too. `/provider edit` changes the URL or key; the name is fixed. `/provider remove` deletes the provider and its key. If one of its models is in use, Alan first asks which model to switch to.
 

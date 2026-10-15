@@ -66,9 +66,11 @@ in with `/login`, or set the provider's API key variable:
 OPENROUTER_API_KEY=... cargo run -p alan
 ```
 
-Providers added with `/provider add` live in `core::custom_providers`: name and
-URL in `<data dir>/providers.json`, key only in `auth.json`, registered as
-`providers::CustomProvider`.
+`ProviderRegistry` keeps two tracks: the built-ins from `build_providers`, fixed
+at startup, and the custom providers added with `/provider add`. Custom
+providers live in `core::custom_providers`: name, URL and API standard
+(`ApiId`) in `<data dir>/providers.json`, key only in `auth.json`, registered
+as `providers::CustomProvider`. Only `ApiId::ChatCompletions` is implemented.
 
 Optional model override:
 
