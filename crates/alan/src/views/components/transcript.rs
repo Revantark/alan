@@ -315,36 +315,53 @@ fn wrap_markdown(text: &str, width: usize) -> Vec<Line<'static>> {
     let markdown = tui_markdown::from_str_with_options(text, &options);
     let mut lines = Vec::new();
     let prefix = " ".repeat(theme::CHAT_PADDING);
+    let response_style = Style::default().fg(theme::RESPONSE_FG);
     let available = width.saturating_sub(theme::CHAT_PADDING).max(1);
 
     for source in markdown.lines {
-        let mut current = Line::from(Span::styled(
-            prefix.clone(),
-            Style::default().fg(theme::RESPONSE_FG),
-        ));
+        let mut current = Line::from(Span::styled(prefix.clone(), response_style));
+        let mut pending_style = Style::default();
+        let mut pending = String::new();
+        let mut has_pending = false;
         let mut current_width = theme::CHAT_PADDING;
 
+        let flush_pending =
+            |current: &mut Line<'static>, pending: &mut String, pending_style: Style| {
+                if !pending.is_empty() {
+                    current.push_span(Span::styled(std::mem::take(pending), pending_style));
+                }
+            };
+
         for span in source.spans {
-            let style = span.style;
+            let style = response_style.patch(span.style);
+
+            // A style change ends the previous span, so start a fresh buffer.
+            if has_pending && style != pending_style {
+                flush_pending(&mut current, &mut pending, pending_style);
+                has_pending = false;
+            }
+
+            if !has_pending {
+                pending_style = style;
+                has_pending = true;
+            }
+
             for character in span.content.chars() {
                 let character_width = UnicodeWidthChar::width(character).unwrap_or(0);
                 if current_width > theme::CHAT_PADDING
                     && current_width - theme::CHAT_PADDING + character_width > available
                 {
+                    flush_pending(&mut current, &mut pending, pending_style);
                     lines.push(current);
-                    current = Line::from(Span::styled(
-                        prefix.clone(),
-                        Style::default().fg(theme::RESPONSE_FG),
-                    ));
+                    current = Line::from(Span::styled(prefix.clone(), response_style));
                     current_width = theme::CHAT_PADDING;
                 }
-                current.push_span(Span::styled(
-                    character.to_string(),
-                    Style::default().fg(theme::RESPONSE_FG).patch(style),
-                ));
+                pending.push(character);
                 current_width += character_width;
             }
         }
+
+        flush_pending(&mut current, &mut pending, pending_style);
         lines.push(current);
     }
 

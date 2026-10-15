@@ -9,6 +9,6 @@ mod status;
 mod transcript;
 
 pub use chat_view::{ChatView, LoginRequested};
-pub use fork_overlay::{ForkEvent, ForkOverlay};
+pub(crate) use fork_overlay::derive_checkpoints;
 pub use header::Header;
 pub use search_list::{SearchListEvent, SearchListOverlay};

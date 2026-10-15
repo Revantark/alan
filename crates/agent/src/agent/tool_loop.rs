@@ -7,6 +7,7 @@ use crate::agent::permissions::Permission;
 use crate::agent::persistence;
 use crate::agent::prompt;
 use crate::context::AgentContext;
+use crate::display::{TOOL_OUTPUT_TAIL_LINES, tail_lines};
 use llm::LlmResponse;
 use providers::Model;
 use tools::ToolOutput;
@@ -195,7 +196,7 @@ async fn handle_tool_calls(
                     cx.events,
                     AgentEvent::ToolCallFinished {
                         id: call_id,
-                        output: tail_lines(&output_text, 5),
+                        output: tail_lines(&output_text, TOOL_OUTPUT_TAIL_LINES),
                     },
                     cx.cancellation,
                 )
@@ -241,10 +242,4 @@ async fn report_cancelled_tool_call(
             }))
             .await;
     }
-}
-
-fn tail_lines(output: &str, count: usize) -> String {
-    let mut lines: Vec<_> = output.lines().rev().take(count).collect();
-    lines.reverse();
-    lines.join("\n")
 }

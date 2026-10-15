@@ -10,9 +10,17 @@ impl SseDecoder {
     pub(crate) fn push(&mut self, bytes: &[u8]) -> Result<Vec<String>, LlmError> {
         self.buffer.extend_from_slice(bytes);
         let mut events = Vec::new();
-        while let Some(newline) = self.buffer.iter().position(|byte| *byte == b'\n') {
-            let line = self.buffer.drain(..=newline).collect::<Vec<_>>();
-            self.process_line(&line[..line.len() - 1], &mut events)?;
+        let mut start = 0usize;
+
+        while let Some(newline) = self.buffer[start..].iter().position(|byte| *byte == b'\n') {
+            let end = start + newline;
+            let line = &self.buffer[start..end];
+            process_line(line, &mut self.data_lines, &mut events)?;
+            start = end + 1;
+        }
+
+        if start > 0 {
+            self.buffer.drain(..start);
         }
         Ok(events)
     }
@@ -21,39 +29,46 @@ impl SseDecoder {
         let mut events = Vec::new();
         if !self.buffer.is_empty() {
             let line = std::mem::take(&mut self.buffer);
-            self.process_line(&line, &mut events)?;
+            process_line(&line, &mut self.data_lines, &mut events)?;
         }
         if !self.data_lines.is_empty() {
-            events.push(self.take_data());
+            events.push(take_data(&mut self.data_lines));
         }
         Ok(events)
     }
+}
 
-    fn process_line(&mut self, line: &[u8], events: &mut Vec<String>) -> Result<(), LlmError> {
-        let line = line.strip_suffix(b"\r").unwrap_or(line);
-        if line.is_empty() {
-            if !self.data_lines.is_empty() {
-                events.push(self.take_data());
-            }
-            return Ok(());
+fn process_line(
+    line: &[u8],
+    data_lines: &mut Vec<String>,
+    events: &mut Vec<String>,
+) -> Result<(), LlmError> {
+    let line = line.strip_suffix(b"\r").unwrap_or(line);
+    if line.is_empty() {
+        if !data_lines.is_empty() {
+            events.push(take_data(data_lines));
         }
-        if line.first() == Some(&b':') {
-            return Ok(());
-        }
-        let Some(data) = line.strip_prefix(b"data:") else {
-            return Ok(());
-        };
-        let data = data.strip_prefix(b" ").unwrap_or(data);
-        let data = String::from_utf8(data.to_vec()).map_err(|error| {
-            LlmError::InvalidResponse(format!("SSE data is not valid UTF-8: {error}"))
-        })?;
-        self.data_lines.push(data);
-        Ok(())
+        return Ok(());
     }
 
-    fn take_data(&mut self) -> String {
-        std::mem::take(&mut self.data_lines).join("\n")
+    if line.first() == Some(&b':') {
+        return Ok(());
     }
+    let Some(data) = line.strip_prefix(b"data:") else {
+        return Ok(());
+    };
+    let data = data.strip_prefix(b" ").unwrap_or(data);
+    let data = String::from_utf8(data.to_vec()).map_err(|error| {
+        LlmError::InvalidResponse(format!("SSE data is not valid UTF-8: {error}"))
+    })?;
+
+    data_lines.push(data);
+
+    Ok(())
+}
+
+fn take_data(data_lines: &mut Vec<String>) -> String {
+    std::mem::take(data_lines).join("\n")
 }
 
 #[cfg(test)]

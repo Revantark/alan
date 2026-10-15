@@ -7,12 +7,10 @@ pub use codec::{
     stop_reason_for_finish_reason, usage_from_wire,
 };
 
-use crate::apis::sse::SseDecoder;
+use super::stream::{StreamHandler, sse_events};
 use crate::codec::{CodecChunk, LlmApiCodec};
-use crate::{HttpClient, LlmApi, LlmError, LlmEvent, LlmRequest, LlmStream, StopReason};
+use crate::{HttpClient, LlmApi, LlmError, LlmEvent, LlmRequest, LlmStream, StopReason, Usage};
 use async_trait::async_trait;
-use futures_util::{StreamExt, stream};
-use std::collections::VecDeque;
 use std::sync::Arc;
 
 const ENDPOINT: &str = "/chat/completions";
@@ -45,116 +43,81 @@ impl LlmApi for ChatCompletionsApi {
     async fn stream(&self, request: LlmRequest<'_>) -> Result<LlmStream, LlmError> {
         let body = self.codec.request(&request)?;
         let url = format!("{}{}", self.base_url.trim_end_matches('/'), ENDPOINT);
-        let response = self.http.post(&url, &body, request.credential).await?;
-        let status = response.status();
-        if !status.is_success() {
-            let body = response.text().await.map_err(LlmError::Transport)?;
-            return Err(LlmError::Http {
-                status: status.as_u16(),
-                body,
-            });
-        }
+        let response = self
+            .http
+            .post_stream(&url, &body, request.credential, &[])
+            .await?;
 
-        let state = StreamState::new(response.bytes_stream(), self.codec.clone());
-        let output = stream::try_unfold(state, |mut state| async move {
-            let event = state.next_event().await?;
-            Ok::<_, LlmError>(event.map(|event| (event, state)))
-        });
-
-        Ok(Box::pin(output))
+        Ok(sse_events(
+            response.bytes_stream(),
+            ChatHandler::new(self.codec.clone()),
+        ))
     }
 }
 
-struct StreamState<S> {
-    input: S,
-    decoder: SseDecoder,
+/// Translates canonical `/chat/completions` chunks into [`LlmEvent`]s.
+struct ChatHandler {
     codec: Arc<dyn LlmApiCodec>,
-    pending: VecDeque<LlmEvent>,
     model: Option<String>,
     stop_reason: Option<StopReason>,
-    usage: Option<crate::Usage>,
+    usage: Option<Usage>,
     done: bool,
 }
 
-impl<S> StreamState<S>
-where
-    S: futures_util::Stream<Item = Result<bytes::Bytes, reqwest::Error>> + Unpin,
-{
-    fn new(input: S, codec: Arc<dyn LlmApiCodec>) -> Self {
+impl ChatHandler {
+    fn new(codec: Arc<dyn LlmApiCodec>) -> Self {
         Self {
-            input,
-            decoder: SseDecoder::default(),
             codec,
-            pending: VecDeque::new(),
             model: None,
             stop_reason: None,
             usage: None,
             done: false,
         }
     }
+}
 
-    async fn next_event(&mut self) -> Result<Option<LlmEvent>, LlmError> {
-        loop {
-            if let Some(event) = self.pending.pop_front() {
-                return Ok(Some(event));
-            }
-
-            if self.done {
-                return Ok(None);
-            }
-
-            match self.input.next().await {
-                Some(Ok(bytes)) => {
-                    let payloads = self.decoder.push(&bytes)?;
-                    self.add_payloads(payloads)?;
-                }
-                Some(Err(error)) => return Err(LlmError::Transport(error)),
-                None => {
-                    let payloads = self.decoder.finish()?;
-                    self.add_payloads(payloads)?;
-                    if !self.done {
-                        return Err(LlmError::InvalidResponse(
-                            "stream ended without [DONE]".into(),
-                        ));
-                    }
-                }
-            }
-        }
+impl StreamHandler for ChatHandler {
+    fn done(&self) -> bool {
+        self.done
     }
 
-    fn add_payloads(&mut self, payloads: Vec<String>) -> Result<(), LlmError> {
-        for payload in payloads {
-            if payload == "[DONE]" {
-                self.done = true;
-                self.pending.push_back(LlmEvent::Done {
-                    stop_reason: self.stop_reason.unwrap_or(StopReason::Stop),
-                    usage: self.usage.clone(),
-                    model: self.model.clone(),
-                });
-                continue;
-            }
-
-            let chunk: CodecChunk = self.codec.response(&payload)?;
-            if let Some(model) = chunk.model.clone() {
-                self.model = Some(model);
-            }
-            if let Some(usage) = &chunk.usage {
-                self.usage = Some(usage.clone());
-            }
-            if let Some(stop_reason) =
-                codec::stop_reason_for_finish_reason(chunk.finish_reason.as_deref())
-            {
-                self.stop_reason = Some(stop_reason);
-            }
-            // Emit usage *after* the chunk's text/reasoning/tool-call deltas
-            // so consumers see content before the summary.
-            let usage_event = chunk.usage.clone().map(|usage| LlmEvent::Usage { usage });
-            self.pending.extend(chunk.events);
-            if let Some(event) = usage_event {
-                self.pending.push_back(event);
-            }
+    fn frame(&mut self, data: &str) -> Result<Vec<LlmEvent>, LlmError> {
+        if data == "[DONE]" {
+            self.done = true;
+            return Ok(vec![LlmEvent::Done {
+                stop_reason: self.stop_reason.unwrap_or(StopReason::Stop),
+                usage: self.usage.clone(),
+                model: self.model.clone(),
+            }]);
         }
-        Ok(())
+
+        let chunk: CodecChunk = self.codec.response(data)?;
+        if let Some(model) = chunk.model.clone() {
+            self.model = Some(model);
+        }
+        if let Some(usage) = chunk.usage.clone() {
+            self.usage = Some(usage);
+        }
+        if let Some(stop_reason) =
+            codec::stop_reason_for_finish_reason(chunk.finish_reason.as_deref())
+        {
+            self.stop_reason = Some(stop_reason);
+        }
+
+        let mut events = chunk.events;
+        if let Some(usage) = chunk.usage {
+            events.push(LlmEvent::Usage { usage });
+        }
+        Ok(events)
+    }
+
+    fn finish(&mut self) -> Result<Vec<LlmEvent>, LlmError> {
+        if self.done {
+            return Ok(Vec::new());
+        }
+        Err(LlmError::InvalidResponse(
+            "stream ended without [DONE]".into(),
+        ))
     }
 }
 

@@ -11,6 +11,7 @@ use crate::core::permissions::AlanPermissionManager;
 use crate::core::permissions::ToolPolicy;
 use crate::core::permissions_store;
 use crate::core::server_tools::server_tools;
+use crate::core::settings::patch_from_profile;
 use crate::core::settings::{
     DEFAULT_MODEL, DEFAULT_PROVIDER, PatchSettings, Settings, SettingsStore,
 };
@@ -19,12 +20,14 @@ use crate::core::{ChatController, SlashCommand};
 use crate::keymap::AlanKeyMapper;
 use crate::logging::init;
 use crate::root::AlanRoot;
-use agent::{Agent, SessionManager, ToolPermissionManager, default_tools};
+use agent::{
+    Agent, AllowAllPermissionManager, SessionManager, ToolPermissionManager, default_tools,
+};
 use alan_tui::Runtime;
 use llm::ReasoningEffort;
 use providers::{
-    DeepSeekProvider, FileCredentialStore, ModelOptions, OpenRouterProvider, Provider, ProviderId,
-    ProviderRegistry, ZaiProvider, bind_model,
+    ChatGptProvider, DeepSeekProvider, FileCredentialStore, ModelOptions, OpenRouterProvider,
+    Provider, ProviderId, ProviderRegistry, ZaiProvider, bind_model,
 };
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -44,12 +47,24 @@ async fn main() -> anyhow::Result<()> {
 
     let store = SettingsStore::new(settings_path()?);
     let persisted = load_or_create_settings(&store).await?;
-    let persisted_model = persisted.model.clone();
     let mut settings = persisted;
+
+    let persisted_model = settings.model.clone();
     settings.apply_patch(build_env_patch_settings(persisted_model)?);
 
     if is_save {
         store.save(&settings).await?;
+    }
+
+    let profile_name = std::env::var_os("ALAN_PROFILE")
+        .or_else(|| settings.active_profile.as_deref().map(Into::into));
+
+    if let Some(name) = profile_name {
+        let name = name.to_string_lossy().trim().to_owned();
+        if !name.is_empty() {
+            settings.apply_patch(patch_from_profile(&name).await?);
+            settings.active_profile = Some(name);
+        }
     }
 
     let credential_store = Arc::new(FileCredentialStore::new(auth_path()?));
@@ -72,6 +87,26 @@ async fn main() -> anyhow::Result<()> {
     let model = select_model(&registry, &settings, resumed_session.as_ref())?;
 
     let current_dir = std::env::current_dir()?;
+
+    if let Some(prompt) = parse_prompt_flag()? {
+        let agent = Arc::new(build_agent(
+            model,
+            current_dir,
+            session_manager,
+            resumed_session,
+            is_blank,
+            Arc::new(AllowAllPermissionManager),
+        )?);
+        let stream = agent.ask(agent.prompt().content(prompt.trim().to_owned()))?;
+
+        println!("{}", stream.into_response().await?.text());
+
+        if let Some(session_id) = agent.session_id().await {
+            println!("\nSession saved. Resume it with:\n\nALAN_SESSION={session_id} alan");
+        }
+
+        return Ok(());
+    }
 
     let alan_home = core::paths::alan_home()?;
     let skill_roots = vec![
@@ -133,6 +168,31 @@ fn has_flag(flag: &str) -> bool {
     std::env::args().any(|arg| arg == flag)
 }
 
+/// The `-p`/`-p=<text>` prompt flag, if present.
+fn parse_prompt_flag() -> anyhow::Result<Option<String>> {
+    let mut args = std::env::args().skip(1);
+    while let Some(arg) = args.next() {
+        if arg == "-p" {
+            let value = args.next().ok_or_else(|| {
+                anyhow::anyhow!("-p requires a prompt, e.g. alan -p \"fix the build\"")
+            })?;
+            return ensure_non_empty_prompt(value).map(Some);
+        }
+        let Some(value) = arg.strip_prefix("-p=") else {
+            continue;
+        };
+        return ensure_non_empty_prompt(value.to_owned()).map(Some);
+    }
+    Ok(None)
+}
+
+fn ensure_non_empty_prompt(value: String) -> anyhow::Result<String> {
+    if value.trim().is_empty() {
+        return Err(anyhow::anyhow!("-p requires a non-empty prompt"));
+    }
+    Ok(value)
+}
+
 async fn load_or_create_settings(store: &SettingsStore) -> anyhow::Result<Settings> {
     match store.load().await? {
         Some(settings) => Ok(settings),
@@ -153,6 +213,7 @@ fn build_providers(
         // Arc::new(GoogleProvider::from_store(Arc::clone(credential_store)).build()?),
         Arc::new(OpenRouterProvider::from_store(Arc::clone(credential_store)).build()?),
         Arc::new(DeepSeekProvider::from_store(Arc::clone(credential_store)).build()?),
+        Arc::new(ChatGptProvider::from_store(Arc::clone(credential_store)).build()),
     ])
 }
 
@@ -184,20 +245,16 @@ fn select_model(
     let provider = registry
         .get(&ProviderId::new(provider_id))
         .ok_or_else(|| anyhow::anyhow!("Provider not found: {provider_id}"))?;
-    let server_tools = server_tools(
-        provider.server_tools(),
-        settings.web_fetch == Some(true),
-        settings.web_search == Some(true),
-    );
-    Ok(bind_model(
-        provider.as_ref(),
-        &model_id,
-        ModelOptions {
-            server_tools,
-            reasoning_effort: settings.reasoning.unwrap_or_default(),
-            extensions: settings.extensions(&model_id),
-        },
-    )?)
+    let options = ModelOptions {
+        server_tools: server_tools(
+            provider.server_tools(),
+            settings.web_fetch == Some(true),
+            settings.web_search == Some(true),
+        ),
+        reasoning_effort: settings.reasoning.unwrap_or_default(),
+        extensions: settings.extensions(&model_id),
+    };
+    Ok(bind_model(provider.as_ref(), &model_id, options)?)
 }
 
 fn build_tool_policy(

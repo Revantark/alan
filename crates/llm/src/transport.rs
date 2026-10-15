@@ -1,6 +1,21 @@
 use crate::{Credential, LlmError};
 use std::time::Duration;
 
+/// Upper bound for error bodies surfaced in [`LlmError::Http`], so HTML
+/// challenge pages do not flood logs or the UI.
+const MAX_ERROR_BODY: usize = 512;
+
+fn truncate_bytes(value: &str, limit: usize) -> String {
+    if value.len() <= limit {
+        return value.to_string();
+    }
+    let mut end = limit;
+    while !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}… [truncated]", &value[..end])
+}
+
 /// Reusable HTTP client shared by API implementations.
 pub struct HttpClient {
     client: reqwest::Client,
@@ -23,7 +38,18 @@ impl HttpClient {
         body: &str,
         credential: Option<&Credential>,
     ) -> Result<reqwest::Response, LlmError> {
-        self.send(url, body, |request| match credential {
+        self.post_with_headers(url, body, credential, &[]).await
+    }
+
+    /// Like [`HttpClient::post`], attaching `headers` to the request as well.
+    pub async fn post_with_headers(
+        &self,
+        url: &str,
+        body: &str,
+        credential: Option<&Credential>,
+        headers: &[(String, String)],
+    ) -> Result<reqwest::Response, LlmError> {
+        self.send(url, body, headers, |request| match credential {
             Some(Credential::ApiKey(value)) => request.bearer_auth(value),
             Some(Credential::Header(name, value)) => request.header(name, value),
             Some(Credential::None) | None => request,
@@ -31,10 +57,35 @@ impl HttpClient {
         .await
     }
 
+    /// POST a streaming request. A non-success status becomes
+    /// [`LlmError::Http`], with the body capped at `MAX_ERROR_BODY` bytes so an
+    /// HTML challenge page stays readable.
+    pub async fn post_stream(
+        &self,
+        url: &str,
+        body: &str,
+        credential: Option<&Credential>,
+        headers: &[(String, String)],
+    ) -> Result<reqwest::Response, LlmError> {
+        let response = self
+            .post_with_headers(url, body, credential, headers)
+            .await?;
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.text().await.map_err(LlmError::Transport)?;
+            return Err(LlmError::Http {
+                status: status.as_u16(),
+                body: truncate_bytes(&body, MAX_ERROR_BODY),
+            });
+        }
+        Ok(response)
+    }
+
     async fn send<F>(
         &self,
         url: &str,
         body: &str,
+        headers: &[(String, String)],
         configure: F,
     ) -> Result<reqwest::Response, LlmError>
     where
@@ -42,11 +93,14 @@ impl HttpClient {
     {
         let mut attempt = 0;
         loop {
-            let request = configure(
+            let mut request = configure(
                 self.client
                     .post(url)
                     .header("Content-Type", "application/json"),
             );
+            for (name, value) in headers {
+                request = request.header(name, value);
+            }
 
             let response = request.body(body.to_owned()).send().await;
 

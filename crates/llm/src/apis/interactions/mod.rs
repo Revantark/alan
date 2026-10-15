@@ -1,10 +1,8 @@
 mod codec;
 
-use crate::apis::sse::SseDecoder;
+use super::stream::{StreamHandler, ToolIndices, sse_events, stream_error};
 use crate::{Credential, HttpClient, LlmApi, LlmError, LlmEvent, LlmRequest, LlmStream, Usage};
 use async_trait::async_trait;
-use futures_util::{StreamExt, stream};
-use std::collections::{BTreeMap, VecDeque};
 use std::sync::Arc;
 
 const ENDPOINT: &str = "/interactions";
@@ -41,175 +39,123 @@ impl LlmApi for InteractionsApi {
             other => other,
         };
 
-        let response = self.http.post(&url, &body, credential).await?;
-        let status = response.status();
+        let response = self.http.post_stream(&url, &body, credential, &[]).await?;
 
-        if !status.is_success() {
-            let body = response.text().await.map_err(LlmError::Transport)?;
-            return Err(LlmError::Http {
-                status: status.as_u16(),
-                body,
-            });
-        }
-
-        let state = StreamState::new(response.bytes_stream());
-        let output = stream::try_unfold(state, |mut state| async move {
-            let event = state.next_event().await?;
-            Ok::<_, LlmError>(event.map(|event| (event, state)))
-        });
-
-        Ok(Box::pin(output))
+        Ok(sse_events(
+            response.bytes_stream(),
+            InteractionsHandler::default(),
+        ))
     }
 }
 
-struct StreamState<S> {
-    input: S,
-    decoder: SseDecoder,
-    pending: VecDeque<LlmEvent>,
+/// Translates Gemini Interactions stream events into [`LlmEvent`]s.
+#[derive(Default)]
+struct InteractionsHandler {
     model: Option<String>,
     status: Option<String>,
     usage: Option<Usage>,
     done: bool,
-    /// Maps a `function_call` step index to the dense tool-call index the
-    /// response builder expects.
-    tool_indices: BTreeMap<usize, usize>,
-    next_tool_index: usize,
     /// Whether any content (text/reasoning/tool) was emitted from deltas, used
     /// to decide whether the `interaction.completed` steps fallback is needed.
     emitted_content: bool,
     /// Thought signature streamed before a `function_call` step; attached to
     /// that call so it can be replayed verbatim in the next request.
     pending_signature: Option<String>,
+    tool_indices: ToolIndices,
 }
 
-impl<S> StreamState<S>
-where
-    S: futures_util::Stream<Item = Result<bytes::Bytes, reqwest::Error>> + Unpin,
-{
-    fn new(input: S) -> Self {
-        Self {
-            input,
-            decoder: SseDecoder::default(),
-            pending: VecDeque::new(),
-            model: None,
-            status: None,
-            usage: None,
-            done: false,
-            tool_indices: BTreeMap::new(),
-            next_tool_index: 0,
-            emitted_content: false,
-            pending_signature: None,
-        }
+impl StreamHandler for InteractionsHandler {
+    fn done(&self) -> bool {
+        self.done
     }
 
-    async fn next_event(&mut self) -> Result<Option<LlmEvent>, LlmError> {
-        loop {
-            if let Some(event) = self.pending.pop_front() {
-                return Ok(Some(event));
-            }
-
-            if self.done {
-                return Ok(None);
-            }
-
-            match self.input.next().await {
-                Some(Ok(bytes)) => {
-                    let payloads = self.decoder.push(&bytes)?;
-                    self.add_payloads(payloads)?;
-                }
-                Some(Err(error)) => return Err(LlmError::Transport(error)),
-                None => {
-                    let payloads = self.decoder.finish()?;
-                    self.add_payloads(payloads)?;
-                    if !self.done {
-                        if let Some(status) = self.status.clone() {
-                            self.complete(&status);
-                        } else {
-                            return Err(LlmError::InvalidResponse(
-                                "stream ended without completion event".into(),
-                            ));
-                        }
-                    }
-                }
-            }
+    fn frame(&mut self, data: &str) -> Result<Vec<LlmEvent>, LlmError> {
+        let data = data.trim();
+        if data.is_empty() {
+            return Ok(Vec::new());
         }
+        // The stream terminates with a non-JSON `[DONE]` sentinel; complete
+        // gracefully if no `interaction.completed` event was seen first.
+        if data == "[DONE]" {
+            if !self.done {
+                let status = self.status.clone().unwrap_or_else(|| "completed".into());
+                return Ok(self.complete(&status));
+            }
+            return Ok(Vec::new());
+        }
+        // Only object frames carry events; skip stray non-object payloads.
+        if !data.starts_with('{') {
+            return Ok(Vec::new());
+        }
+        self.handle_event(codec::deserialize_stream_event(data)?)
     }
 
-    fn add_payloads(&mut self, payloads: Vec<String>) -> Result<(), LlmError> {
-        for payload in payloads {
-            let payload = payload.trim();
-            if payload.is_empty() {
-                continue;
-            }
-            // The stream terminates with a non-JSON `[DONE]` sentinel; complete
-            // gracefully if no `interaction.completed` event was seen first.
-            if payload == "[DONE]" {
-                if !self.done {
-                    let status = self.status.clone().unwrap_or_else(|| "completed".into());
-                    self.complete(&status);
-                }
-                continue;
-            }
-            // Only object frames carry events; skip stray non-object payloads.
-            if !payload.starts_with('{') {
-                continue;
-            }
-            let event = codec::deserialize_stream_event(payload)?;
-            self.handle_event(event)?;
+    fn finish(&mut self) -> Result<Vec<LlmEvent>, LlmError> {
+        if self.done {
+            return Ok(Vec::new());
         }
-        Ok(())
+        if let Some(status) = self.status.clone() {
+            return Ok(self.complete(&status));
+        }
+        Err(LlmError::InvalidResponse(
+            "stream ended without completion event".into(),
+        ))
     }
+}
 
-    fn handle_event(&mut self, event: codec::WireEvent) -> Result<(), LlmError> {
+impl InteractionsHandler {
+    fn handle_event(&mut self, event: codec::WireEvent) -> Result<Vec<LlmEvent>, LlmError> {
         match event.event_type.as_str() {
-            "step.start" => self.handle_step_start(event),
-            "step.delta" => self.handle_step_delta(event),
-            "step.stop" => self.handle_step_stop(event),
-            "interaction.created" => self.handle_interaction_created(event),
-            "interaction.completed" => self.handle_interaction_completed(event),
+            "step.start" => Ok(self.handle_step_start(event)),
+            "step.delta" => Ok(self.handle_step_delta(event)),
+            "step.stop" => Ok(self.handle_step_stop(event)),
+            "interaction.created" => Ok(self.handle_interaction_created(event)),
+            "interaction.completed" => Ok(self.handle_interaction_completed(event)),
             "interaction.status_update" => {
                 if let Some(status) = event.status {
                     self.status = Some(status);
                 }
+                Ok(Vec::new())
             }
-            "error" => return Err(self.error_for(event.error)),
-            _ => {}
+            "error" => Err(stream_error("interactions", event.error, None)),
+            _ => Ok(Vec::new()),
         }
-        Ok(())
     }
 
-    fn handle_step_start(&mut self, event: codec::WireEvent) {
+    fn handle_step_start(&mut self, event: codec::WireEvent) -> Vec<LlmEvent> {
         if let Some(step) = &event.step
             && step.kind == "function_call"
         {
-            let index = self.tool_index(event.index.unwrap_or(self.next_tool_index));
+            let index = self.tool_indices.index(event.index);
             self.emitted_content = true;
             let signature = self.pending_signature.take();
-            self.pending.push_back(LlmEvent::ToolCallDelta {
+            return vec![LlmEvent::ToolCallDelta {
                 index,
                 id: step.id.clone(),
                 name: step.name.clone(),
                 arguments: String::new(),
                 signature,
-            });
+            }];
         }
+        Vec::new()
     }
 
-    fn handle_step_delta(&mut self, event: codec::WireEvent) {
+    fn handle_step_delta(&mut self, event: codec::WireEvent) -> Vec<LlmEvent> {
+        let mut events = Vec::new();
         if let Some(usage) = event.metadata.and_then(|metadata| metadata.total_usage) {
             let usage = codec::usage_from_wire(&usage);
             self.usage = Some(usage.clone());
-            self.pending.push_back(LlmEvent::Usage { usage });
+            events.push(LlmEvent::Usage { usage });
         }
 
         let Some(delta) = event.delta else {
-            return;
+            return events;
         };
         match delta.kind.as_str() {
             "text" => {
                 if let Some(text) = delta.text.filter(|text| !text.is_empty()) {
                     self.emitted_content = true;
-                    self.pending.push_back(LlmEvent::TextDelta { text });
+                    events.push(LlmEvent::TextDelta { text });
                 }
             }
             "thought_summary" => {
@@ -219,7 +165,7 @@ where
                     .filter(|text| !text.is_empty())
                 {
                     self.emitted_content = true;
-                    self.pending.push_back(LlmEvent::ReasoningDelta {
+                    events.push(LlmEvent::ReasoningDelta {
                         reasoning: text.clone(),
                         details: vec![serde_json::json!({
                             "type": "thought_summary",
@@ -229,9 +175,9 @@ where
                 }
             }
             "arguments_delta" => {
-                let index = self.tool_index(event.index.unwrap_or(self.next_tool_index));
+                let index = self.tool_indices.index(event.index);
                 self.emitted_content = true;
-                self.pending.push_back(LlmEvent::ToolCallDelta {
+                events.push(LlmEvent::ToolCallDelta {
                     index,
                     id: None,
                     name: None,
@@ -246,17 +192,19 @@ where
             }
             _ => {}
         }
+        events
     }
 
-    fn handle_step_stop(&mut self, event: codec::WireEvent) {
+    fn handle_step_stop(&mut self, event: codec::WireEvent) -> Vec<LlmEvent> {
         if let Some(usage) = event.usage {
             let usage = codec::usage_from_wire(&usage);
             self.usage = Some(usage.clone());
-            self.pending.push_back(LlmEvent::Usage { usage });
+            return vec![LlmEvent::Usage { usage }];
         }
+        Vec::new()
     }
 
-    fn handle_interaction_created(&mut self, event: codec::WireEvent) {
+    fn handle_interaction_created(&mut self, event: codec::WireEvent) -> Vec<LlmEvent> {
         if let Some(interaction) = event.interaction {
             if interaction.model.is_some() {
                 self.model = interaction.model;
@@ -265,9 +213,10 @@ where
                 self.status = interaction.status;
             }
         }
+        Vec::new()
     }
 
-    fn handle_interaction_completed(&mut self, event: codec::WireEvent) {
+    fn handle_interaction_completed(&mut self, event: codec::WireEvent) -> Vec<LlmEvent> {
         let interaction = event.interaction;
         let status = interaction
             .as_ref()
@@ -284,32 +233,34 @@ where
             }
         }
 
+        let mut events = Vec::new();
         if !self.emitted_content
             && let Some(interaction) = &interaction
         {
-            self.emit_steps(interaction);
+            self.emit_steps(interaction, &mut events);
         }
 
-        self.complete(&status);
+        events.extend(self.complete(&status));
+        events
     }
 
     /// Fallback for providers that send a non-streamed body inside
     /// `interaction.completed` instead of `step.delta` frames.
-    fn emit_steps(&mut self, interaction: &codec::WireInteraction) {
+    fn emit_steps(&mut self, interaction: &codec::WireInteraction, events: &mut Vec<LlmEvent>) {
         for step in &interaction.steps {
             match step.kind.as_str() {
                 "model_output" => {
                     for content in &step.content {
                         if let Some(text) = content.text.clone().filter(|text| !text.is_empty()) {
                             self.emitted_content = true;
-                            self.pending.push_back(LlmEvent::TextDelta { text });
+                            events.push(LlmEvent::TextDelta { text });
                         }
                     }
                 }
                 "function_call" => {
-                    let index = self.tool_index(self.next_tool_index);
+                    let index = self.tool_indices.allocate();
                     self.emitted_content = true;
-                    self.pending.push_back(LlmEvent::ToolCallDelta {
+                    events.push(LlmEvent::ToolCallDelta {
                         index,
                         id: step.id.clone(),
                         name: step.name.clone(),
@@ -326,44 +277,21 @@ where
         }
     }
 
-    fn complete(&mut self, status: &str) {
+    fn complete(&mut self, status: &str) -> Vec<LlmEvent> {
+        let mut events = Vec::new();
         if let Some(usage) = &self.usage {
-            self.pending.push_back(LlmEvent::Usage {
+            events.push(LlmEvent::Usage {
                 usage: usage.clone(),
             });
         }
         self.done = true;
         self.status = Some(status.to_owned());
-        self.pending.push_back(LlmEvent::Done {
+        events.push(LlmEvent::Done {
             stop_reason: codec::stop_reason_for_status(Some(status)),
             usage: self.usage.clone(),
             model: self.model.clone(),
         });
-    }
-
-    fn tool_index(&mut self, step_index: usize) -> usize {
-        if let Some(index) = self.tool_indices.get(&step_index) {
-            return *index;
-        }
-        let index = self.next_tool_index;
-        self.next_tool_index += 1;
-        self.tool_indices.insert(step_index, index);
-        index
-    }
-
-    fn error_for(&self, error: Option<codec::WireError>) -> LlmError {
-        let (code, message) = match error {
-            Some(error) => (
-                error
-                    .code
-                    .as_ref()
-                    .and_then(|code| code.as_str().map(str::to_owned))
-                    .unwrap_or_else(|| "error".into()),
-                error.message.unwrap_or_default(),
-            ),
-            None => ("error".into(), String::new()),
-        };
-        LlmError::InvalidResponse(format!("interactions stream error ({code}): {message}"))
+        events
     }
 }
 

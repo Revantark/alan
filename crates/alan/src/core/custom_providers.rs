@@ -194,7 +194,11 @@ impl CustomProviders {
             .credentials
             .read(&name.id())
             .await?
-            .map(|Credential::ApiKey { key }| key))
+            .and_then(|credential| match credential {
+                Credential::ApiKey { key } => Some(key),
+                // `/provider` only saves API keys; sign-in tokens belong to built-ins.
+                Credential::OAuth { .. } => None,
+            }))
     }
 
     /// Check `url` with a `/models` call, then save the provider and its key.

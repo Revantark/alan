@@ -11,6 +11,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `/provider add`, `/provider edit` and `/provider remove` to use any Chat Completions server by name. Alan checks the server's `/models` before saving, lists all of its models in `/models`, and keeps the key in `auth.json` so `/login` can change it.
 
+## 0.1.7 - 2026-10-14
+
+### Added
+
+- `/fork-command` copies the whole conversation into a new session file and prints the command to open it in another terminal.
+
+### Changed
+
+- The terminal now attaches the working directory and the active mode's instruction as a machine-readable `<attached_context>` block on user messages, instead of plain-text trailers.
+
+### Fixed
+
+- Resumed sessions now show tool outputs clipped to the last 5 lines, matching the live stream instead of dumping the full stored output.
+- Resumed and forked transcripts no longer render machine-appended text (plan/review mode instructions, working-directory trailer, skills) in user prompts.
+
+## 0.1.6 - 2026-10-13
+
+### Added
+
+- Headless mode: `alan -p "prompt"` (or `-p=prompt`) runs one prompt without the TUI, with all tool permissions approved, and prints the final answer to stdout
+- `ALAN_PROFILE=<name>` overrides alan settings with profile settings but not persisted.
+- ChatGPT subscription provider
+
+### Changed
+
+- `/fork` now uses the shared searchable picker overlay
+- SSE stream decoding now compacts its buffer once per chunk instead of per line, avoiding quadratic copies
+
+### Fixed
+
+- Fix local model binding on startup
+
 ## 0.1.5 - 2026-10-07
 
 ### Added

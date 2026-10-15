@@ -72,6 +72,10 @@ Alan currently supports:
 - **OpenRouter**
 - **DeepSeek**
 - **Zai** (beta)
+- **ChatGPT** (beta, unofficial): signs in with your own ChatGPT subscription
+  account through the browser. OpenAI has not published this backend, so
+  access depends on OpenAI's terms and may stop working at any time. Personal
+  use only; not for hosted or multi-user apps.
 
 Use the `/login` command to sign in to any of the available providers.
 
@@ -101,6 +105,7 @@ For OpenRouter, you can pin an upstream provider for the selected model with `/m
 | `/summarize-new [focus]` | Summarize the context and restart; optionally pass a quoted focus hint, e.g. `/summarize-new "just take the XYZ details"` |
 | `/effort` | Set reasoning effort (`none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`) |
 | `/fork` | Fork the session from a checkpoint |
+| `/fork-command` | Copy the whole session to a new file and print the command to open it |
 | `/rename <name>` | Rename the current session |
 | `/tool-free` | Allow all tool calls without asking |
 | `/tool-slip` | Approve a command family once, allow its siblings |
@@ -108,6 +113,27 @@ For OpenRouter, you can pin an upstream provider for the selected model with `/m
 | `/model-providers <name>` | Pin an upstream provider for the current OpenRouter model |
 | `/help` | List available commands |
 | `/quit` | Exit Alan |
+
+### Profiles
+
+A profile is a named snapshot of the provider, model, reasoning effort, and web tool settings. Save one with `/profile save <name>`, switch between them with `/profile` (the picker also opens with `Ctrl+P`), and remove one with `/profile delete`. Profiles live in `<data dir>/profiles.json`.
+
+To start Alan with a profile without touching your saved settings, use the `ALAN_PROFILE` environment variable — handy for running different models per project or in scripts:
+
+```bash
+ALAN_PROFILE=deep-reasoning alan
+ALAN_PROFILE=fast alan -p "Summarize the failing test"
+```
+
+Note: ALAN_PROFILE overrides other env variables.
+
+### Headless mode
+
+Run a single prompt without the TUI. All tool calls are approved without asking; only the final answer is printed to stdout.
+
+```bash
+alan -p "Fix the failing test"
+```
 
 ## Permissions
 
@@ -156,8 +182,9 @@ Settings variables override `settings.json` for that run without changing it. St
 | Variable | Effect |
 | --- | --- |
 | `ALAN_HOME` | Parent of the data directory: `ALAN_HOME=/tmp/x` puts everything in `/tmp/x/.alan`. |
-| `ALAN_PROVIDER` | Provider id: `openrouter`, `deepseek`, `zai`, or a name added with `/provider add`. |
+| `ALAN_PROVIDER` | Provider id: `openrouter`, `deepseek`, `zai`, `chatgpt`, or a name added with `/provider add`. |
 | `ALAN_MODEL` | Model id for that provider, e.g. `ALAN_MODEL=openai/gpt-4o-mini alan`. |
+| `ALAN_PROFILE` | Select a saved profile by name for this run without changing `settings.json`. |
 | `ALAN_REASONING_EFFORT` | `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max`. |
 | `ALAN_OPENROUTER_WEB_FETCH` | Turn OpenRouter's web fetch tool on or off: `true`/`false`, `1`/`0`, `yes`/`no`, `on`/`off`. |
 | `ALAN_OPENROUTER_WEB_SEARCH` | Turn OpenRouter's web search tool on or off, same values. |

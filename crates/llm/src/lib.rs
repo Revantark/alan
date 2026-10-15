@@ -14,11 +14,11 @@ mod transport;
 pub mod apis;
 
 pub use api::LlmApi;
-pub use apis::{ChatCompletionsApi, InteractionsApi};
+pub use apis::{ChatCompletionsApi, InteractionsApi, ResponsesApi};
 pub use codec::{CodecChunk, LlmApiCodec};
 pub use error::LlmError;
 pub use event::{LlmEvent, LlmStream};
-pub use extensions::{Extensions, SessionId};
+pub use extensions::{Extensions, Headers, SessionId};
 pub use message::{ContentPart, ImageUrl, Message, Role};
 pub use request::{
     CompletionInput, Credential, LlmRequest, PromptCacheControl, PromptCacheControlType,

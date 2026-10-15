@@ -49,10 +49,7 @@ pub(super) fn spawn_prompt_task(
     let agent = agent.clone();
 
     tokio::spawn(async move {
-        let mode = agent.mode();
-        let review_intro = mode == Mode::Review && agent.take_review_intro();
-        let plan_intro = mode == Mode::Plan && agent.take_plan_intro();
-        let user_msg = build_user_message(content, images, skills, mode, review_intro, plan_intro);
+        let user_msg = build_user_message(content, images);
         let mut partial = String::new();
         let mut cx = PromptCx {
             events: Some(&tx),
@@ -62,7 +59,7 @@ pub(super) fn spawn_prompt_task(
             round_usage: None,
             round_usage_applied: false,
         };
-        let result = run_prompt_with_message(&agent, user_msg, &mut cx).await;
+        let result = run_prompt_with_message(&agent, user_msg, skills, &mut cx).await;
         if let Err(error) = result {
             let _ = tx.send(Err(error)).await;
         }
@@ -74,32 +71,61 @@ pub(super) fn spawn_prompt_task(
     }
 }
 
-/// Append the "Current project dir" line to the first user message of the
-/// conversation so the model knows where it is operating.
-fn attach_working_directory(
+/// Attach everything the terminal appends at send time — skills, working
+/// directory, mode instruction — inside one `<attached_context>` block.
+fn attach_context(
     agent: &Agent,
     context: &AgentContext,
-    mut user_msg: AgentMessage,
+    skills: Vec<Skill>,
+    user_msg: AgentMessage,
 ) -> AgentMessage {
-    let Some(dir) = agent.working_directory.as_ref() else {
+    let first_message = context.messages.is_empty();
+    let mode_instruction = match agent.mode() {
+        Mode::Plan => {
+            if agent.take_plan_intro() {
+                Some(PLAN_INTRO)
+            } else {
+                Some(PLAN_REMINDER)
+            }
+        }
+        Mode::Review => agent.take_review_intro().then_some(REVIEW_GUIDELINES),
+        Mode::Normal => None,
+    };
+
+    let working_dir = if first_message && let Some(dir) = agent.working_directory.as_ref() {
+        Some(dir.display().to_string())
+    } else {
+        None
+    };
+
+    let mut parts: Vec<String> = Vec::new();
+
+    if let Some(skills) = crate::format_inline_skills(&skills) {
+        parts.push(skills);
+    }
+    if let Some(dir) = working_dir {
+        parts.push(dir);
+    }
+    if let Some(mode) = mode_instruction {
+        parts.push(mode.to_owned());
+    }
+
+    let Some(block) = crate::attach_context_tag(&parts.join("\n\n")) else {
         return user_msg;
     };
-    if !context.messages.is_empty() {
+
+    let AgentMessage::User { text, images } = user_msg else {
         return user_msg;
-    }
-    if let AgentMessage::User { text, .. } = &mut user_msg {
-        text.push_str(&format!(
-            "\nCurrent project dir which you are in : {}\nAttach this with user mentioned files for absolute paths",
-            dir.display()
-        ));
-    }
-    user_msg
+    };
+
+    AgentMessage::user_with_images(format!("{text}\n\n{block}"), images)
 }
 
 /// Run the full prompt lifecycle inside the spawned background task.
 async fn run_prompt_with_message(
     agent: &Agent,
     user_msg: AgentMessage,
+    skills: Vec<Skill>,
     cx: &mut PromptCx<'_>,
 ) -> Result<LlmResponse, AgentError> {
     validate_prompt_message(&user_msg)?;
@@ -107,10 +133,10 @@ async fn run_prompt_with_message(
     let model = agent.model.lock().await;
     let mut context = agent.context.lock().await;
 
-    let user_msg = attach_working_directory(agent, &context, user_msg);
+    let user_msg_with_ctx = attach_context(agent, &context, skills, user_msg);
 
     persistence::ensure_session(agent, &model, None).await?;
-    persistence::append_context_message(agent, &mut context, user_msg).await?;
+    persistence::append_context_message(agent, &mut context, user_msg_with_ctx).await?;
 
     let result = super::tool_loop::run_with(agent, &model, &mut context, cx).await;
 
@@ -323,60 +349,28 @@ fn build_messages(context: &AgentContext) -> Vec<Message> {
     messages
 }
 
-/// Build a user message, applying the plan-mode intro/reminder, the
-/// review-mode guidelines, skills and optional images.
-pub(super) fn build_user_message(
-    content: String,
-    images: Vec<llm::ImageUrl>,
-    skills: Vec<Skill>,
-    mode: Mode,
-    review_intro: bool,
-    plan_intro: bool,
-) -> AgentMessage {
-    let text = with_skills(
-        prompt_content(content, mode, review_intro, plan_intro),
-        &skills,
-    );
+/// Build a user message with optional images. Skills and machine context are
+/// attached later, in [`attach_context`].
+pub(super) fn build_user_message(content: String, images: Vec<llm::ImageUrl>) -> AgentMessage {
     if images.is_empty() {
-        AgentMessage::user(text)
+        AgentMessage::user(content)
     } else {
-        AgentMessage::user_with_images(text, images)
+        AgentMessage::user_with_images(content, images)
     }
 }
 
-fn with_skills(text: String, skills: &[Skill]) -> String {
-    match crate::format_inline_skills(skills) {
-        Some(block) => format!("{text}\n\n{block}"),
-        None => text,
-    }
-}
-
+/// Build a steering message: the text plus its skills, wrapped in the
+/// `<attached_context>` block so the transcript strips them like any other
+/// machine-appended content.
 pub(super) fn build_steer_message(text: String, skills: Vec<Skill>) -> AgentMessage {
-    AgentMessage::user(with_skills(text, &skills))
-}
-
-fn prompt_content(
-    content: impl Into<String>,
-    mode: Mode,
-    review_intro: bool,
-    plan_intro: bool,
-) -> String {
-    let content = content.into();
-    let mut text = match mode {
-        Mode::Plan => format!("{content}\n\n{}", plan_text(plan_intro)),
-        _ => content,
+    let text = match crate::format_inline_skills(&skills) {
+        Some(block) => match crate::attach_context_tag(&block) {
+            Some(context) => format!("{text}\n\n{context}"),
+            None => text,
+        },
+        None => text,
     };
-    if review_intro {
-        text.push_str(&format!("\n\n{}", review_guidelines()));
-    }
-    text
-}
-
-/// Plan-mode text. The first plan message in a session carries the full
-/// two-phase instruction (investigate + ask first, then the plan template);
-/// later messages only get a short reminder so the conversation stays cheap.
-fn plan_text(intro: bool) -> &'static str {
-    if intro { PLAN_INTRO } else { PLAN_REMINDER }
+    AgentMessage::user(text)
 }
 
 const PLAN_INTRO: &str = "\
@@ -414,9 +408,8 @@ Plan mode is still on — do not edit any files. Continue resolving open \
 questions, or present the plan once all are settled.";
 
 /// Guidelines attached to the first user message after review mode is
-/// entered. Appended after the plan suffix when both are active.
-fn review_guidelines() -> &'static str {
-    "Review mode is on, do not edit any files.
+/// entered.
+const REVIEW_GUIDELINES: &str = "Review mode is on, do not edit any files.
 
 Review the code in this project against:
 1. Performance
@@ -428,8 +421,7 @@ Review the code in this project against:
 7. Tests: coverage of the change, and do they fail when the code breaks
 8. Readability: naming, function size, comments explain why not what
 9. If something can be done in a better way, describe the best approach in two or three lines
-10. Future scoping"
-}
+10. Future scoping";
 
 /// Validate that a prompt carries content: either non-empty text or at
 /// least one attached image.

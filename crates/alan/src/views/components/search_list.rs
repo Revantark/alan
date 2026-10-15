@@ -28,13 +28,14 @@ pub struct SearchListOverlay {
 }
 
 fn is_subsequence(query: &str, item: &str) -> bool {
-    let query = query.to_lowercase();
     if query.is_empty() {
         return true;
     }
-    let mut want = query.chars();
+
+    let mut want = query.chars().flat_map(char::to_lowercase);
     let mut next = want.next();
-    for c in item.to_lowercase().chars() {
+
+    for c in item.chars().flat_map(char::to_lowercase) {
         if Some(c) == next {
             next = want.next();
             if next.is_none() {

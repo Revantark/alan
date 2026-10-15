@@ -1,6 +1,6 @@
 use crate::{
-    ApiId, AuthError, AuthMethod, AuthResolver, AuthResult, Credential, CredentialStore, ModelInfo,
-    Provider, ProviderError, ProviderId, ServerToolInfo,
+    ApiId, Auth, AuthError, AuthMethod, AuthResolver, AuthResult, Credential, CredentialStore,
+    ModelInfo, Provider, ProviderError, ProviderId, Resolved, ServerToolInfo,
 };
 use async_trait::async_trait;
 use llm::{
@@ -109,12 +109,32 @@ impl Provider for CustomProvider {
         &[]
     }
 
-    fn auth_methods(&self) -> Vec<AuthMethod> {
-        vec![AuthMethod::ApiKey]
-    }
-
     fn apis(&self) -> &HashMap<ApiId, Arc<dyn LlmApi>> {
         &self.apis
+    }
+
+    async fn fetch_models(&self) -> Result<(), ProviderError> {
+        let _guard = self.fetch_lock.lock().await;
+        let credential = self
+            .auth
+            .resolve()
+            .await
+            .map_err(|error| ProviderError::Fetch(format!("authentication failed: {error}")))?
+            .credential;
+        let key = match credential {
+            RequestCredential::ApiKey(key) => Some(key),
+            _ => None,
+        };
+        let models = fetch_catalog(&self.id, &self.api, &self.base_url(), key.as_deref()).await?;
+        *self.models.write().unwrap_or_else(|e| e.into_inner()) = models;
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl Auth for CustomProvider {
+    fn auth_methods(&self) -> Vec<AuthMethod> {
+        vec![AuthMethod::ApiKey]
     }
 
     fn auth(&self) -> Arc<dyn AuthResolver> {
@@ -134,23 +154,8 @@ impl Provider for CustomProvider {
                         })
                     })
             }
+            AuthResult::OAuth => Err(AuthError::Missing),
         }
-    }
-
-    async fn fetch_models(&self) -> Result<(), ProviderError> {
-        let _guard = self.fetch_lock.lock().await;
-        let credential = self
-            .auth
-            .resolve()
-            .await
-            .map_err(|error| ProviderError::Fetch(format!("authentication failed: {error}")))?;
-        let key = match credential {
-            RequestCredential::ApiKey(key) => Some(key),
-            _ => None,
-        };
-        let models = fetch_catalog(&self.id, &self.api, &self.base_url(), key.as_deref()).await?;
-        *self.models.write().unwrap_or_else(|e| e.into_inner()) = models;
-        Ok(())
     }
 }
 
@@ -167,10 +172,14 @@ struct StoredKeyAuth {
 
 #[async_trait]
 impl AuthResolver for StoredKeyAuth {
-    async fn resolve(&self) -> Result<RequestCredential, AuthError> {
-        Ok(match self.credentials.read(&self.provider).await? {
+    async fn resolve(&self) -> Result<Resolved, AuthError> {
+        let credential = match self.credentials.read(&self.provider).await? {
             Some(Credential::ApiKey { key }) if !key.is_empty() => RequestCredential::ApiKey(key),
             _ => RequestCredential::None,
+        };
+        Ok(Resolved {
+            credential,
+            headers: Vec::new(),
         })
     }
 }
@@ -530,7 +539,7 @@ mod tests {
             Vec::new(),
         )
         .unwrap();
-        let credential = provider.auth().resolve().await.unwrap();
+        let credential = provider.auth().resolve().await.unwrap().credential;
         assert!(matches!(credential, RequestCredential::None));
     }
 

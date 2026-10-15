@@ -1061,6 +1061,104 @@ async fn reset_session_with_seeds_the_new_session() {
     );
 }
 
+#[tokio::test]
+async fn fork_session_new_copies_whole_conversation_without_switching() {
+    let root = std::env::temp_dir().join(format!("alan-plan1-forknew-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&root).unwrap();
+    let manager = Arc::new(SessionManager::new(&root));
+
+    let a = Arc::new(
+        Agent::builder(model_with_api(Arc::new(ToolCallingApi {
+            calls: AtomicUsize::new(0),
+        })))
+        .session_manager(manager.clone())
+        .with_tools([bash_tool()])
+        .build()
+        .unwrap(),
+    );
+
+    let _ = a
+        .ask(a.prompt().content("run echo hi"))
+        .unwrap()
+        .into_response()
+        .await
+        .unwrap();
+    let original_id = a
+        .session_id()
+        .await
+        .expect("session created by first prompt");
+    let original = a.messages().await;
+    let original_usage = a.usage().await;
+    assert!(
+        original_usage.input_tokens > 0 && original_usage.output_tokens > 0,
+        "source must have a non-zero usage counter, got {original_usage:?}"
+    );
+
+    let forked = a.fork_session_new().await.expect("fork");
+    assert_ne!(forked.id, original_id, "fork must get a fresh id");
+    assert_eq!(forked.parent.as_deref(), Some(original_id.as_str()));
+    assert_eq!(
+        (forked.provider.as_str(), forked.model.as_str()),
+        ("openrouter", "test"),
+        "fork must inherit the source model identity"
+    );
+    assert_eq!(
+        forked.usage, original_usage,
+        "fork must inherit the usage counter"
+    );
+
+    // The live agent must not have switched: same id, same messages, same usage.
+    assert_eq!(a.session_id().await, Some(original_id.clone()));
+    assert_eq!(a.messages().await, original);
+    assert_eq!(a.usage().await, original_usage);
+
+    // Resume the fork with a fresh agent (what `ALAN_SESSION=<id> alan` does):
+    // it must load the full history, the inherited counter, and pass the
+    // model-identity check.
+    let cwd = std::env::current_dir().unwrap();
+    let on_disk = manager
+        .get_session(&forked.id, &cwd)
+        .await
+        .expect("load fork");
+    assert_eq!(
+        on_disk.messages, original,
+        "fork file must hold the whole conversation"
+    );
+    assert_eq!(
+        on_disk.usage, original_usage,
+        "fork file must carry the usage"
+    );
+    let resumed = Arc::new(
+        Agent::builder(model_with_api(Arc::new(ToolCallingApi {
+            calls: AtomicUsize::new(0),
+        })))
+        .session_manager(manager.clone())
+        .resume_session(on_disk)
+        .build()
+        .expect("resume fork with the same model"),
+    );
+    assert_eq!(resumed.session_id().await, Some(forked.id.clone()));
+    assert_eq!(resumed.messages().await, original);
+    assert_eq!(resumed.usage().await, original_usage);
+    // The original session is still resumable and unchanged.
+    let original_loaded = manager
+        .get_session(&original_id, &cwd)
+        .await
+        .expect("load original");
+    assert_eq!(original_loaded.messages, original);
+    assert_eq!(original_loaded.usage, original_usage);
+}
+
+/// Forking before any prompt (no active session file) is an error, mirroring
+/// `/fork`.
+#[tokio::test]
+async fn fork_session_new_without_active_session_is_error() {
+    let root = std::env::temp_dir().join(format!("alan-plan1-forknone-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&root).unwrap();
+    let a = agent_with_manager(model(), Arc::new(SessionManager::new(&root)));
+    assert!(a.fork_session_new().await.is_err());
+}
+
 /// A reset-with-seed records the previous session id as the parent of the new
 /// one, so a summarized session stays traceable to its origin.
 #[tokio::test]
@@ -1687,6 +1785,287 @@ async fn reentering_review_mode_rearms_the_guidelines() {
         }
         other => panic!("expected user message, got {other:?}"),
     }
+}
+
+// ---------------------------------------------------------------------------
+// `<attached_context>` block: working directory + mode instruction
+// ---------------------------------------------------------------------------
+
+/// The working directory and the active mode's instruction must ride in the
+/// single machine-appended block on the first user message, so the transcript
+/// can strip them at one marker.
+#[tokio::test]
+async fn plan_mode_first_message_carries_working_dir_and_intro_in_block() {
+    let a = Arc::new(
+        Agent::builder(model())
+            .with_directory("/tmp/attached-ctx")
+            .build()
+            .unwrap(),
+    );
+    a.set_mode(Mode::Plan);
+
+    a.ask(a.prompt().content("plan this"))
+        .unwrap()
+        .into_response()
+        .await
+        .unwrap();
+
+    let first = first_user_text(&a).await;
+    assert!(first.starts_with("plan this"));
+    assert!(
+        first.contains("<attached_context>"),
+        "mode text must be inside the block, got {first:?}"
+    );
+    assert!(first.contains("/tmp/attached-ctx\n\nPlan mode is on — do not edit any files."));
+    // The block is appended last, after the user text.
+    assert!(first.rfind("<attached_context>").unwrap() > first.rfind("plan this").unwrap());
+}
+
+/// The working directory attaches only once — the first user message of the
+/// conversation — and in normal mode no block is appended at all.
+#[tokio::test]
+async fn working_dir_attaches_only_to_the_first_message() {
+    let a = Arc::new(
+        Agent::builder(model())
+            .with_directory("/tmp/attached-ctx")
+            .build()
+            .unwrap(),
+    );
+
+    a.ask(a.prompt().content("first"))
+        .unwrap()
+        .into_response()
+        .await
+        .unwrap();
+    a.ask(a.prompt().content("second"))
+        .unwrap()
+        .into_response()
+        .await
+        .unwrap();
+
+    let messages = a.messages().await;
+    assert!(matches!(
+        &messages[0],
+        AgentMessage::User { text, .. } if text.contains("/tmp/attached-ctx")
+    ));
+    assert!(matches!(
+        &messages[2],
+        AgentMessage::User { text, .. } if text == "second"
+    ));
+}
+
+/// Plan mode keeps re-attaching: the intro rides on the first plan message,
+/// the short reminder on every later one — always inside the block.
+#[tokio::test]
+async fn plan_mode_reminder_uses_the_block_on_later_messages() {
+    let a = agent(model());
+    a.set_mode(Mode::Plan);
+
+    a.ask(a.prompt().content("first"))
+        .unwrap()
+        .into_response()
+        .await
+        .unwrap();
+    a.ask(a.prompt().content("second"))
+        .unwrap()
+        .into_response()
+        .await
+        .unwrap();
+
+    let messages = a.messages().await;
+    match &messages[2] {
+        AgentMessage::User { text, .. } => {
+            assert!(text.starts_with("second"));
+            assert!(
+                text.contains("<attached_context>") && text.contains("Plan mode is still on"),
+                "later plan messages must carry the reminder in the block, got {text:?}"
+            );
+        }
+        other => panic!("expected user message, got {other:?}"),
+    }
+}
+
+/// Review mode guidelines attach through the block too, including the
+/// re-arm path (normal → review mid-conversation).
+#[tokio::test]
+async fn review_mode_guidelines_use_the_block() {
+    let a = agent(model());
+    a.set_mode(Mode::Review);
+
+    a.ask(a.prompt().content("review this"))
+        .unwrap()
+        .into_response()
+        .await
+        .unwrap();
+    match &a.messages().await[0] {
+        AgentMessage::User { text, .. } => {
+            assert!(text.contains("<attached_context>"));
+            assert!(text.contains("Review mode is on, do not edit any files."));
+        }
+        other => panic!("expected user message, got {other:?}"),
+    }
+}
+
+/// A session file that stores the block (as plan-mode prompts do) must
+/// resume byte-identically, and stripping must recover the user's raw text.
+#[tokio::test]
+async fn stored_attached_context_round_trips_through_a_session_file() {
+    use crate::{attach_context_tag, strip_attached_context};
+
+    let root = std::env::temp_dir().join(format!("alan-attach-ctx-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&root).unwrap();
+    let manager = Arc::new(SessionManager::new(&root));
+
+    // What `attach_context` produces for the first plan-mode message.
+    let stored_text = format!(
+        "plan this\n\n{}",
+        attach_context_tag("/tmp/attached-ctx\n\nPlan mode is on — do not edit any files.")
+            .unwrap()
+    );
+
+    let session = manager
+        .create(&root, "openrouter", "test", ReasoningEffort::None, None)
+        .await
+        .expect("create session");
+    manager
+        .append_message(
+            &session.id,
+            &session.pwd,
+            &AgentMessage::user(stored_text.clone()),
+        )
+        .await
+        .expect("append message");
+    let session = manager
+        .get_session(&session.id, &root)
+        .await
+        .expect("load session");
+
+    let m = model();
+    let resumed = Arc::new(
+        Agent::builder(m)
+            .session_manager(manager)
+            .resume_session(session)
+            .build()
+            .unwrap(),
+    );
+    match &resumed.messages().await[0] {
+        AgentMessage::User { text, .. } => assert_eq!(text, &stored_text),
+        other => panic!("expected user message, got {other:?}"),
+    }
+    // The whole point: stripping recovers the user's raw text.
+    assert_eq!(strip_attached_context(&stored_text), "plan this");
+}
+
+// ---------------------------------------------------------------------------
+// Tool output tailing: the display event and the stored result diverge on
+// purpose — the UI sees a tail, the LLM context keeps the full output.
+// ---------------------------------------------------------------------------
+
+struct LongOutputApi {
+    calls: AtomicUsize,
+}
+
+#[async_trait]
+impl LlmApi for LongOutputApi {
+    async fn stream(&self, request: llm::LlmRequest<'_>) -> Result<llm::LlmStream, LlmError> {
+        let call_count = self.calls.fetch_add(1, Ordering::SeqCst);
+        if call_count == 0 {
+            Ok(Box::pin(futures_util::stream::iter([
+                Ok(LlmEvent::ToolCallDelta {
+                    index: 0,
+                    id: Some("call-long".into()),
+                    name: Some("long".into()),
+                    arguments: "{}".into(),
+                    signature: None,
+                }),
+                Ok(LlmEvent::Done {
+                    stop_reason: StopReason::ToolUse,
+                    usage: None,
+                    model: Some(request.model_id.to_owned()),
+                }),
+            ])))
+        } else {
+            Ok(Box::pin(futures_util::stream::iter([
+                Ok(LlmEvent::TextDelta {
+                    text: "done".into(),
+                }),
+                Ok(LlmEvent::Done {
+                    stop_reason: StopReason::Stop,
+                    usage: None,
+                    model: Some(request.model_id.to_owned()),
+                }),
+            ])))
+        }
+    }
+}
+
+struct LongOutputExecutor;
+
+#[async_trait]
+impl tools::ToolExecutor for LongOutputExecutor {
+    async fn execute(&self, _call: &llm::ToolCall) -> Result<tools::ToolOutput, tools::ToolError> {
+        let output = (1..=9)
+            .map(|n| format!("l{n}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        Ok(tools::ToolOutput::Text(output))
+    }
+}
+
+/// The live event stream shows only the trailing lines, while the stored
+/// tool result keeps the full output for the model. Restored transcripts
+/// must reproduce the event's tail (asserted in the alan crate).
+#[tokio::test]
+async fn tool_call_finished_event_carries_only_the_output_tail() {
+    let a = Arc::new(
+        Agent::builder(model_with_api(Arc::new(LongOutputApi {
+            calls: AtomicUsize::new(0),
+        })))
+        .tool(AgentTool::new(
+            llm::ToolDefinition {
+                name: "long".into(),
+                description: "Produce a long output".into(),
+                parameters: serde_json::json!({"type": "object"}),
+            },
+            LongOutputExecutor,
+        ))
+        .build()
+        .unwrap(),
+    );
+
+    let mut stream = a.ask(a.prompt().content("run long").stream(true)).unwrap();
+    let mut finished_output = None;
+    while let Some(result) = stream.recv().await {
+        match result {
+            Ok(AgentEvent::ToolCallFinished { output, .. }) => finished_output = Some(output),
+            Ok(AgentEvent::Finished { .. }) => break,
+            Ok(_) => {}
+            Err(error) => panic!("stream failed: {error}"),
+        }
+    }
+
+    assert_eq!(
+        finished_output.as_deref(),
+        Some("l5\nl6\nl7\nl8\nl9"),
+        "the display event must carry the tail, not the full output"
+    );
+
+    let full_output = (1..=9)
+        .map(|n| format!("l{n}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let messages = a.messages().await;
+    let stored = messages
+        .iter()
+        .find_map(|message| match message {
+            AgentMessage::ToolResult { content, .. } => Some(content.as_str()),
+            _ => None,
+        })
+        .expect("tool result must be recorded");
+    assert_eq!(
+        stored, full_output,
+        "the stored result must keep the full output"
+    );
 }
 
 #[tokio::test]
