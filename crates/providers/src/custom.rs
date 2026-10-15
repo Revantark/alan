@@ -135,7 +135,12 @@ impl Provider for CustomProvider {
                 fetch_catalog(&self.id, &self.api, &self.base_url(), Some(key))
                     .await
                     .map(drop)
-                    .map_err(|error| AuthError::Validation(error.to_string()))
+                    .map_err(|error| {
+                        AuthError::Validation(match error {
+                            ProviderError::Fetch(reason) => reason,
+                            other => other.to_string(),
+                        })
+                    })
             }
         }
     }
@@ -213,6 +218,11 @@ async fn fetch_chat_completions_catalog(
         })
     })?;
     let status = response.status();
+    if status == reqwest::StatusCode::UNAUTHORIZED {
+        return Err(ProviderError::Fetch(format!(
+            "API key was rejected (HTTP {status})"
+        )));
+    }
     if !status.is_success() {
         return Err(ProviderError::Fetch(format!("HTTP {status}")));
     }
@@ -522,6 +532,9 @@ mod tests {
         let result = provider
             .validate_auth(&AuthResult::ApiKey("bad".into()))
             .await;
-        assert!(matches!(result, Err(AuthError::Validation(_))));
+        assert!(
+            matches!(&result, Err(AuthError::Validation(reason)) if reason == "API key was rejected (HTTP 401 Unauthorized)"),
+            "{result:?}"
+        );
     }
 }
