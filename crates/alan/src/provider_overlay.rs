@@ -305,7 +305,7 @@ fn render_provider_overlay(
 
     let url = fields.url.trim().trim_end_matches('/');
     match state {
-        OverlayState::Editing => render_fields(frame, inner, fields, focused, accent, muted),
+        OverlayState::Editing => render_fields(frame, inner, fields, focused, mode, accent, muted),
         OverlayState::Checking => frame.render_widget(
             Paragraph::new(format!("  Checking {url}/models…")).style(accent),
             inner,
@@ -333,9 +333,11 @@ fn render_fields(
     inner: Rect,
     fields: &FormFields,
     focused: usize,
+    mode: Mode,
     accent: Style,
     muted: Style,
 ) {
+    let value_style = Style::default().fg(theme::EDITOR_FG);
     let max_label = FIELD_LABELS
         .iter()
         .map(|label| label.width())
@@ -347,13 +349,6 @@ fn render_fields(
             break;
         }
         let is_focused = i == focused;
-        let value_style = if is_focused {
-            Style::default()
-                .fg(theme::SELECTION_FG)
-                .bg(theme::SELECTION_BG)
-        } else {
-            Style::default().fg(theme::EDITOR_FG)
-        };
         let text = if i == NAME { &fields.name } else { &fields.url };
         let value = match i {
             API => Span::styled("Chat Completions", value_style),
@@ -376,15 +371,20 @@ fn render_fields(
         ];
         let value_column: usize = spans.iter().map(Span::width).sum();
         spans.push(value);
-        let line = Line::from(spans);
         frame.render_widget(
-            Paragraph::new(line).style(if is_focused {
-                Style::default().bg(theme::SELECTION_BG)
-            } else {
-                Style::default()
-            }),
+            Paragraph::new(Line::from(spans)),
             Rect::new(inner.x, y, inner.width, 1),
         );
+        let typed = match i {
+            NAME if mode == Mode::Add => Some(fields.name.width()),
+            URL => Some(fields.url.width()),
+            API_KEY => Some(fields.api_key.chars().count()),
+            _ => None,
+        };
+        if is_focused && let Some(typed) = typed {
+            let x = (inner.x as usize + value_column + typed).min(inner.right() as usize - 1);
+            frame.set_cursor_position((x as u16, y));
+        }
         // No colon in the hint: the alignment test counts one per field row.
         if i == URL && fields.url.is_empty() {
             frame.render_widget(
@@ -549,6 +549,53 @@ mod tests {
             .collect();
         assert_eq!(colons.len(), FIELD_COUNT, "{rows:#?}");
         assert!(colons.iter().all(|&c| c == colons[0]), "{colons:?}");
+    }
+
+    #[test]
+    fn the_focused_field_has_a_cursor_not_a_highlighted_row() {
+        let fields = FormFields {
+            name: "grok".into(),
+            ..FormFields::default()
+        };
+        let mut terminal = Terminal::new(TestBackend::new(80, 18)).unwrap();
+        terminal
+            .draw(|frame| {
+                render_provider_overlay(
+                    frame,
+                    frame.area(),
+                    &fields,
+                    NAME,
+                    &OverlayState::Editing,
+                    Mode::Add,
+                )
+            })
+            .unwrap();
+
+        let buffer = terminal.backend().buffer();
+        assert!(
+            buffer
+                .content
+                .iter()
+                .all(|cell| cell.bg != theme::SELECTION_BG)
+        );
+        let rows: Vec<Vec<char>> = buffer
+            .content
+            .iter()
+            .flat_map(|cell| cell.symbol().chars())
+            .collect::<Vec<_>>()
+            .chunks(80)
+            .map(<[char]>::to_vec)
+            .collect();
+        let (y, x) = rows
+            .iter()
+            .enumerate()
+            .find_map(|(y, row)| {
+                let x = row.windows(4).position(|w| w == ['g', 'r', 'o', 'k'])?;
+                Some((y as u16, x as u16 + 4))
+            })
+            .unwrap();
+        let cursor = terminal.get_cursor_position().unwrap();
+        assert_eq!((cursor.x, cursor.y), (x, y));
     }
 
     #[test]
