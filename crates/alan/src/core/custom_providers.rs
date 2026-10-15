@@ -230,7 +230,12 @@ impl CustomProviders {
         let (entry, models) = self.check(name, api, url, key.as_deref()).await?;
         self.store.put(entry.clone()).await?;
         if let Err(error) = self.save_key(&entry.name, key).await {
-            self.store.remove(&entry.name).await?;
+            if let Err(undo) = self.store.remove(&entry.name).await {
+                return Err(error.context(format!(
+                    "{} is still in providers.json: {undo:#}",
+                    entry.name
+                )));
+            }
             return Err(error);
         }
         let count = models.len();
