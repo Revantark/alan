@@ -57,6 +57,7 @@ async fn main() -> anyhow::Result<()> {
         credential_store.clone() as Arc<dyn providers::CredentialStore>;
     let providers = build_providers(&credential_store_for_providers)?;
     let registry = Arc::new(ProviderRegistry::new(providers));
+
     let custom_providers = Arc::new(CustomProviders::new(
         CustomProviderStore::new(custom_providers::default_providers_path()?),
         Arc::clone(&registry),
@@ -179,7 +180,7 @@ fn select_model(
     };
     let provider = registry
         .get(&ProviderId::new(provider_id))
-        .ok_or_else(|| missing_provider(provider_id, resumed_session))?;
+        .ok_or_else(|| anyhow::anyhow!("Provider not found: {provider_id}"))?;
     let server_tools = server_tools(
         provider.server_tools(),
         settings.web_fetch == Some(true),
@@ -194,19 +195,6 @@ fn select_model(
             extensions: settings.extensions(&model_id),
         },
     )?)
-}
-
-/// Alan exits here before `/models` can be opened, so the error says how to
-/// start again.
-fn missing_provider(provider_id: &str, resumed_session: Option<&agent::Session>) -> anyhow::Error {
-    match resumed_session {
-        Some(_) => anyhow::anyhow!(
-            "this session used provider {provider_id}, which no longer exists; add it again with /provider add, then resume"
-        ),
-        None => anyhow::anyhow!(
-            "provider {provider_id} not found; start with `ALAN_PROVIDER={DEFAULT_PROVIDER} ALAN_MODEL={DEFAULT_MODEL} alan` and pick a model with /models"
-        ),
-    }
 }
 
 fn build_tool_policy(
