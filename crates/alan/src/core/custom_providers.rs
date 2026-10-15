@@ -165,7 +165,8 @@ impl CustomProviders {
 
     /// Register every saved provider Alan can use; their models are fetched
     /// the next time `/models` opens. Entries it cannot read or bind are
-    /// skipped. Returns a notice for each entry a built-in now takes the name of.
+    /// skipped. Returns a notice for each entry removed because a built-in now
+    /// takes its name.
     pub async fn load(&self) -> Result<Vec<String>> {
         let mut notices = Vec::new();
         for entry in self.store.load_each().await? {
@@ -176,10 +177,13 @@ impl CustomProviders {
                     continue;
                 }
             };
+            // The name, and its key slot in `auth.json`, now belong to the
+            // built-in, so only the entry goes.
             if self.registry.is_builtin(&entry.name.id()) {
+                self.store.remove(&entry.name).await?;
                 notices.push(format!(
-                    "custom provider {} clashes with a built-in; remove it and add it under another name",
-                    entry.name
+                    "custom provider {} ({}) was removed: a built-in provider now uses that name; add it again under another name",
+                    entry.name, entry.url
                 ));
                 continue;
             }
@@ -852,7 +856,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn load_skips_a_name_a_builtin_now_uses_and_says_so() {
+    async fn load_drops_an_entry_a_builtin_now_names_and_keeps_the_builtins_key() {
         let path = temp_path("load-clash");
         let store = CustomProviderStore::new(path.clone());
         for n in ["openai", "grok"] {
@@ -865,6 +869,14 @@ mod tests {
                 .await
                 .unwrap();
         }
+        let credentials = Arc::new(InMemoryCredentialStore::new());
+        credentials
+            .put(
+                &name("openai").id(),
+                Credential::ApiKey { key: "sk".into() },
+            )
+            .await
+            .unwrap();
         let openai = CustomProvider::new(
             name("openai").id(),
             ApiId::ChatCompletions,
@@ -879,7 +891,7 @@ mod tests {
         let providers = CustomProviders::new(
             CustomProviderStore::new(path),
             Arc::clone(&registry),
-            Arc::new(InMemoryCredentialStore::new()),
+            credentials.clone(),
         );
 
         let notices = providers.load().await.unwrap();
@@ -887,13 +899,27 @@ mod tests {
         assert_eq!(
             notices,
             [
-                "custom provider openai clashes with a built-in; remove it and add it under another name"
+                "custom provider openai (http://localhost:1/v1) was removed: a built-in provider now uses that name; add it again under another name"
             ]
         );
         assert!(registry.custom(&name("openai").id()).is_none());
         assert!(registry.custom(&name("grok").id()).is_some());
-        // Still listed, so /provider remove can delete it.
-        assert_eq!(providers.entries().await.unwrap().len(), 2);
+        let names: Vec<_> = providers
+            .entries()
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|e| e.name.to_string())
+            .collect();
+        assert_eq!(names, ["grok"]);
+        // The key under that name now belongs to the built-in.
+        assert!(
+            credentials
+                .read(&name("openai").id())
+                .await
+                .unwrap()
+                .is_some()
+        );
         cleanup("load-clash");
     }
 
