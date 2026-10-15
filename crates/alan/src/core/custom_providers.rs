@@ -8,6 +8,7 @@ use providers::{
     fetch_catalog,
 };
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::fmt;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -68,6 +69,10 @@ pub struct CustomProviderEntry {
 }
 
 /// `providers.json`: the saved custom providers, in the order they were added.
+///
+/// Entries are edited as raw JSON, matched by name, so one Alan cannot read
+/// (a hand edit, or an API standard from a newer Alan) is kept and does not
+/// block saving the others.
 pub struct CustomProviderStore {
     store: JsonStore,
 }
@@ -79,57 +84,57 @@ impl CustomProviderStore {
         }
     }
 
+    /// The entries Alan can read.
     pub async fn load(&self) -> Result<Vec<CustomProviderEntry>> {
-        decode(self.store.get(PROVIDERS_KEY).await?)
+        Ok(self.load_each().await?.into_iter().flatten().collect())
     }
 
-    /// Each saved entry on its own, so one that does not parse leaves the
-    /// rest readable.
+    /// Each saved entry on its own, with the reason for any it cannot read.
     pub async fn load_each(&self) -> Result<Vec<serde_json::Result<CustomProviderEntry>>> {
-        let Some(value) = self.store.get(PROVIDERS_KEY).await? else {
-            return Ok(Vec::new());
-        };
-        let values: Vec<serde_json::Value> = serde_json::from_value(value)?;
+        let values = raw_entries(self.store.get(PROVIDERS_KEY).await?)?;
         Ok(values.into_iter().map(serde_json::from_value).collect())
     }
 
     /// Save `entry`, replacing a saved provider with the same name.
     pub async fn put(&self, entry: CustomProviderEntry) -> Result<()> {
+        let name = entry.name.to_string();
+        let value = serde_json::to_value(entry)?;
         self.store
-            .update(PROVIDERS_KEY, move |value| {
-                let mut entries = decode(value)?;
-                match entries.iter_mut().find(|saved| saved.name == entry.name) {
-                    Some(saved) => *saved = entry,
-                    None => entries.push(entry),
+            .update(PROVIDERS_KEY, move |saved| {
+                let mut values = raw_entries(saved)?;
+                match values.iter_mut().find(|saved| has_name(saved, &name)) {
+                    Some(saved) => *saved = value,
+                    None => values.push(value),
                 }
-                Ok((Some(serde_json::to_value(entries)?), ()))
+                Ok((Some(Value::Array(values)), ()))
             })
             .await
     }
 
     pub async fn remove(&self, name: &ProviderName) -> Result<bool> {
+        let name = name.to_string();
         self.store
-            .update(PROVIDERS_KEY, |value| {
-                let mut entries = decode(value)?;
-                let before = entries.len();
-                entries.retain(|saved| saved.name != *name);
-                let removed = entries.len() < before;
-                let replacement = if entries.is_empty() {
-                    None
-                } else {
-                    Some(serde_json::to_value(entries)?)
-                };
+            .update(PROVIDERS_KEY, move |saved| {
+                let mut values = raw_entries(saved)?;
+                let before = values.len();
+                values.retain(|saved| !has_name(saved, &name));
+                let removed = values.len() < before;
+                let replacement = (!values.is_empty()).then_some(Value::Array(values));
                 Ok((replacement, removed))
             })
             .await
     }
 }
 
-fn decode(value: Option<serde_json::Value>) -> Result<Vec<CustomProviderEntry>> {
+fn raw_entries(value: Option<Value>) -> Result<Vec<Value>> {
     Ok(value
         .map(serde_json::from_value)
         .transpose()?
         .unwrap_or_default())
+}
+
+fn has_name(entry: &Value, name: &str) -> bool {
+    entry.get("name").and_then(Value::as_str) == Some(name)
 }
 
 /// Default location of providers.json inside the Alan data directory.
@@ -493,8 +498,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn store_load_rejects_an_invalid_name_in_the_file() {
-        let path = temp_path("corrupt");
+    async fn store_keeps_entries_it_cannot_read_and_still_saves_others() {
+        let path = temp_path("unreadable");
         JsonStore::new(path.clone())
             .set(
                 PROVIDERS_KEY,
@@ -502,8 +507,41 @@ mod tests {
             )
             .await
             .unwrap();
-        assert!(CustomProviderStore::new(path).load().await.is_err());
-        cleanup("corrupt");
+        let store = CustomProviderStore::new(path.clone());
+
+        store
+            .put(CustomProviderEntry {
+                name: name("grok"),
+                url: "http://one".into(),
+                api: ApiId::ChatCompletions,
+            })
+            .await
+            .unwrap();
+        assert!(store.remove(&name("grok")).await.unwrap());
+        store
+            .put(CustomProviderEntry {
+                name: name("groq"),
+                url: "http://two".into(),
+                api: ApiId::ChatCompletions,
+            })
+            .await
+            .unwrap();
+
+        let names: Vec<_> = store
+            .load()
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|e| e.name.to_string())
+            .collect();
+        assert_eq!(names, ["groq"]);
+        let raw = JsonStore::new(path)
+            .get(PROVIDERS_KEY)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(raw.as_array().unwrap().len(), 2, "{raw}");
+        cleanup("unreadable");
     }
 
     #[tokio::test]
