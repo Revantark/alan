@@ -3,10 +3,10 @@
 //! `providers.json`. Its key, if any, lives in `auth.json` under the same
 //! name so `/login` can change it.
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use providers::{
-    ApiId, Credential, CredentialStore, CustomProvider, ModelInfo, ProviderId, ProviderRegistry,
-    fetch_catalog,
+    ApiId, Credential, CredentialStore, CustomProvider, ModelInfo, ProviderError, ProviderId,
+    ProviderRegistry, fetch_catalog,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -263,9 +263,15 @@ impl CustomProviders {
         key: Option<&str>,
     ) -> Result<(CustomProviderEntry, Vec<ModelInfo>)> {
         let url = url.trim().trim_end_matches('/').to_owned();
-        let models = fetch_catalog(&name.id(), &api, &url, key)
-            .await
-            .with_context(|| format!("checking {url}/models"))?;
+        // The reason already names the URL; the error's own prefix would
+        // only repeat that the check failed.
+        let models =
+            fetch_catalog(&name.id(), &api, &url, key)
+                .await
+                .map_err(|error| match error {
+                    ProviderError::Fetch(reason) => anyhow::anyhow!(reason),
+                    other => other.into(),
+                })?;
         Ok((CustomProviderEntry { name, url, api }, models))
     }
 
@@ -554,7 +560,10 @@ pub(crate) mod tests {
             .await
             .unwrap_err();
 
-        assert!(format!("{error:#}").contains("401"), "{error:#}");
+        assert_eq!(
+            format!("{error:#}"),
+            "the API key was rejected (HTTP 401 Unauthorized)"
+        );
         assert!(providers.entries().await.unwrap().is_empty());
         assert!(
             credentials

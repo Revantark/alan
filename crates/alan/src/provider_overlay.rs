@@ -480,7 +480,8 @@ mod tests {
     fn an_error_goes_back_to_the_form_with_fields_kept() {
         let mut overlay = ProviderOverlay::add(providers());
         type_text(&mut overlay, "grok");
-        overlay.state = OverlayState::Error("checking …: HTTP 401".into());
+        overlay.state =
+            OverlayState::Error("the API key was rejected (HTTP 401 Unauthorized)".into());
 
         assert_eq!(press(&mut overlay, KeyCode::Enter), KeyOutcome::Redraw);
         assert_eq!(overlay.state, OverlayState::Editing);
@@ -554,7 +555,7 @@ mod tests {
     fn an_error_shows_the_reason() {
         let screen = screen(
             &FormFields::default(),
-            &OverlayState::Error("checking http://x/v1/models: HTTP 401".into()),
+            &OverlayState::Error("the API key was rejected (HTTP 401 Unauthorized)".into()),
         );
         assert!(screen.contains("HTTP 401"));
     }

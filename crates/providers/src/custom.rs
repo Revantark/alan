@@ -195,8 +195,10 @@ async fn fetch_chat_completions_catalog(
     base_url: &str,
     api_key: Option<&str>,
 ) -> Result<Vec<ModelInfo>, ProviderError> {
+    let base = base_url.trim().trim_end_matches('/');
+    let url = format!("{base}/models");
     let mut request = reqwest::Client::new()
-        .get(format!("{}/models", base_url.trim().trim_end_matches('/')))
+        .get(&url)
         .timeout(std::time::Duration::from_secs(10));
     if let Some(key) = api_key.filter(|key| !key.is_empty()) {
         request = request.bearer_auth(key);
@@ -204,39 +206,57 @@ async fn fetch_chat_completions_catalog(
     // reqwest's own message ("error sending request") hides why.
     let response = request.send().await.map_err(|error| {
         ProviderError::Fetch(if error.is_timeout() {
-            "timed out".into()
+            format!("{base} did not answer within 10 seconds")
         } else if error.is_connect() {
-            "could not connect".into()
+            format!("could not reach {base}; is the server running?")
         } else if error.is_builder() {
-            "invalid URL".into()
+            format!("\"{base}\" is not a valid URL; it should look like http://localhost:11434/v1")
         } else {
-            format!("request failed: {error}")
+            format!("could not reach {base}: {error}")
         })
     })?;
     let status = response.status();
-    if status == reqwest::StatusCode::UNAUTHORIZED {
-        return Err(ProviderError::Fetch(format!(
-            "API key was rejected (HTTP {status})"
-        )));
-    }
-    if !status.is_success() {
-        return Err(ProviderError::Fetch(format!("HTTP {status}")));
+    match status {
+        reqwest::StatusCode::UNAUTHORIZED => {
+            return Err(ProviderError::Fetch(format!(
+                "the API key was rejected (HTTP {status})"
+            )));
+        }
+        // The usual mistake: a base URL without the `/v1` the API lives under.
+        reqwest::StatusCode::NOT_FOUND => {
+            return Err(ProviderError::Fetch(format!(
+                "{url} was not found; the URL should end where /chat/completions would start, e.g. …/v1"
+            )));
+        }
+        status if !status.is_success() => {
+            return Err(ProviderError::Fetch(format!(
+                "{url} answered HTTP {status}"
+            )));
+        }
+        _ => {}
     }
     let payload = response
         .text()
         .await
-        .map_err(|error| ProviderError::Fetch(format!("request failed: {error}")))?;
-    parse_catalog(provider, &payload)
+        .map_err(|error| ProviderError::Fetch(format!("could not read {url}: {error}")))?;
+    parse_catalog(provider, base, &payload)
 }
 
-fn parse_catalog(provider: &ProviderId, payload: &str) -> Result<Vec<ModelInfo>, ProviderError> {
+/// `source` is the base URL, for the error messages.
+fn parse_catalog(
+    provider: &ProviderId,
+    source: &str,
+    payload: &str,
+) -> Result<Vec<ModelInfo>, ProviderError> {
     #[derive(Deserialize)]
     struct Listing {
         data: Vec<serde_json::Value>,
     }
 
     let listing: Listing = serde_json::from_str(payload).map_err(|error| {
-        ProviderError::Fetch(format!("not an OpenAI-style model list: {error}"))
+        ProviderError::Fetch(format!(
+            "{source}/models did not return a Chat Completions model list: {error}"
+        ))
     })?;
     let mut models: Vec<ModelInfo> = listing
         .data
@@ -255,7 +275,7 @@ fn parse_catalog(provider: &ProviderId, payload: &str) -> Result<Vec<ModelInfo>,
     models.sort_by(|a, b| a.id.cmp(&b.id));
     models.dedup_by(|a, b| a.id == b.id);
     if models.is_empty() {
-        return Err(ProviderError::Fetch("server listed no models".into()));
+        return Err(ProviderError::Fetch(format!("{source} lists no models")));
     }
     Ok(models)
 }
@@ -274,6 +294,8 @@ mod tests {
     use crate::InMemoryCredentialStore;
 
     const PROVIDER: &str = "grok";
+
+    const SOURCE: &str = "http://x/v1";
 
     fn id() -> ProviderId {
         ProviderId::new(PROVIDER)
@@ -307,6 +329,7 @@ mod tests {
     fn parse_catalog_reads_each_known_context_field() {
         let models = parse_catalog(
             &id(),
+            SOURCE,
             r#"{"data":[
                 {"id":"a","context_length":128000},
                 {"id":"b","context_window":131072},
@@ -336,6 +359,7 @@ mod tests {
     fn context_length_takes_the_first_field_present() {
         let models = parse_catalog(
             &id(),
+            SOURCE,
             r#"{"data":[{"id":"a","context_length":1000,"context_window":2000}]}"#,
         )
         .unwrap();
@@ -344,9 +368,7 @@ mod tests {
 
     #[test]
     fn context_length_ignores_zero_strings_and_floats() {
-        let models = parse_catalog(
-            &id(),
-            r#"{"data":[
+        let models = parse_catalog(&id(), SOURCE, r#"{"data":[
                 {"id":"a","context_length":0,"context_window":"4096","max_context_length":4096.5,"max_model_len":2048},
                 {"id":"b","context_length":"128k"}]}"#,
         )
@@ -357,9 +379,7 @@ mod tests {
 
     #[test]
     fn parse_catalog_sorts_dedupes_and_skips_blank_ids() {
-        let models = parse_catalog(
-            &id(),
-            r#"{"data":[{"id":"b"},{"id":"a","owned_by":"x"},{"id":"b"},{"id":" "},{"object":"model"}]}"#,
+        let models = parse_catalog(&id(), SOURCE, r#"{"data":[{"id":"b"},{"id":"a","owned_by":"x"},{"id":"b"},{"id":" "},{"object":"model"}]}"#,
         )
         .unwrap();
         let ids: Vec<_> = models.iter().map(|m| m.id.as_str()).collect();
@@ -368,13 +388,17 @@ mod tests {
 
     #[test]
     fn parse_catalog_rejects_empty_and_other_shapes() {
-        assert!(parse_catalog(&id(), r#"{"data":[]}"#).is_err());
-        assert!(parse_catalog(&id(), r#"{"models":[{"name":"models/gemini"}]}"#).is_err());
-        let error = parse_catalog(&id(), "<html>404</html>").unwrap_err();
+        let empty = parse_catalog(&id(), SOURCE, r#"{"data":[]}"#).unwrap_err();
+        assert!(
+            empty.to_string().contains("http://x/v1 lists no models"),
+            "{empty}"
+        );
+        assert!(parse_catalog(&id(), SOURCE, r#"{"models":[{"name":"models/gemini"}]}"#).is_err());
+        let error = parse_catalog(&id(), SOURCE, "<html>404</html>").unwrap_err();
         assert!(
             error
                 .to_string()
-                .contains("not an OpenAI-style model list: "),
+                .contains("http://x/v1/models did not return a Chat Completions model list: "),
             "{error}"
         );
     }
@@ -433,7 +457,12 @@ mod tests {
         )
         .await
         .unwrap_err();
-        assert!(error.to_string().contains("could not connect"), "{error}");
+        assert!(
+            error.to_string().contains(&format!(
+                "could not reach http://{address}/v1; is the server running?"
+            )),
+            "{error}"
+        );
     }
 
     #[tokio::test]
@@ -441,7 +470,27 @@ mod tests {
         let error = fetch_catalog(&id(), &ApiId::ChatCompletions, "not a url", None)
             .await
             .unwrap_err();
-        assert!(error.to_string().contains("invalid URL"), "{error}");
+        assert!(
+            error.to_string().contains(
+                "\"not a url\" is not a valid URL; it should look like http://localhost:11434/v1"
+            ),
+            "{error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn fetch_catalog_explains_a_wrong_path() {
+        let (url, _server) =
+            serve_once("HTTP/1.1 404 Not Found\r\nconnection: close\r\n\r\n").await;
+        let error = fetch_catalog(&id(), &ApiId::ChatCompletions, &url, None)
+            .await
+            .unwrap_err();
+        assert!(
+            error.to_string().contains(
+                "/v1/models was not found; the URL should end where /chat/completions would start, e.g. …/v1"
+            ),
+            "{error}"
+        );
     }
 
     #[tokio::test]
@@ -501,7 +550,7 @@ mod tests {
             .validate_auth(&AuthResult::ApiKey("bad".into()))
             .await;
         assert!(
-            matches!(&result, Err(AuthError::Validation(reason)) if reason == "API key was rejected (HTTP 401 Unauthorized)"),
+            matches!(&result, Err(AuthError::Validation(reason)) if reason == "the API key was rejected (HTTP 401 Unauthorized)"),
             "{result:?}"
         );
     }
