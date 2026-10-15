@@ -4,7 +4,7 @@
 
 use anyhow::{Context, Result};
 use providers::{
-    Credential, CredentialStore, CustomProvider, ModelInfo, ProviderId, ProviderRegistry,
+    ApiId, Credential, CredentialStore, CustomProvider, ModelInfo, ProviderId, ProviderRegistry,
     fetch_catalog,
 };
 use serde::{Deserialize, Serialize};
@@ -73,6 +73,7 @@ impl fmt::Display for ProviderName {
 pub struct CustomProviderEntry {
     pub name: ProviderName,
     pub url: String,
+    pub api: ApiId,
 }
 
 /// `providers.json`: the saved custom providers, in the order they were added.
@@ -160,7 +161,7 @@ impl CustomProviders {
     /// `/models` opens.
     pub async fn load(&self) -> Result<()> {
         for entry in self.store.load().await? {
-            self.register(&entry, Vec::new());
+            self.register(&entry, Vec::new())?;
         }
         Ok(())
     }
@@ -181,22 +182,29 @@ impl CustomProviders {
     /// Check `url` with a `/models` call, then save the provider and its key.
     /// Returns how many models the server lists. Nothing is saved when the
     /// check fails.
-    pub async fn add(&self, name: ProviderName, url: &str, key: Option<String>) -> Result<usize> {
+    pub async fn add(
+        &self,
+        name: ProviderName,
+        api: ApiId,
+        url: &str,
+        key: Option<String>,
+    ) -> Result<usize> {
         anyhow::ensure!(
             self.registry.get(&name.id()).is_none(),
             "provider already exists: {name}"
         );
-        self.save(name, url, key).await
+        self.save(name, api, url, key).await
     }
 
     /// [`add`](Self::add) for a saved provider. No key removes the saved one.
     pub async fn update(
         &self,
         name: ProviderName,
+        api: ApiId,
         url: &str,
         key: Option<String>,
     ) -> Result<usize> {
-        self.save(name, url, key).await
+        self.save(name, api, url, key).await
     }
 
     /// Refuses the provider of the running model: its next request would go
@@ -212,9 +220,15 @@ impl CustomProviders {
         Ok(())
     }
 
-    async fn save(&self, name: ProviderName, url: &str, key: Option<String>) -> Result<usize> {
+    async fn save(
+        &self,
+        name: ProviderName,
+        api: ApiId,
+        url: &str,
+        key: Option<String>,
+    ) -> Result<usize> {
         let url = url.trim().trim_end_matches('/').to_owned();
-        let models = fetch_catalog(&name.id(), &url, key.as_deref())
+        let models = fetch_catalog(&name.id(), &api, &url, key.as_deref())
             .await
             .with_context(|| format!("checking {url}/models"))?;
         let count = models.len();
@@ -226,25 +240,27 @@ impl CustomProviders {
             }
             None => self.credentials.delete(&name.id()).await?,
         }
-        let entry = CustomProviderEntry { name, url };
+        let entry = CustomProviderEntry { name, url, api };
         self.store.put(entry.clone()).await?;
-        self.register(&entry, models);
+        self.register(&entry, models)?;
         Ok(count)
     }
 
-    fn register(&self, entry: &CustomProviderEntry, models: Vec<ModelInfo>) {
+    fn register(&self, entry: &CustomProviderEntry, models: Vec<ModelInfo>) -> Result<()> {
         // A bound model keeps its provider's API client: replacing the
         // provider on an edit would leave the running model on the old URL.
         if let Some(provider) = self.registry.custom(&entry.name.id()) {
             provider.set_base_url(entry.url.clone());
-            return;
+            return Ok(());
         }
         self.registry.add_custom(Arc::new(CustomProvider::new(
             entry.name.id(),
+            entry.api.clone(),
             entry.url.clone(),
             Arc::clone(&self.credentials),
             models,
-        )));
+        )?));
+        Ok(())
     }
 }
 
@@ -379,6 +395,7 @@ mod tests {
                 .put(CustomProviderEntry {
                     name: name(n),
                     url: url.into(),
+                    api: ApiId::ChatCompletions,
                 })
                 .await
                 .unwrap();
@@ -401,6 +418,7 @@ mod tests {
             .put(CustomProviderEntry {
                 name: name("a"),
                 url: "http://one".into(),
+                api: ApiId::ChatCompletions,
             })
             .await
             .unwrap();
@@ -416,7 +434,7 @@ mod tests {
         JsonStore::new(path.clone())
             .set(
                 PROVIDERS_KEY,
-                json!([{"name": "Bad Name", "url": "http://x"}]),
+                json!([{"name": "Bad Name", "url": "http://x", "api": "ChatCompletions"}]),
             )
             .await
             .unwrap();
@@ -430,13 +448,19 @@ mod tests {
         let url = serve_once(OK_TWO_MODELS).await;
 
         let count = providers
-            .add(name("grok"), &url, Some("sk".into()))
+            .add(
+                name("grok"),
+                ApiId::ChatCompletions,
+                &url,
+                Some("sk".into()),
+            )
             .await
             .unwrap();
 
         assert_eq!(count, 2);
         let entries = providers.entries().await.unwrap();
         assert_eq!(entries[0].url, url.trim_end_matches('/'));
+        assert_eq!(entries[0].api, ApiId::ChatCompletions);
         assert_eq!(
             providers.key(&name("grok")).await.unwrap().as_deref(),
             Some("sk")
@@ -459,7 +483,12 @@ mod tests {
         let url = serve_once("HTTP/1.1 401 Unauthorized\r\nconnection: close\r\n\r\n{}").await;
 
         let error = providers
-            .add(name("grok"), &url, Some("bad".into()))
+            .add(
+                name("grok"),
+                ApiId::ChatCompletions,
+                &url,
+                Some("bad".into()),
+            )
             .await
             .unwrap_err();
 
@@ -479,16 +508,25 @@ mod tests {
     #[tokio::test]
     async fn add_refuses_a_taken_name_before_any_request() {
         let (providers, registry, credentials) = service("taken");
-        registry.add_custom(Arc::new(CustomProvider::new(
-            name("taken").id(),
-            "http://localhost:1/v1",
-            credentials,
-            Vec::new(),
-        )));
+        registry.add_custom(Arc::new(
+            CustomProvider::new(
+                name("taken").id(),
+                ApiId::ChatCompletions,
+                "http://localhost:1/v1",
+                credentials,
+                Vec::new(),
+            )
+            .unwrap(),
+        ));
 
         // Port 1 is closed: reaching the network would say "could not connect".
         let error = providers
-            .add(name("taken"), "http://127.0.0.1:1/v1", None)
+            .add(
+                name("taken"),
+                ApiId::ChatCompletions,
+                "http://127.0.0.1:1/v1",
+                None,
+            )
             .await
             .unwrap_err();
 
@@ -504,7 +542,10 @@ mod tests {
             .unwrap();
         let url = serve_once(OK_TWO_MODELS).await;
 
-        providers.update(name("grok"), &url, None).await.unwrap();
+        providers
+            .update(name("grok"), ApiId::ChatCompletions, &url, None)
+            .await
+            .unwrap();
 
         assert!(providers.key(&name("grok")).await.unwrap().is_none());
         cleanup("update");
@@ -514,14 +555,17 @@ mod tests {
     async fn update_moves_models_already_bound_to_the_new_url() {
         let (providers, registry, _credentials) = service("edit-bound");
         let old_url = serve_once(OK_TWO_MODELS).await;
-        providers.add(name("grok"), &old_url, None).await.unwrap();
+        providers
+            .add(name("grok"), ApiId::ChatCompletions, &old_url, None)
+            .await
+            .unwrap();
         let provider = registry.get(&name("grok").id()).unwrap();
         let model = providers::bind_model(provider.as_ref(), "m1", Default::default()).unwrap();
 
         // The new server answers the edit's check, then the chat request.
         let (new_url, server) = serve_many(2).await;
         providers
-            .update(name("grok"), &new_url, None)
+            .update(name("grok"), ApiId::ChatCompletions, &new_url, None)
             .await
             .unwrap();
         let messages = [llm::Message::user("hi")];
@@ -550,7 +594,12 @@ mod tests {
         let (providers, registry, _credentials) = service("remove-all");
         let url = serve_once(OK_TWO_MODELS).await;
         providers
-            .add(name("grok"), &url, Some("sk".into()))
+            .add(
+                name("grok"),
+                ApiId::ChatCompletions,
+                &url,
+                Some("sk".into()),
+            )
             .await
             .unwrap();
 
@@ -569,7 +618,10 @@ mod tests {
     async fn remove_refuses_the_provider_in_use() {
         let (providers, _registry, _credentials) = service("remove-active");
         let url = serve_once(OK_TWO_MODELS).await;
-        providers.add(name("grok"), &url, None).await.unwrap();
+        providers
+            .add(name("grok"), ApiId::ChatCompletions, &url, None)
+            .await
+            .unwrap();
 
         let error = providers
             .remove(&name("grok"), &name("grok").id())
@@ -588,6 +640,7 @@ mod tests {
             .put(CustomProviderEntry {
                 name: name("grok"),
                 url: "http://localhost:1/v1".into(),
+                api: ApiId::ChatCompletions,
             })
             .await
             .unwrap();

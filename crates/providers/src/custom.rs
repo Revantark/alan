@@ -24,6 +24,7 @@ const CONTEXT_FIELDS: [&str; 4] = [
 /// Completions, known by a name and a base URL.
 pub struct CustomProvider {
     id: ProviderId,
+    api: ApiId,
     /// Shared with the API client, so models already bound to this provider
     /// follow [`set_base_url`](Self::set_base_url), as they follow key changes.
     base_url: Arc<RwLock<String>>,
@@ -38,26 +39,31 @@ impl CustomProvider {
     /// second `/models` call; an empty list is filled on the next fetch.
     pub fn new(
         id: ProviderId,
+        api: ApiId,
         base_url: impl Into<String>,
         credentials: Arc<dyn CredentialStore>,
         models: Vec<ModelInfo>,
-    ) -> Self {
+    ) -> Result<Self, ProviderError> {
         let base_url = Arc::new(RwLock::new(base_url.into()));
-        let api: Arc<dyn LlmApi> = Arc::new(LiveUrlApi {
-            base_url: Arc::clone(&base_url),
-            http: Arc::new(HttpClient::new()),
-        });
-        Self {
+        let client: Arc<dyn LlmApi> = match &api {
+            ApiId::ChatCompletions => Arc::new(LiveUrlApi {
+                base_url: Arc::clone(&base_url),
+                http: Arc::new(HttpClient::new()),
+            }),
+            other => return Err(ProviderError::UnsupportedApi(other.clone())),
+        };
+        Ok(Self {
             auth: Arc::new(StoredKeyAuth {
                 provider: id.clone(),
                 credentials,
             }),
-            apis: HashMap::from([(ApiId::ChatCompletions, api)]),
+            apis: HashMap::from([(api.clone(), client)]),
+            api,
             models: RwLock::new(models),
             fetch_lock: tokio::sync::Mutex::new(()),
             base_url,
             id,
-        }
+        })
     }
 
     /// Point the provider, and every model already bound to it, at `base_url`.
@@ -125,10 +131,12 @@ impl Provider for CustomProvider {
 
     async fn validate_auth(&self, auth_result: &AuthResult) -> Result<(), AuthError> {
         match auth_result {
-            AuthResult::ApiKey(key) => fetch_catalog(&self.id, &self.base_url(), Some(key))
-                .await
-                .map(drop)
-                .map_err(|error| AuthError::Validation(error.to_string())),
+            AuthResult::ApiKey(key) => {
+                fetch_catalog(&self.id, &self.api, &self.base_url(), Some(key))
+                    .await
+                    .map(drop)
+                    .map_err(|error| AuthError::Validation(error.to_string()))
+            }
         }
     }
 
@@ -143,7 +151,7 @@ impl Provider for CustomProvider {
             RequestCredential::ApiKey(key) => Some(key),
             _ => None,
         };
-        let models = fetch_catalog(&self.id, &self.base_url(), key.as_deref()).await?;
+        let models = fetch_catalog(&self.id, &self.api, &self.base_url(), key.as_deref()).await?;
         *self.models.write().unwrap_or_else(|e| e.into_inner()) = models;
         Ok(())
     }
@@ -166,9 +174,22 @@ impl AuthResolver for StoredKeyAuth {
     }
 }
 
-/// `GET {base_url}/models`. Chat Completions has no health endpoint, so this
+/// The models a server lists. No API standard has a health endpoint, so this
 /// is how a URL and key are checked before a provider is saved.
 pub async fn fetch_catalog(
+    provider: &ProviderId,
+    api: &ApiId,
+    base_url: &str,
+    api_key: Option<&str>,
+) -> Result<Vec<ModelInfo>, ProviderError> {
+    match api {
+        ApiId::ChatCompletions => fetch_chat_completions_catalog(provider, base_url, api_key).await,
+        other => Err(ProviderError::UnsupportedApi(other.clone())),
+    }
+}
+
+/// `GET {base_url}/models` in the Chat Completions format.
+async fn fetch_chat_completions_catalog(
     provider: &ProviderId,
     base_url: &str,
     api_key: Option<&str>,
@@ -353,9 +374,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn unsupported_apis_are_refused_before_any_request() {
+        let provider = CustomProvider::new(
+            id(),
+            ApiId::AnthropicMessages,
+            "http://localhost:11434/v1",
+            Arc::new(InMemoryCredentialStore::new()),
+            Vec::new(),
+        );
+        assert!(matches!(
+            provider,
+            Err(ProviderError::UnsupportedApi(ApiId::AnthropicMessages))
+        ));
+
+        // "not a url" would fail as "invalid URL" if a request were attempted.
+        let error = fetch_catalog(&id(), &ApiId::OpenAiResponses, "not a url", None)
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            ProviderError::UnsupportedApi(ApiId::OpenAiResponses)
+        ));
+    }
+
+    #[tokio::test]
     async fn fetch_catalog_sends_key_to_models_path() {
         let (url, server) = serve_once(TWO_MODELS).await;
-        let models = fetch_catalog(&id(), &url, Some("sk-test")).await.unwrap();
+        let models = fetch_catalog(&id(), &ApiId::ChatCompletions, &url, Some("sk-test"))
+            .await
+            .unwrap();
         assert_eq!(models.len(), 2);
         let request = server.await.unwrap();
         assert!(request.starts_with("GET /v1/models HTTP/1.1"), "{request}");
@@ -369,7 +416,9 @@ mod tests {
     #[tokio::test]
     async fn fetch_catalog_sends_no_auth_without_key() {
         let (url, server) = serve_once(TWO_MODELS).await;
-        fetch_catalog(&id(), &url, None).await.unwrap();
+        fetch_catalog(&id(), &ApiId::ChatCompletions, &url, None)
+            .await
+            .unwrap();
         assert!(
             !server
                 .await
@@ -385,7 +434,9 @@ mod tests {
             "HTTP/1.1 401 Unauthorized\r\nconnection: close\r\n\r\n{\"error\":\"Invalid API key\"}",
         )
         .await;
-        let error = fetch_catalog(&id(), &url, Some("bad")).await.unwrap_err();
+        let error = fetch_catalog(&id(), &ApiId::ChatCompletions, &url, Some("bad"))
+            .await
+            .unwrap_err();
         assert!(error.to_string().contains("401"), "{error}");
     }
 
@@ -396,15 +447,22 @@ mod tests {
             .unwrap()
             .local_addr()
             .unwrap();
-        let error = fetch_catalog(&id(), &format!("http://{address}/v1"), None)
-            .await
-            .unwrap_err();
+        let error = fetch_catalog(
+            &id(),
+            &ApiId::ChatCompletions,
+            &format!("http://{address}/v1"),
+            None,
+        )
+        .await
+        .unwrap_err();
         assert!(error.to_string().contains("could not connect"), "{error}");
     }
 
     #[tokio::test]
     async fn fetch_catalog_reports_invalid_url() {
-        let error = fetch_catalog(&id(), "not a url", None).await.unwrap_err();
+        let error = fetch_catalog(&id(), &ApiId::ChatCompletions, "not a url", None)
+            .await
+            .unwrap_err();
         assert!(error.to_string().contains("invalid URL"), "{error}");
     }
 
@@ -421,7 +479,9 @@ mod tests {
             )
             .await
             .unwrap();
-        let provider = CustomProvider::new(id(), url, credentials, Vec::new());
+        let provider =
+            CustomProvider::new(id(), ApiId::ChatCompletions, url, credentials, Vec::new())
+                .unwrap();
         provider.fetch_models().await.unwrap();
         assert_eq!(provider.models().len(), 2);
         assert!(
@@ -437,10 +497,12 @@ mod tests {
     async fn provider_without_a_key_sends_no_credential() {
         let provider = CustomProvider::new(
             id(),
+            ApiId::ChatCompletions,
             "http://localhost:11434/v1",
             Arc::new(InMemoryCredentialStore::new()),
             Vec::new(),
-        );
+        )
+        .unwrap();
         let credential = provider.auth().resolve().await.unwrap();
         assert!(matches!(credential, RequestCredential::None));
     }
@@ -451,10 +513,12 @@ mod tests {
             serve_once("HTTP/1.1 401 Unauthorized\r\nconnection: close\r\n\r\n{}").await;
         let provider = CustomProvider::new(
             id(),
+            ApiId::ChatCompletions,
             url,
             Arc::new(InMemoryCredentialStore::new()),
             Vec::new(),
-        );
+        )
+        .unwrap();
         let result = provider
             .validate_auth(&AuthResult::ApiKey("bad".into()))
             .await;

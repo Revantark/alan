@@ -403,12 +403,16 @@ mod tests {
     use providers::{CustomProvider, InMemoryCredentialStore, Provider};
 
     fn provider(name: &str, model: &str) -> Arc<dyn Provider> {
-        Arc::new(CustomProvider::new(
-            ProviderId::new(name),
-            "http://localhost:11434/v1",
-            Arc::new(InMemoryCredentialStore::new()),
-            vec![ModelInfo::new(model, ProviderId::new(name))],
-        ))
+        Arc::new(
+            CustomProvider::new(
+                ProviderId::new(name),
+                providers::ApiId::ChatCompletions,
+                "http://localhost:11434/v1",
+                Arc::new(InMemoryCredentialStore::new()),
+                vec![ModelInfo::new(model, ProviderId::new(name))],
+            )
+            .unwrap(),
+        )
     }
 
     #[test]

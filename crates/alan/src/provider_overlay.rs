@@ -6,6 +6,7 @@ use crate::views::theme;
 use alan_tui::context::Context;
 use alan_tui::{ActionStatus, Component, RenderContext, TaskError};
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use providers::ApiId;
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Rect};
 use ratatui::style::{Modifier, Style};
@@ -86,6 +87,7 @@ enum KeyOutcome {
 pub struct ProviderOverlay {
     providers: Arc<CustomProviders>,
     mode: Mode,
+    api: ApiId,
     fields: FormFields,
     focused: usize,
     state: OverlayState,
@@ -93,7 +95,13 @@ pub struct ProviderOverlay {
 
 impl ProviderOverlay {
     pub fn add(providers: Arc<CustomProviders>) -> Self {
-        Self::new(providers, Mode::Add, FormFields::default(), NAME)
+        Self::new(
+            providers,
+            Mode::Add,
+            ApiId::ChatCompletions,
+            FormFields::default(),
+            NAME,
+        )
     }
 
     /// The name is fixed: `auth.json`, `settings.json` and profiles refer to
@@ -108,18 +116,20 @@ impl ProviderOverlay {
             url: entry.url,
             api_key: key.unwrap_or_default(),
         };
-        Self::new(providers, Mode::Edit, fields, URL)
+        Self::new(providers, Mode::Edit, entry.api, fields, URL)
     }
 
     fn new(
         providers: Arc<CustomProviders>,
         mode: Mode,
+        api: ApiId,
         fields: FormFields,
         focused: usize,
     ) -> Self {
         Self {
             providers,
             mode,
+            api,
             fields,
             focused,
             state: OverlayState::Editing,
@@ -193,12 +203,13 @@ impl ProviderOverlay {
         };
         let providers = Arc::clone(&self.providers);
         let mode = self.mode;
+        let api = self.api.clone();
         cx.spawn(
             async move {
                 let Submission { name, url, key } = submission;
                 match mode {
-                    Mode::Add => providers.add(name, &url, key).await,
-                    Mode::Edit => providers.update(name, &url, key).await,
+                    Mode::Add => providers.add(name, api, &url, key).await,
+                    Mode::Edit => providers.update(name, api, &url, key).await,
                 }
                 .map_err(|error| TaskError(format!("{error:#}").into()))
             },
@@ -475,6 +486,7 @@ mod tests {
         let entry = CustomProviderEntry {
             name: ProviderName::parse("grok").unwrap(),
             url: "https://api.x.ai/v1".into(),
+            api: ApiId::ChatCompletions,
         };
         let mut overlay = ProviderOverlay::edit(providers(), entry, Some("xai-1".into()));
         assert_eq!(overlay.focused, URL);

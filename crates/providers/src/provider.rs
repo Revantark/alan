@@ -19,6 +19,8 @@ pub enum ProviderError {
     MissingAuth,
     #[error("failed to fetch models: {0}")]
     Fetch(String),
+    #[error("{0:?} is not supported for custom providers yet")]
+    UnsupportedApi(ApiId),
 }
 
 #[async_trait]
@@ -147,12 +149,16 @@ mod tests {
     use crate::{CustomProvider, InMemoryCredentialStore};
 
     fn custom(name: &str, model: &str) -> Arc<CustomProvider> {
-        Arc::new(CustomProvider::new(
-            ProviderId::new(name),
-            "http://localhost:11434/v1",
-            Arc::new(InMemoryCredentialStore::new()),
-            vec![ModelInfo::new(model, ProviderId::new(name))],
-        ))
+        Arc::new(
+            CustomProvider::new(
+                ProviderId::new(name),
+                ApiId::ChatCompletions,
+                "http://localhost:11434/v1",
+                Arc::new(InMemoryCredentialStore::new()),
+                vec![ModelInfo::new(model, ProviderId::new(name))],
+            )
+            .unwrap(),
+        )
     }
 
     // Any provider stands in for a built-in: only the track it sits in matters.
