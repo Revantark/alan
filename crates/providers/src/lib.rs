@@ -12,9 +12,7 @@ mod zai;
 pub use custom::{CustomProvider, fetch_catalog};
 pub use deepseek::{DeepSeekBuilder, DeepSeekProvider};
 
-pub use auth::{
-    ApiKeyAuth, AuthError, AuthMethod, AuthResolver, AuthResult, CredentialAuth, NoAuth,
-};
+pub use auth::{ApiKeyAuth, AuthError, AuthMethod, AuthResolver, AuthResult, CredentialAuth};
 pub use catalog::{ApiId, ModelCapabilities, ModelInfo, ModelPricing, ProviderId, ServerToolInfo};
 pub use credentials::{
     Credential, CredentialError, CredentialInfo, CredentialKind, CredentialStore,

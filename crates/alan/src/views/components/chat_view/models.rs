@@ -73,7 +73,6 @@ fn open_model_picker(
             let agent = view.controller.agent();
             let providers = Arc::clone(&providers);
             let replacing = replacing.clone();
-            let chosen_provider = model_info.provider.clone();
             let _ = cx.spawn(
                 async move {
                     let mut options = agent.model_options().await;
@@ -103,7 +102,7 @@ fn open_model_picker(
                             view.controller.set_reasoning_effort(reasoning_effort);
                             view.controller.apply_model_switch(name);
                             if let Some(replaced) = replacing {
-                                remove_idle_provider(view, cx, replaced, chosen_provider);
+                                remove_idle_provider(view, cx, replaced);
                             }
                         }
                         Err(e) => view.controller.apply_model_switch_failed(e.to_string()),
@@ -293,7 +292,7 @@ fn remove_provider(
             if active == name.id() {
                 open_model_picker(view, cx, format!("Replace {name} with"), Some(name));
             } else {
-                remove_idle_provider(view, cx, name, active);
+                remove_idle_provider(view, cx, name);
             }
         },
     );
@@ -303,15 +302,11 @@ fn remove_idle_provider(
     view: &mut ChatView,
     cx: &mut Context<'_, ChatView, AlanAction>,
     name: ProviderName,
-    active: ProviderId,
 ) {
     let providers = view.custom_providers();
     cx.spawn(
         async move {
-            providers
-                .remove(&name, &active)
-                .await
-                .map_err(super::to_task)?;
+            providers.remove(&name).await.map_err(super::to_task)?;
             Ok(name)
         },
         |result, view, cx| {

@@ -11,8 +11,6 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum ProviderError {
-    #[error("model not found: {0}")]
-    ModelNotFound(String),
     #[error("API is not configured for model {model}")]
     MissingApi { model: String },
     #[error("authentication is not configured")]
@@ -110,11 +108,11 @@ impl ProviderRegistry {
             .push(provider);
     }
 
-    pub fn remove_custom(&self, id: &ProviderId) -> bool {
-        let mut custom = self.custom.write().unwrap_or_else(|e| e.into_inner());
-        let before = custom.len();
-        custom.retain(|provider| provider.id() != *id);
-        custom.len() < before
+    pub fn remove_custom(&self, id: &ProviderId) {
+        self.custom
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .retain(|provider| provider.id() != *id);
     }
 }
 
@@ -203,9 +201,10 @@ mod tests {
         let registry = ProviderRegistry::new([builtin("openrouter")]);
         registry.add_custom(custom("grok", "grok-4"));
 
-        assert!(registry.remove_custom(&ProviderId::new("grok")));
-        assert!(!registry.remove_custom(&ProviderId::new("grok")));
-        assert!(!registry.remove_custom(&ProviderId::new("openrouter")));
+        registry.remove_custom(&ProviderId::new("grok"));
+        registry.remove_custom(&ProviderId::new("openrouter"));
+
+        assert!(registry.get(&ProviderId::new("grok")).is_none());
         assert!(registry.get(&ProviderId::new("openrouter")).is_some());
     }
 }

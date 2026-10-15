@@ -112,16 +112,13 @@ impl CustomProviderStore {
             .await
     }
 
-    pub async fn remove(&self, name: &ProviderName) -> Result<bool> {
+    pub async fn remove(&self, name: &ProviderName) -> Result<()> {
         let name = name.to_string();
         self.store
             .update(PROVIDERS_KEY, move |saved| {
                 let mut values = raw_entries(saved)?;
-                let before = values.len();
                 values.retain(|saved| !has_name(saved, &name));
-                let removed = values.len() < before;
-                let replacement = (!values.is_empty()).then_some(Value::Array(values));
-                Ok((replacement, removed))
+                Ok(((!values.is_empty()).then_some(Value::Array(values)), ()))
             })
             .await
     }
@@ -259,13 +256,7 @@ impl CustomProviders {
         Ok(count)
     }
 
-    /// Refuses the provider of the running model: its next request would go
-    /// out with the key this deletes.
-    pub async fn remove(&self, name: &ProviderName, active: &ProviderId) -> Result<()> {
-        anyhow::ensure!(
-            name.id() != *active,
-            "{name} is in use; pick another model with /models first"
-        );
+    pub async fn remove(&self, name: &ProviderName) -> Result<()> {
         self.store.remove(name).await?;
         self.credentials.delete(&name.id()).await?;
         self.registry.remove_custom(&name.id());
@@ -491,23 +482,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn store_remove_reports_whether_an_entry_went() {
-        let store = CustomProviderStore::new(temp_path("remove"));
-        store
-            .put(CustomProviderEntry {
-                name: name("a"),
-                url: "http://one".into(),
-                api: ApiId::ChatCompletions,
-            })
-            .await
-            .unwrap();
-        assert!(store.remove(&name("a")).await.unwrap());
-        assert!(!store.remove(&name("a")).await.unwrap());
-        assert!(store.load().await.unwrap().is_empty());
-        cleanup("remove");
-    }
-
-    #[tokio::test]
     async fn store_keeps_entries_it_cannot_read_and_still_saves_others() {
         let path = temp_path("unreadable");
         JsonStore::new(path.clone())
@@ -527,7 +501,7 @@ mod tests {
             })
             .await
             .unwrap();
-        assert!(store.remove(&name("grok")).await.unwrap());
+        store.remove(&name("grok")).await.unwrap();
         store
             .put(CustomProviderEntry {
                 name: name("groq"),
@@ -801,34 +775,12 @@ mod tests {
             .await
             .unwrap();
 
-        providers
-            .remove(&name("grok"), &ProviderId::new("openrouter"))
-            .await
-            .unwrap();
+        providers.remove(&name("grok")).await.unwrap();
 
         assert!(providers.entries().await.unwrap().is_empty());
         assert!(providers.key(&name("grok")).await.unwrap().is_none());
         assert!(registry.get(&name("grok").id()).is_none());
         cleanup("remove-all");
-    }
-
-    #[tokio::test]
-    async fn remove_refuses_the_provider_in_use() {
-        let (providers, _registry, _credentials) = service("remove-active");
-        let url = serve_once(OK_TWO_MODELS).await;
-        providers
-            .add(name("grok"), ApiId::ChatCompletions, &url, None)
-            .await
-            .unwrap();
-
-        let error = providers
-            .remove(&name("grok"), &name("grok").id())
-            .await
-            .unwrap_err();
-
-        assert!(error.to_string().contains("in use"), "{error:#}");
-        assert_eq!(providers.entries().await.unwrap().len(), 1);
-        cleanup("remove-active");
     }
 
     #[tokio::test]
