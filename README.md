@@ -21,7 +21,7 @@ A minimal coding agent in your terminal.
 
 ## Features
 
-- **First-class OpenRouter support** — full model catalog, per-model custom provider pinning (`/model-providers`), and reasoning effort control (`/effort`).
+- **First-class OpenRouter support** — full model catalog, per-model upstream provider pinning (`/model-providers`), and reasoning effort control (`/effort`).
 - **Paste images** — drop a screenshot from your clipboard straight into the conversation and ask about it.
 - **Compact with focus** — `/summarize-new "focus hint"` summarizes the context and restarts with just what matters.
 - **Steering** — queue a message mid-run and the agent picks it up without waiting for the response to finish.
@@ -77,7 +77,7 @@ Use the `/login` command to sign in to any of the available providers.
 
 Any other Chat Completions server can be added with `/provider add` (see [Custom providers](#custom-providers)).
 
-For OpenRouter, you can pin a custom provider for the selected model with `/model-providers`, followed by the provider name (no quotes):
+For OpenRouter, you can pin an upstream provider for the selected model with `/model-providers`, followed by the provider name (no quotes):
 
 - `/model-providers deepseek`
 - `/model-providers xiaomi/fp8`
@@ -105,7 +105,7 @@ For OpenRouter, you can pin a custom provider for the selected model with `/mode
 | `/tool-free` | Allow all tool calls without asking |
 | `/tool-slip` | Approve a command family once, allow its siblings |
 | `/tool-strict` | Allow only exact commands already approved |
-| `/model-providers <name>` | Pin a custom provider for the current OpenRouter model |
+| `/model-providers <name>` | Pin an upstream provider for the current OpenRouter model |
 | `/help` | List available commands |
 | `/quit` | Exit Alan |
 
@@ -140,7 +140,7 @@ Alan stores everything under `~/.alan/` by default:
 
 - `settings.json` — your current settings and active-profile marker.
 - `profiles.json` — saved named model/reasoning/web settings profiles.
-- `auth.json` — provider credentials saved by `/login`.
+- `auth.json` — provider credentials saved by `/login` and `/provider`.
 - `providers.json` — providers added with `/provider add`.
 - `projects/` — per-project permission grants.
 - `sessions/` — conversation history (append-only JSONL, one file per session).

@@ -103,8 +103,6 @@ fn open_model_picker(
                             view.controller.set_max_context(max_context);
                             view.controller.set_reasoning_effort(reasoning_effort);
                             view.controller.apply_model_switch(name);
-                            // Only once the switch succeeded: until then the
-                            // old provider's key is the one requests go out with.
                             if let Some(replaced) = replacing {
                                 remove_idle_provider(view, cx, replaced, chosen_provider);
                             }
@@ -372,7 +370,6 @@ pub(crate) fn server_tools_for_provider(
         })
 }
 
-/// Bind a catalog entry to a live model through its provider.
 pub(crate) fn bind_model_info(
     providers: &ProviderRegistry,
     model_info: &ModelInfo,

@@ -52,9 +52,9 @@ pub trait Provider: Send + Sync {
     }
 }
 
-/// Every provider Alan can bind, in two tracks: the built-ins fixed at
-/// startup, and the custom providers `/provider` adds and removes while Alan
-/// runs. The custom track keeps their type so an edit can reach them.
+/// Every provider a model can bind to, in two tracks: the built-ins fixed at
+/// construction, and custom providers added and removed at runtime. The
+/// custom track keeps their type so an edit can reach them.
 pub struct ProviderRegistry {
     builtin: Vec<Arc<dyn Provider>>,
     custom: RwLock<Vec<Arc<CustomProvider>>>,
