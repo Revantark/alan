@@ -21,8 +21,8 @@ const PROVIDERS_KEY: &str = "providers";
 
 /// A custom provider's name, and its id in `/models`, `auth.json`,
 /// `settings.json` and `ALAN_PROVIDER`.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(try_from = "String", into = "String")]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(try_from = "String")]
 pub struct ProviderName(String);
 
 impl ProviderName {
@@ -50,19 +50,13 @@ impl TryFrom<String> for ProviderName {
     }
 }
 
-impl From<ProviderName> for String {
-    fn from(name: ProviderName) -> Self {
-        name.0
-    }
-}
-
 impl fmt::Display for ProviderName {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.0)
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CustomProviderEntry {
     pub name: ProviderName,
     pub url: String,
@@ -168,12 +162,10 @@ impl CustomProviders {
     pub async fn load(&self) -> Result<Vec<String>> {
         let mut notices = Vec::new();
         for entry in self.store.load_each().await? {
-            let entry = match entry {
-                Ok(entry) => entry,
-                Err(error) => {
-                    tracing::warn!(%error, "skipping an unreadable entry in providers.json");
-                    continue;
-                }
+            let Ok(entry) = entry.inspect_err(|error| {
+                tracing::warn!(%error, "skipping an unreadable entry in providers.json");
+            }) else {
+                continue;
             };
             // The name, and its key slot in `auth.json`, now belong to the
             // built-in, so only the entry goes.

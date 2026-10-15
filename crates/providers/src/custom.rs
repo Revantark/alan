@@ -72,10 +72,7 @@ impl CustomProvider {
     }
 
     fn base_url(&self) -> String {
-        self.base_url
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone()
+        current(&self.base_url)
     }
 }
 
@@ -89,12 +86,7 @@ struct LiveUrlApi {
 #[async_trait]
 impl LlmApi for LiveUrlApi {
     async fn stream(&self, request: LlmRequest<'_>) -> Result<LlmStream, LlmError> {
-        let base_url = self
-            .base_url
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone();
-        ChatCompletionsApi::new(base_url, Arc::clone(&self.http))
+        ChatCompletionsApi::new(current(&self.base_url), Arc::clone(&self.http))
             .stream(request)
             .await
     }
@@ -160,6 +152,10 @@ impl Provider for CustomProvider {
         *self.models.write().unwrap_or_else(|e| e.into_inner()) = models;
         Ok(())
     }
+}
+
+fn current(base_url: &RwLock<String>) -> String {
+    base_url.read().unwrap_or_else(|e| e.into_inner()).clone()
 }
 
 /// Reads the provider's key from the credential store. Without one, requests

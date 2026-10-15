@@ -28,7 +28,7 @@ enum Mode {
     Edit,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Default)]
 struct FormFields {
     name: String,
     url: String,
@@ -36,15 +36,6 @@ struct FormFields {
 }
 
 impl FormFields {
-    fn field(&self, index: usize) -> &str {
-        match index {
-            NAME => &self.name,
-            URL => &self.url,
-            API_KEY => &self.api_key,
-            _ => "",
-        }
-    }
-
     fn submission(&self) -> anyhow::Result<Submission> {
         let name = ProviderName::parse(&self.name)?;
         let url = self.url.trim();
@@ -59,14 +50,13 @@ impl FormFields {
 }
 
 /// What the form sends once its fields parse.
-#[derive(Debug)]
 struct Submission {
     name: ProviderName,
     url: String,
     key: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 enum OverlayState {
     Editing,
     Checking,
@@ -95,13 +85,14 @@ pub struct ProviderOverlay {
 
 impl ProviderOverlay {
     pub fn add(providers: Arc<CustomProviders>) -> Self {
-        Self::new(
+        Self {
             providers,
-            Mode::Add,
-            ApiId::ChatCompletions,
-            FormFields::default(),
-            NAME,
-        )
+            mode: Mode::Add,
+            api: ApiId::ChatCompletions,
+            fields: FormFields::default(),
+            focused: NAME,
+            state: OverlayState::Editing,
+        }
     }
 
     /// The name is fixed: `auth.json`, `settings.json` and profiles refer to
@@ -111,28 +102,16 @@ impl ProviderOverlay {
         entry: CustomProviderEntry,
         key: Option<String>,
     ) -> Self {
-        let fields = FormFields {
-            name: entry.name.to_string(),
-            url: entry.url,
-            api_key: key.unwrap_or_default(),
-        };
-        Self::new(providers, Mode::Edit, entry.api, fields, URL)
-    }
-
-    fn new(
-        providers: Arc<CustomProviders>,
-        mode: Mode,
-        api: ApiId,
-        fields: FormFields,
-        focused: usize,
-    ) -> Self {
         Self {
-            providers,
-            mode,
-            api,
-            fields,
-            focused,
-            state: OverlayState::Editing,
+            mode: Mode::Edit,
+            api: entry.api,
+            fields: FormFields {
+                name: entry.name.to_string(),
+                url: entry.url,
+                api_key: key.unwrap_or_default(),
+            },
+            focused: URL,
+            ..Self::add(providers)
         }
     }
 
@@ -375,12 +354,13 @@ fn render_fields(
         } else {
             Style::default().fg(theme::EDITOR_FG)
         };
+        let text = if i == NAME { &fields.name } else { &fields.url };
         let value = match i {
             API => Span::styled("Chat Completions", value_style),
             API_KEY if fields.api_key.is_empty() => Span::styled("optional", muted),
             API_KEY => Span::styled("•".repeat(fields.api_key.chars().count()), value_style),
-            _ if fields.field(i).is_empty() => Span::styled("required", muted),
-            _ => Span::styled(fields.field(i), value_style),
+            _ if text.is_empty() => Span::styled("required", muted),
+            _ => Span::styled(text.as_str(), value_style),
         };
         let mut spans = vec![
             Span::styled(if is_focused { " › " } else { "   " }, accent),
