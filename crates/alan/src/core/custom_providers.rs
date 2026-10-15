@@ -8,10 +8,9 @@ use providers::{
     fetch_catalog,
 };
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use std::fmt;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use crate::core::paths;
 use crate::core::store::JsonStore;
@@ -25,7 +24,7 @@ const RESERVED_NAMES: [&str; 4] = ["openrouter", "deepseek", "zai", "google"];
 
 /// A custom provider's name, and its id in `/models`, `auth.json`,
 /// `settings.json` and `ALAN_PROVIDER`.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
 pub struct ProviderName(String);
 
@@ -142,8 +141,6 @@ pub struct CustomProviders {
     store: CustomProviderStore,
     registry: Arc<ProviderRegistry>,
     credentials: Arc<dyn CredentialStore>,
-    /// The registered instances, typed, so an edit can update one in place.
-    registered: Mutex<HashMap<ProviderName, Arc<CustomProvider>>>,
 }
 
 impl CustomProviders {
@@ -156,7 +153,6 @@ impl CustomProviders {
             store,
             registry,
             credentials,
-            registered: Mutex::new(HashMap::new()),
         }
     }
 
@@ -212,11 +208,7 @@ impl CustomProviders {
         );
         self.store.remove(name).await?;
         self.credentials.delete(&name.id()).await?;
-        self.registered
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .remove(name);
-        self.registry.remove(&name.id());
+        self.registry.remove_custom(&name.id());
         Ok(())
     }
 
@@ -241,21 +233,18 @@ impl CustomProviders {
     }
 
     fn register(&self, entry: &CustomProviderEntry, models: Vec<ModelInfo>) {
-        let mut registered = self.registered.lock().unwrap_or_else(|e| e.into_inner());
         // A bound model keeps its provider's API client: replacing the
         // provider on an edit would leave the running model on the old URL.
-        if let Some(provider) = registered.get(&entry.name) {
+        if let Some(provider) = self.registry.custom(&entry.name.id()) {
             provider.set_base_url(entry.url.clone());
             return;
         }
-        let provider = Arc::new(CustomProvider::new(
+        self.registry.add_custom(Arc::new(CustomProvider::new(
             entry.name.id(),
             entry.url.clone(),
             Arc::clone(&self.credentials),
             models,
-        ));
-        registered.insert(entry.name.clone(), Arc::clone(&provider));
-        self.registry.insert(provider);
+        )));
     }
 }
 
@@ -490,7 +479,7 @@ mod tests {
     #[tokio::test]
     async fn add_refuses_a_taken_name_before_any_request() {
         let (providers, registry, credentials) = service("taken");
-        registry.insert(Arc::new(CustomProvider::new(
+        registry.add_custom(Arc::new(CustomProvider::new(
             name("taken").id(),
             "http://localhost:1/v1",
             credentials,
