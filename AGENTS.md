@@ -58,13 +58,19 @@ settings for future launches; manual settings changes clear its active-profile
 marker. Profiles are stored separately in `<data dir>/profiles.json`. See
 `core::paths` for how the data directory is resolved.
 
-`build_providers` in `crates/alan/src/main.rs` lists the registered providers.
-The `providers` crate also has a Google provider that is not registered. Sign in
-with `/login`, or set the provider's API key variable:
+`build_providers` in `crates/alan/src/main.rs` lists the built-in providers.
+The `providers` crate also has a Google provider that is not registered. Sign
+in with `/login`, or set the provider's API key variable:
 
 ```bash
 OPENROUTER_API_KEY=... cargo run -p alan
 ```
+
+`ProviderRegistry` keeps two tracks: the built-ins from `build_providers`, fixed
+at startup, and the custom providers added with `/provider add`. Custom
+providers live in `core::custom_providers`: name, URL and API standard
+(`ApiId`) in `<data dir>/providers.json`, key only in `auth.json`, registered
+as `providers::CustomProvider`. Only `ApiId::ChatCompletions` is implemented.
 
 Optional model override:
 
@@ -143,7 +149,7 @@ auto-includes it in release archives.
 
 `ChatView` (`views/components/chat_view/`) owns the chat session: the
 `ChatController` and the agent stream. `PromptEditor` owns input. Overlays
-such as login and local models live beside `root.rs`.
+such as login and providers live beside `root.rs`.
 
 Keep UI simple. Avoid borders, unnecessary widgets, and premature abstraction.
 

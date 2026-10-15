@@ -66,18 +66,6 @@ impl AuthResolver for ApiKeyAuth {
     }
 }
 
-pub struct NoAuth;
-
-#[async_trait]
-impl AuthResolver for NoAuth {
-    async fn resolve(&self) -> Result<Resolved, AuthError> {
-        Ok(Resolved {
-            credential: RequestCredential::None,
-            headers: Vec::new(),
-        })
-    }
-}
-
 pub struct CredentialAuth {
     provider: ProviderId,
     store: Arc<dyn CredentialStore>,
