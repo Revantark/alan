@@ -17,11 +17,6 @@ use crate::core::store::JsonStore;
 
 const PROVIDERS_KEY: &str = "providers";
 
-/// Built-in provider ids, plus `google`, which the providers crate has but
-/// Alan does not register yet. A custom provider may not take one: its key
-/// would overwrite the built-in provider's in `auth.json`.
-const RESERVED_NAMES: [&str; 4] = ["openrouter", "deepseek", "zai", "google"];
-
 /// A custom provider's name, and its id in `/models`, `auth.json`,
 /// `settings.json` and `ALAN_PROVIDER`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -36,10 +31,6 @@ impl ProviderName {
             name.chars()
                 .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-'),
             "name may only contain lowercase letters, digits and -"
-        );
-        anyhow::ensure!(
-            !RESERVED_NAMES.contains(&name),
-            "{name} is a built-in provider"
         );
         Ok(Self(name.to_owned()))
     }
@@ -189,9 +180,14 @@ impl CustomProviders {
         url: &str,
         key: Option<String>,
     ) -> Result<usize> {
+        // A built-in's key in `auth.json` sits under the same name.
         anyhow::ensure!(
-            self.registry.get(&name.id()).is_none(),
-            "provider already exists: {name}"
+            !self.registry.is_builtin(&name.id()),
+            "{name} is a built-in provider; pick another name, e.g. {name}-2"
+        );
+        anyhow::ensure!(
+            self.registry.custom(&name.id()).is_none(),
+            "{name} already exists; change it with /provider edit"
         );
         self.save(name, api, url, key).await
     }
@@ -368,19 +364,46 @@ mod tests {
     }
 
     #[test]
-    fn provider_name_rejects_bad_and_reserved_names() {
-        for bad in [
-            "",
-            "Grok",
-            "my groq",
-            "groq!",
-            "openrouter",
-            "deepseek",
-            "zai",
-            "google",
-        ] {
+    fn provider_name_rejects_bad_characters() {
+        for bad in ["", "Grok", "my groq", "groq!"] {
             assert!(ProviderName::parse(bad).is_err(), "{bad:?} was accepted");
         }
+    }
+
+    #[tokio::test]
+    async fn add_refuses_a_builtin_name_before_any_request() {
+        let deepseek = CustomProvider::new(
+            name("deepseek").id(),
+            ApiId::ChatCompletions,
+            "http://localhost:1/v1",
+            Arc::new(InMemoryCredentialStore::new()),
+            Vec::new(),
+        )
+        .unwrap();
+        let registry = Arc::new(ProviderRegistry::new([
+            Arc::new(deepseek) as Arc<dyn providers::Provider>
+        ]));
+        let providers = CustomProviders::new(
+            CustomProviderStore::new(temp_path("builtin")),
+            registry,
+            Arc::new(InMemoryCredentialStore::new()),
+        );
+
+        // Port 1 is closed: reaching the network would say "could not connect".
+        let error = providers
+            .add(
+                name("deepseek"),
+                ApiId::ChatCompletions,
+                "http://127.0.0.1:1/v1",
+                None,
+            )
+            .await
+            .unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "deepseek is a built-in provider; pick another name, e.g. deepseek-2"
+        );
     }
 
     #[tokio::test]
@@ -530,7 +553,10 @@ mod tests {
             .await
             .unwrap_err();
 
-        assert_eq!(error.to_string(), "provider already exists: taken");
+        assert_eq!(
+            error.to_string(),
+            "taken already exists; change it with /provider edit"
+        );
     }
 
     #[tokio::test]
