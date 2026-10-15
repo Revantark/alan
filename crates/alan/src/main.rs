@@ -63,9 +63,13 @@ async fn main() -> anyhow::Result<()> {
         Arc::clone(&registry),
         Arc::clone(&credential_store_for_providers),
     ));
-    if let Err(error) = custom_providers.load().await {
-        tracing::warn!(%error, "failed to load custom providers");
-    }
+    let startup_notices = match custom_providers.load().await {
+        Ok(notices) => notices,
+        Err(error) => {
+            tracing::warn!(%error, "failed to load custom providers");
+            Vec::new()
+        }
+    };
     let session_manager = Arc::new(SessionManager::new(sessions_path()?));
     let resumed_session = load_resumed_session(&session_manager).await?;
     let model = select_model(&registry, &settings, resumed_session.as_ref())?;
@@ -98,6 +102,9 @@ async fn main() -> anyhow::Result<()> {
 
     if was_resumed {
         controller.restore_session_history().await;
+    }
+    for notice in startup_notices {
+        controller.push_info(notice);
     }
 
     // `Runtime::run` consumes the root, so keep the agent for the saved-session

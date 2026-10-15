@@ -83,6 +83,16 @@ impl CustomProviderStore {
         decode(self.store.get(PROVIDERS_KEY).await?)
     }
 
+    /// Each saved entry on its own, so one that does not parse leaves the
+    /// rest readable.
+    pub async fn load_each(&self) -> Result<Vec<serde_json::Result<CustomProviderEntry>>> {
+        let Some(value) = self.store.get(PROVIDERS_KEY).await? else {
+            return Ok(Vec::new());
+        };
+        let values: Vec<serde_json::Value> = serde_json::from_value(value)?;
+        Ok(values.into_iter().map(serde_json::from_value).collect())
+    }
+
     /// Save `entry`, replacing a saved provider with the same name.
     pub async fn put(&self, entry: CustomProviderEntry) -> Result<()> {
         self.store
@@ -148,13 +158,31 @@ impl CustomProviders {
         }
     }
 
-    /// Register every saved provider. Their models are fetched the next time
-    /// `/models` opens.
-    pub async fn load(&self) -> Result<()> {
-        for entry in self.store.load().await? {
-            self.register(&entry, Vec::new())?;
+    /// Register every saved provider Alan can use; their models are fetched
+    /// the next time `/models` opens. Entries it cannot read or bind are
+    /// skipped. Returns a notice for each entry a built-in now takes the name of.
+    pub async fn load(&self) -> Result<Vec<String>> {
+        let mut notices = Vec::new();
+        for entry in self.store.load_each().await? {
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(error) => {
+                    tracing::warn!(%error, "skipping an unreadable entry in providers.json");
+                    continue;
+                }
+            };
+            if self.registry.is_builtin(&entry.name.id()) {
+                notices.push(format!(
+                    "custom provider {} clashes with a built-in; remove it and add it under another name",
+                    entry.name
+                ));
+                continue;
+            }
+            if let Err(error) = self.register(&entry, Vec::new()) {
+                tracing::warn!(%error, provider = %entry.name, "skipping a custom provider");
+            }
         }
-        Ok(())
+        Ok(notices)
     }
 
     pub async fn entries(&self) -> Result<Vec<CustomProviderEntry>> {
@@ -657,6 +685,82 @@ mod tests {
         assert!(error.to_string().contains("in use"), "{error:#}");
         assert_eq!(providers.entries().await.unwrap().len(), 1);
         cleanup("remove-active");
+    }
+
+    #[tokio::test]
+    async fn load_skips_entries_it_cannot_use_and_keeps_the_rest() {
+        let path = temp_path("load-skips");
+        JsonStore::new(path.clone())
+            .set(
+                PROVIDERS_KEY,
+                json!([
+                    {"name": "grok", "url": "http://localhost:1/v1", "api": "ChatCompletions"},
+                    {"name": "Bad Name", "url": "http://x", "api": "ChatCompletions"},
+                    {"name": "newer", "url": "http://x", "api": "SomeFutureStandard"},
+                    {"name": "claude", "url": "http://x", "api": "AnthropicMessages"}
+                ]),
+            )
+            .await
+            .unwrap();
+        let registry = Arc::new(ProviderRegistry::new([]));
+        let providers = CustomProviders::new(
+            CustomProviderStore::new(path),
+            Arc::clone(&registry),
+            Arc::new(InMemoryCredentialStore::new()),
+        );
+
+        let notices = providers.load().await.unwrap();
+
+        assert!(notices.is_empty(), "{notices:?}");
+        let ids: Vec<_> = registry.providers().iter().map(|p| p.id().0).collect();
+        assert_eq!(ids, ["grok"]);
+        cleanup("load-skips");
+    }
+
+    #[tokio::test]
+    async fn load_skips_a_name_a_builtin_now_uses_and_says_so() {
+        let path = temp_path("load-clash");
+        let store = CustomProviderStore::new(path.clone());
+        for n in ["openai", "grok"] {
+            store
+                .put(CustomProviderEntry {
+                    name: name(n),
+                    url: "http://localhost:1/v1".into(),
+                    api: ApiId::ChatCompletions,
+                })
+                .await
+                .unwrap();
+        }
+        let openai = CustomProvider::new(
+            name("openai").id(),
+            ApiId::ChatCompletions,
+            "http://localhost:1/v1",
+            Arc::new(InMemoryCredentialStore::new()),
+            Vec::new(),
+        )
+        .unwrap();
+        let registry = Arc::new(ProviderRegistry::new([
+            Arc::new(openai) as Arc<dyn providers::Provider>
+        ]));
+        let providers = CustomProviders::new(
+            CustomProviderStore::new(path),
+            Arc::clone(&registry),
+            Arc::new(InMemoryCredentialStore::new()),
+        );
+
+        let notices = providers.load().await.unwrap();
+
+        assert_eq!(
+            notices,
+            [
+                "custom provider openai clashes with a built-in; remove it and add it under another name"
+            ]
+        );
+        assert!(registry.custom(&name("openai").id()).is_none());
+        assert!(registry.custom(&name("grok").id()).is_some());
+        // Still listed, so /provider remove can delete it.
+        assert_eq!(providers.entries().await.unwrap().len(), 2);
+        cleanup("load-clash");
     }
 
     #[tokio::test]
