@@ -58,11 +58,11 @@ async fn main() -> anyhow::Result<()> {
     let providers = build_providers(&credential_store_for_providers)?;
     let registry = Arc::new(ProviderRegistry::new(providers));
 
-    let custom_providers = Arc::new(CustomProviders::new(
+    let custom_providers = CustomProviders::new(
         CustomProviderStore::new(custom_providers::default_providers_path()?),
         Arc::clone(&registry),
         Arc::clone(&credential_store_for_providers),
-    ));
+    );
     let startup_notices = match custom_providers.load().await {
         Ok(notices) => notices,
         Err(error) => {
@@ -114,7 +114,6 @@ async fn main() -> anyhow::Result<()> {
         controller,
         registry,
         credential_store,
-        custom_providers,
         permission_handler,
         policy,
         skill_roots,

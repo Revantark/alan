@@ -189,7 +189,7 @@ pub(crate) fn handle_provider_command(
     let args = SlashCommand::parse_with_args(text).map(|(_, a)| a.trim().to_owned());
     match args.as_deref() {
         Some("add") => {
-            cx.open_overlay(ProviderOverlay::add(Arc::clone(&view.custom_providers)));
+            cx.open_overlay(ProviderOverlay::add(view.custom_providers()));
         }
         Some("edit") => open_provider_picker(view, cx, ProviderPick::Edit),
         Some("remove") => open_provider_picker(view, cx, ProviderPick::Remove),
@@ -205,7 +205,7 @@ fn open_provider_picker(
     cx: &mut Context<'_, ChatView, AlanAction>,
     pick: ProviderPick,
 ) {
-    let providers = Arc::clone(&view.custom_providers);
+    let providers = view.custom_providers();
     cx.spawn(
         async move { providers.entries().await.map_err(super::to_task) },
         move |result, view, cx| {
@@ -257,7 +257,7 @@ fn edit_provider(
     cx: &mut Context<'_, ChatView, AlanAction>,
     entry: CustomProviderEntry,
 ) {
-    let providers = Arc::clone(&view.custom_providers);
+    let providers = view.custom_providers();
     cx.spawn(
         async move {
             let key = providers.key(&entry.name).await.map_err(super::to_task)?;
@@ -265,11 +265,7 @@ fn edit_provider(
         },
         move |result, view, cx| match result {
             Ok((entry, key)) => {
-                cx.open_overlay(ProviderOverlay::edit(
-                    Arc::clone(&view.custom_providers),
-                    entry,
-                    key,
-                ));
+                cx.open_overlay(ProviderOverlay::edit(view.custom_providers(), entry, key));
             }
             Err(error) => {
                 view.controller
@@ -309,7 +305,7 @@ fn remove_idle_provider(
     name: ProviderName,
     active: ProviderId,
 ) {
-    let providers = Arc::clone(&view.custom_providers);
+    let providers = view.custom_providers();
     cx.spawn(
         async move {
             providers

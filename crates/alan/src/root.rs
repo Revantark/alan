@@ -21,7 +21,6 @@ use std::path::PathBuf;
 
 use crate::core::ImageAttachment;
 use crate::core::chat::ChatController;
-use crate::core::custom_providers::CustomProviders;
 use crate::core::permissions::Answer;
 use crate::core::permissions::PermissionHandler;
 use crate::core::permissions::ToolPolicy;
@@ -67,7 +66,6 @@ pub struct PromptSubmission {
 pub struct AlanRoot {
     providers: Arc<ProviderRegistry>,
     credentials: Arc<dyn CredentialStore>,
-    custom_providers: Arc<CustomProviders>,
     /// Tool-permission request handler routed to the chat view.
     permission_handler: PermissionHandler,
     /// Tool-permission policy, shared with the permission manager.
@@ -88,7 +86,6 @@ impl AlanRoot {
         chat: ChatController,
         providers: Arc<ProviderRegistry>,
         credentials: Arc<dyn CredentialStore>,
-        custom_providers: Arc<CustomProviders>,
         permission_handler: PermissionHandler,
         policy: ToolPolicy,
         skill_roots: Vec<PathBuf>,
@@ -96,7 +93,6 @@ impl AlanRoot {
         Self {
             providers,
             credentials,
-            custom_providers,
             permission_handler,
             policy,
             skill_roots,
@@ -147,7 +143,7 @@ impl Component<AlanAction> for AlanRoot {
                 .take()
                 .expect("chat component installed once"),
             Arc::clone(&self.providers),
-            Arc::clone(&self.custom_providers),
+            Arc::clone(&self.credentials),
             self.permission_handler.clone(),
             self.policy.clone(),
             self.skill_roots.clone(),

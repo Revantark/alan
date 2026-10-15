@@ -13,7 +13,7 @@ mod session;
 mod steering;
 
 use crate::core::chat::ChatController;
-use crate::core::custom_providers::CustomProviders;
+use crate::core::custom_providers::{self, CustomProviderStore, CustomProviders};
 use crate::core::permissions::PermissionHandler;
 use crate::core::permissions::PermissionRequest;
 use crate::core::permissions::{Answer, Policy, ToolPolicy};
@@ -30,7 +30,7 @@ use alan_tui::entity::Entity;
 use alan_tui::{Subscription, SubscriptionEvent};
 use crossterm::event::{Event, KeyCode, KeyEventKind};
 use futures_util::Stream;
-use providers::ProviderRegistry;
+use providers::{CredentialStore, ProviderRegistry};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::Style;
@@ -73,7 +73,7 @@ pub struct ChatView {
     permission: Option<Entity<permissions::PermissionPrompt>>,
 
     providers: Arc<ProviderRegistry>,
-    custom_providers: Arc<CustomProviders>,
+    credentials: Arc<dyn CredentialStore>,
     permission_handler: PermissionHandler,
     policy: ToolPolicy,
     /// Subscription to the permission-request stream.
@@ -93,7 +93,7 @@ impl ChatView {
     pub fn new(
         controller: ChatController,
         providers: Arc<ProviderRegistry>,
-        custom_providers: Arc<CustomProviders>,
+        credentials: Arc<dyn CredentialStore>,
         permission_handler: PermissionHandler,
         policy: ToolPolicy,
         skill_roots: Vec<PathBuf>,
@@ -106,7 +106,7 @@ impl ChatView {
             pending_permission: None,
             permission: None,
             providers,
-            custom_providers,
+            credentials,
             permission_handler,
             policy,
             permission_subscription: None,
@@ -117,6 +117,18 @@ impl ChatView {
             skills: Vec::new(),
             skill_roots,
         }
+    }
+
+    /// What `/provider` saves through. It holds only handles, so a fresh one
+    /// sees the same providers as the one `main.rs` loaded them with.
+    fn custom_providers(&self) -> Arc<CustomProviders> {
+        let path = custom_providers::default_providers_path()
+            .expect("main.rs resolved the data directory at startup");
+        Arc::new(CustomProviders::new(
+            CustomProviderStore::new(path),
+            Arc::clone(&self.providers),
+            Arc::clone(&self.credentials),
+        ))
     }
 
     fn set_tool_policy(&mut self, policy: Policy, cx: &mut Context<'_, Self, AlanAction>) {
