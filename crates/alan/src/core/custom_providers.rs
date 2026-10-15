@@ -308,7 +308,7 @@ impl CustomProviders {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::core::store::JsonStore;
     use providers::{CredentialError, CredentialInfo, InMemoryCredentialStore};
@@ -318,27 +318,39 @@ mod tests {
     const OK_TWO_MODELS: &str =
         "HTTP/1.1 200 OK\r\nconnection: close\r\n\r\n{\"data\":[{\"id\":\"m1\"},{\"id\":\"m2\"}]}";
 
-    fn store_path(name: &str) -> PathBuf {
-        temp_dir().join(format!(
+    fn temp_path(name: &str) -> PathBuf {
+        let path = temp_dir().join(format!(
             "alan-custom-providers-test-{}-{name}.json",
             std::process::id()
-        ))
-    }
-
-    fn temp_path(name: &str) -> PathBuf {
-        let path = store_path(name);
+        ));
         let _ = std::fs::remove_file(&path);
         path
     }
 
     fn cleanup(name: &str) {
-        let path = store_path(name);
-        let _ = std::fs::remove_file(&path);
+        let path = temp_path(name);
         let _ = std::fs::remove_file(format!("{}.lock", path.display()));
     }
 
     fn name(value: &str) -> ProviderName {
         ProviderName::parse(value).unwrap()
+    }
+
+    pub(crate) fn provider(id: &str, models: &[&str]) -> Arc<CustomProvider> {
+        let models = models
+            .iter()
+            .map(|model| ModelInfo::new(model, ProviderId::new(id)))
+            .collect();
+        Arc::new(
+            CustomProvider::new(
+                ProviderId::new(id),
+                ApiId::ChatCompletions,
+                "http://localhost:1/v1",
+                Arc::new(InMemoryCredentialStore::new()),
+                models,
+            )
+            .unwrap(),
+        )
     }
 
     fn service(
@@ -358,29 +370,11 @@ mod tests {
         (providers, registry, credentials)
     }
 
-    // one-shot server: replies `response`.
-    async fn serve_once(response: &'static str) -> String {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
-            .await
-            .unwrap();
-        let address = listener.local_addr().unwrap();
-        tokio::spawn(async move {
-            let (mut socket, _) = listener.accept().await.unwrap();
-            let mut request = Vec::new();
-            let mut buffer = [0; 4096];
-            while !request.windows(4).any(|window| window == b"\r\n\r\n") {
-                let read = socket.read(&mut buffer).await.unwrap();
-                assert!(read > 0);
-                request.extend_from_slice(&buffer[..read]);
-            }
-            socket.write_all(response.as_bytes()).await.unwrap();
-        });
-        format!("http://{address}/v1/")
-    }
-
-    // Replies `OK_TWO_MODELS` to `count` connections, hands back each request.
-    async fn serve_many(count: usize) -> (String, tokio::task::JoinHandle<Vec<String>>) {
+    // Replies `response` to `count` connections, hands back each request.
+    async fn serve(
+        response: &'static str,
+        count: usize,
+    ) -> (String, tokio::task::JoinHandle<Vec<String>>) {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
             .await
@@ -397,7 +391,7 @@ mod tests {
                     assert!(read > 0);
                     request.extend_from_slice(&buffer[..read]);
                 }
-                socket.write_all(OK_TWO_MODELS.as_bytes()).await.unwrap();
+                socket.write_all(response.as_bytes()).await.unwrap();
                 requests.push(String::from_utf8(request).unwrap());
             }
             requests
@@ -419,16 +413,8 @@ mod tests {
 
     #[tokio::test]
     async fn add_refuses_a_builtin_name_before_any_request() {
-        let deepseek = CustomProvider::new(
-            name("deepseek").id(),
-            ApiId::ChatCompletions,
-            "http://localhost:1/v1",
-            Arc::new(InMemoryCredentialStore::new()),
-            Vec::new(),
-        )
-        .unwrap();
         let registry = Arc::new(ProviderRegistry::new([
-            Arc::new(deepseek) as Arc<dyn providers::Provider>
+            provider("deepseek", &[]) as Arc<dyn providers::Provider>
         ]));
         let providers = CustomProviders::new(
             CustomProviderStore::new(temp_path("builtin")),
@@ -530,8 +516,8 @@ mod tests {
 
     #[tokio::test]
     async fn add_checks_then_saves_entry_key_and_provider() {
-        let (providers, registry, credentials) = service("add");
-        let url = serve_once(OK_TWO_MODELS).await;
+        let (providers, registry, _credentials) = service("add");
+        let url = serve(OK_TWO_MODELS, 1).await.0;
 
         let count = providers
             .add(
@@ -551,13 +537,6 @@ mod tests {
             providers.key(&name("grok")).await.unwrap().as_deref(),
             Some("sk")
         );
-        assert!(
-            credentials
-                .read(&name("grok").id())
-                .await
-                .unwrap()
-                .is_some()
-        );
         let provider = registry.get(&name("grok").id()).unwrap();
         assert_eq!(provider.models().len(), 2);
         cleanup("add");
@@ -566,7 +545,12 @@ mod tests {
     #[tokio::test]
     async fn add_saves_nothing_when_the_check_fails() {
         let (providers, registry, credentials) = service("add-fails");
-        let url = serve_once("HTTP/1.1 401 Unauthorized\r\nconnection: close\r\n\r\n{}").await;
+        let url = serve(
+            "HTTP/1.1 401 Unauthorized\r\nconnection: close\r\n\r\n{}",
+            1,
+        )
+        .await
+        .0;
 
         let error = providers
             .add(
@@ -593,17 +577,8 @@ mod tests {
 
     #[tokio::test]
     async fn add_refuses_a_taken_name_before_any_request() {
-        let (providers, registry, credentials) = service("taken");
-        registry.add_custom(Arc::new(
-            CustomProvider::new(
-                name("taken").id(),
-                ApiId::ChatCompletions,
-                "http://localhost:1/v1",
-                credentials,
-                Vec::new(),
-            )
-            .unwrap(),
-        ));
+        let (providers, registry, _credentials) = service("taken");
+        registry.add_custom(provider("taken", &[]));
 
         // Port 1 is closed: reaching the network would say "could not connect".
         let error = providers
@@ -625,7 +600,7 @@ mod tests {
     #[tokio::test]
     async fn add_leaves_no_key_when_providers_json_cannot_be_written() {
         // A directory where the file should be: every read and write fails.
-        let path = store_path("unwritable");
+        let path = temp_path("unwritable");
         std::fs::create_dir_all(&path).unwrap();
         let credentials = Arc::new(InMemoryCredentialStore::new());
         let providers = CustomProviders::new(
@@ -633,7 +608,7 @@ mod tests {
             Arc::new(ProviderRegistry::new([])),
             credentials.clone(),
         );
-        let url = serve_once(OK_TWO_MODELS).await;
+        let url = serve(OK_TWO_MODELS, 1).await.0;
 
         let result = providers
             .add(
@@ -658,15 +633,14 @@ mod tests {
 
     #[tokio::test]
     async fn add_takes_the_entry_back_when_the_key_cannot_be_saved() {
-        let (providers_json, credentials) = (store_path("key-fails"), Arc::new(FailingKeys));
-        let _ = std::fs::remove_file(&providers_json);
+        let (providers_json, credentials) = (temp_path("key-fails"), Arc::new(FailingKeys));
         let registry = Arc::new(ProviderRegistry::new([]));
         let providers = CustomProviders::new(
             CustomProviderStore::new(providers_json),
             Arc::clone(&registry),
             credentials,
         );
-        let url = serve_once(OK_TWO_MODELS).await;
+        let url = serve(OK_TWO_MODELS, 1).await.0;
 
         let result = providers
             .add(
@@ -712,7 +686,7 @@ mod tests {
             .put(&name("grok").id(), Credential::ApiKey { key: "old".into() })
             .await
             .unwrap();
-        let url = serve_once(OK_TWO_MODELS).await;
+        let url = serve(OK_TWO_MODELS, 1).await.0;
 
         providers
             .update(name("grok"), ApiId::ChatCompletions, &url, None)
@@ -726,7 +700,7 @@ mod tests {
     #[tokio::test]
     async fn update_moves_models_already_bound_to_the_new_url() {
         let (providers, registry, _credentials) = service("edit-bound");
-        let old_url = serve_once(OK_TWO_MODELS).await;
+        let old_url = serve(OK_TWO_MODELS, 1).await.0;
         providers
             .add(name("grok"), ApiId::ChatCompletions, &old_url, None)
             .await
@@ -735,7 +709,7 @@ mod tests {
         let model = providers::bind_model(provider.as_ref(), "m1", Default::default()).unwrap();
 
         // The new server answers the edit's check, then the chat request.
-        let (new_url, server) = serve_many(2).await;
+        let (new_url, server) = serve(OK_TWO_MODELS, 2).await;
         providers
             .update(name("grok"), ApiId::ChatCompletions, &new_url, None)
             .await
@@ -764,7 +738,7 @@ mod tests {
     #[tokio::test]
     async fn remove_deletes_entry_key_and_provider() {
         let (providers, registry, _credentials) = service("remove-all");
-        let url = serve_once(OK_TWO_MODELS).await;
+        let url = serve(OK_TWO_MODELS, 1).await.0;
         providers
             .add(
                 name("grok"),
@@ -810,6 +784,14 @@ mod tests {
         assert!(notices.is_empty(), "{notices:?}");
         let ids: Vec<_> = registry.providers().iter().map(|p| p.id().0).collect();
         assert_eq!(ids, ["grok"]);
+        // Models come with the first `/models`, not at startup.
+        assert!(
+            registry
+                .get(&name("grok").id())
+                .unwrap()
+                .models()
+                .is_empty()
+        );
         cleanup("load-skips");
     }
 
@@ -835,16 +817,8 @@ mod tests {
             )
             .await
             .unwrap();
-        let openai = CustomProvider::new(
-            name("openai").id(),
-            ApiId::ChatCompletions,
-            "http://localhost:1/v1",
-            Arc::new(InMemoryCredentialStore::new()),
-            Vec::new(),
-        )
-        .unwrap();
         let registry = Arc::new(ProviderRegistry::new([
-            Arc::new(openai) as Arc<dyn providers::Provider>
+            provider("openai", &[]) as Arc<dyn providers::Provider>
         ]));
         let providers = CustomProviders::new(
             CustomProviderStore::new(path),
@@ -879,30 +853,5 @@ mod tests {
                 .is_some()
         );
         cleanup("load-clash");
-    }
-
-    #[tokio::test]
-    async fn load_registers_saved_providers_without_fetching() {
-        let path = temp_path("load");
-        CustomProviderStore::new(path.clone())
-            .put(CustomProviderEntry {
-                name: name("grok"),
-                url: "http://localhost:1/v1".into(),
-                api: ApiId::ChatCompletions,
-            })
-            .await
-            .unwrap();
-        let registry = Arc::new(ProviderRegistry::new([]));
-        let providers = CustomProviders::new(
-            CustomProviderStore::new(path),
-            Arc::clone(&registry),
-            Arc::new(InMemoryCredentialStore::new()),
-        );
-
-        providers.load().await.unwrap();
-
-        let provider = registry.get(&name("grok").id()).unwrap();
-        assert!(provider.models().is_empty());
-        cleanup("load");
     }
 }

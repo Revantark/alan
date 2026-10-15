@@ -175,7 +175,7 @@ mod tests {
     }
 
     #[test]
-    fn get_finds_both_tracks_and_is_builtin_only_the_first() {
+    fn each_lookup_sees_the_right_track() {
         let registry = ProviderRegistry::new([builtin("openrouter")]);
         registry.add_custom(custom("grok", "grok-4"));
 
@@ -183,16 +183,7 @@ mod tests {
         assert!(registry.get(&ProviderId::new("grok")).is_some());
         assert!(registry.is_builtin(&ProviderId::new("openrouter")));
         assert!(!registry.is_builtin(&ProviderId::new("grok")));
-    }
-
-    #[test]
-    fn custom_returns_the_typed_provider_from_the_custom_track_only() {
-        let registry = ProviderRegistry::new([builtin("openrouter")]);
-        registry.add_custom(custom("grok", "grok-4"));
-
-        let grok = registry.custom(&ProviderId::new("grok")).unwrap();
-
-        assert_eq!(grok.models()[0].id, "grok-4");
+        assert!(registry.custom(&ProviderId::new("grok")).is_some());
         assert!(registry.custom(&ProviderId::new("openrouter")).is_none());
     }
 

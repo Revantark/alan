@@ -408,22 +408,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fetch_catalog_sends_key_to_models_path() {
-        let (url, server) = serve_once(TWO_MODELS).await;
-        let models = fetch_catalog(&id(), &ApiId::ChatCompletions, &url, Some("sk-test"))
-            .await
-            .unwrap();
-        assert_eq!(models.len(), 2);
-        let request = server.await.unwrap();
-        assert!(request.starts_with("GET /v1/models HTTP/1.1"), "{request}");
-        assert!(
-            request
-                .to_lowercase()
-                .contains("authorization: bearer sk-test")
-        );
-    }
-
-    #[tokio::test]
     async fn fetch_catalog_sends_no_auth_without_key() {
         let (url, server) = serve_once(TWO_MODELS).await;
         fetch_catalog(&id(), &ApiId::ChatCompletions, &url, None)
@@ -436,18 +420,6 @@ mod tests {
                 .to_lowercase()
                 .contains("authorization")
         );
-    }
-
-    #[tokio::test]
-    async fn fetch_catalog_reports_http_status() {
-        let (url, _server) = serve_once(
-            "HTTP/1.1 401 Unauthorized\r\nconnection: close\r\n\r\n{\"error\":\"Invalid API key\"}",
-        )
-        .await;
-        let error = fetch_catalog(&id(), &ApiId::ChatCompletions, &url, Some("bad"))
-            .await
-            .unwrap_err();
-        assert!(error.to_string().contains("401"), "{error}");
     }
 
     #[tokio::test]
@@ -494,10 +466,10 @@ mod tests {
                 .unwrap();
         provider.fetch_models().await.unwrap();
         assert_eq!(provider.models().len(), 2);
+        let request = server.await.unwrap();
+        assert!(request.starts_with("GET /v1/models HTTP/1.1"), "{request}");
         assert!(
-            server
-                .await
-                .unwrap()
+            request
                 .to_lowercase()
                 .contains("authorization: bearer sk-stored")
         );

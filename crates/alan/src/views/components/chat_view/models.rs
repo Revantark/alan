@@ -390,25 +390,13 @@ pub(crate) async fn persist_model(model_id: &str, provider_id: &ProviderId) -> a
 #[cfg(test)]
 mod tests {
     use super::*;
-    use providers::{CustomProvider, InMemoryCredentialStore, Provider};
-
-    fn provider(name: &str, model: &str) -> Arc<dyn Provider> {
-        Arc::new(
-            CustomProvider::new(
-                ProviderId::new(name),
-                providers::ApiId::ChatCompletions,
-                "http://localhost:11434/v1",
-                Arc::new(InMemoryCredentialStore::new()),
-                vec![ModelInfo::new(model, ProviderId::new(name))],
-            )
-            .unwrap(),
-        )
-    }
+    use crate::core::custom_providers::tests::provider;
 
     #[test]
     fn picker_models_hides_only_the_replaced_provider() {
-        let registry =
-            ProviderRegistry::new([provider("grok", "grok-4"), provider("groq", "llama")]);
+        let registry = ProviderRegistry::new([]);
+        registry.add_custom(provider("grok", &["grok-4"]));
+        registry.add_custom(provider("groq", &["llama"]));
 
         let all: Vec<_> = picker_models(&registry, None)
             .into_iter()
