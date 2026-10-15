@@ -217,7 +217,15 @@ impl CustomProviders {
             self.registry.custom(&name.id()).is_none(),
             "{name} already exists; change it with /provider edit"
         );
-        self.save(name, api, url, key).await
+        let (entry, models) = self.check(name, api, url, key.as_deref()).await?;
+        self.store.put(entry.clone()).await?;
+        if let Err(error) = self.save_key(&entry.name, key).await {
+            self.store.remove(&entry.name).await?;
+            return Err(error);
+        }
+        let count = models.len();
+        self.register(&entry, models)?;
+        Ok(count)
     }
 
     /// [`add`](Self::add) for a saved provider. No key removes the saved one.
@@ -228,7 +236,12 @@ impl CustomProviders {
         url: &str,
         key: Option<String>,
     ) -> Result<usize> {
-        self.save(name, api, url, key).await
+        let (entry, models) = self.check(name, api, url, key.as_deref()).await?;
+        self.store.put(entry.clone()).await?;
+        self.save_key(&entry.name, key).await?;
+        let count = models.len();
+        self.register(&entry, models)?;
+        Ok(count)
     }
 
     /// Refuses the provider of the running model: its next request would go
@@ -244,18 +257,21 @@ impl CustomProviders {
         Ok(())
     }
 
-    async fn save(
+    async fn check(
         &self,
         name: ProviderName,
         api: ApiId,
         url: &str,
-        key: Option<String>,
-    ) -> Result<usize> {
+        key: Option<&str>,
+    ) -> Result<(CustomProviderEntry, Vec<ModelInfo>)> {
         let url = url.trim().trim_end_matches('/').to_owned();
-        let models = fetch_catalog(&name.id(), &api, &url, key.as_deref())
+        let models = fetch_catalog(&name.id(), &api, &url, key)
             .await
             .with_context(|| format!("checking {url}/models"))?;
-        let count = models.len();
+        Ok((CustomProviderEntry { name, url, api }, models))
+    }
+
+    async fn save_key(&self, name: &ProviderName, key: Option<String>) -> Result<()> {
         match key {
             Some(key) => {
                 self.credentials
@@ -264,10 +280,7 @@ impl CustomProviders {
             }
             None => self.credentials.delete(&name.id()).await?,
         }
-        let entry = CustomProviderEntry { name, url, api };
-        self.store.put(entry.clone()).await?;
-        self.register(&entry, models)?;
-        Ok(count)
+        Ok(())
     }
 
     fn register(&self, entry: &CustomProviderEntry, models: Vec<ModelInfo>) -> Result<()> {
@@ -292,7 +305,7 @@ impl CustomProviders {
 mod tests {
     use super::*;
     use crate::core::store::JsonStore;
-    use providers::InMemoryCredentialStore;
+    use providers::{CredentialError, CredentialInfo, InMemoryCredentialStore};
     use serde_json::json;
     use std::env::temp_dir;
 
@@ -585,6 +598,89 @@ mod tests {
             error.to_string(),
             "taken already exists; change it with /provider edit"
         );
+    }
+
+    #[tokio::test]
+    async fn add_leaves_no_key_when_providers_json_cannot_be_written() {
+        // A directory where the file should be: every read and write fails.
+        let path = store_path("unwritable");
+        std::fs::create_dir_all(&path).unwrap();
+        let credentials = Arc::new(InMemoryCredentialStore::new());
+        let providers = CustomProviders::new(
+            CustomProviderStore::new(path.clone()),
+            Arc::new(ProviderRegistry::new([])),
+            credentials.clone(),
+        );
+        let url = serve_once(OK_TWO_MODELS).await;
+
+        let result = providers
+            .add(
+                name("grok"),
+                ApiId::ChatCompletions,
+                &url,
+                Some("sk".into()),
+            )
+            .await;
+
+        assert!(result.is_err());
+        assert!(
+            credentials
+                .read(&name("grok").id())
+                .await
+                .unwrap()
+                .is_none()
+        );
+        let _ = std::fs::remove_dir_all(&path);
+        cleanup("unwritable");
+    }
+
+    #[tokio::test]
+    async fn add_takes_the_entry_back_when_the_key_cannot_be_saved() {
+        let (providers_json, credentials) = (store_path("key-fails"), Arc::new(FailingKeys));
+        let _ = std::fs::remove_file(&providers_json);
+        let registry = Arc::new(ProviderRegistry::new([]));
+        let providers = CustomProviders::new(
+            CustomProviderStore::new(providers_json),
+            Arc::clone(&registry),
+            credentials,
+        );
+        let url = serve_once(OK_TWO_MODELS).await;
+
+        let result = providers
+            .add(
+                name("grok"),
+                ApiId::ChatCompletions,
+                &url,
+                Some("sk".into()),
+            )
+            .await;
+
+        assert!(result.is_err());
+        assert!(providers.entries().await.unwrap().is_empty());
+        assert!(registry.custom(&name("grok").id()).is_none());
+        cleanup("key-fails");
+    }
+
+    /// A key store whose writes always fail.
+    struct FailingKeys;
+
+    #[async_trait::async_trait]
+    impl CredentialStore for FailingKeys {
+        async fn read(&self, _: &ProviderId) -> Result<Option<Credential>, CredentialError> {
+            Ok(None)
+        }
+
+        async fn list(&self) -> Result<Vec<CredentialInfo>, CredentialError> {
+            Ok(Vec::new())
+        }
+
+        async fn put(&self, _: &ProviderId, _: Credential) -> Result<(), CredentialError> {
+            Err(CredentialError::LockBusy)
+        }
+
+        async fn delete(&self, _: &ProviderId) -> Result<(), CredentialError> {
+            Ok(())
+        }
     }
 
     #[tokio::test]
