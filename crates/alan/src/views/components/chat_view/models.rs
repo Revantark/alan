@@ -12,7 +12,6 @@ use providers::{
 };
 use std::sync::Arc;
 
-use super::ProviderPick;
 use crate::views::components::{SearchListEvent, SearchListOverlay};
 
 use super::{ChatView, parse_provider_order, persist_provider_order};
@@ -203,51 +202,54 @@ fn open_provider_picker(
     cx: &mut Context<'_, ChatView, AlanAction>,
     pick: ProviderPick,
 ) {
+    let title = match pick {
+        ProviderPick::Edit => "Edit Provider",
+        ProviderPick::Remove => "Remove Provider",
+    };
     let providers = view.custom_providers();
     cx.spawn(
         async move { providers.entries().await.map_err(super::to_task) },
-        move |result, view, cx| {
-            let entries = match result {
-                Ok(entries) if entries.is_empty() => {
-                    view.controller
-                        .push_info("no providers yet; add one with /provider add".to_owned());
-                    cx.notify();
-                    return;
+        move |result, _view, cx| match result {
+            Ok(entries) => {
+                let labels = entries
+                    .iter()
+                    .map(|entry| format!("{} — {}", entry.name, entry.url))
+                    .collect();
+                let mut picker = SearchListOverlay::new(title, labels);
+                if entries.is_empty() {
+                    picker.set_empty_message("No saved providers");
                 }
-                Ok(entries) => entries,
-                Err(error) => {
-                    view.controller
-                        .push_info(format!("failed to read providers: {error}"));
-                    cx.notify();
-                    return;
-                }
-            };
-            let title = match pick {
-                ProviderPick::Edit => "Edit Provider",
-                ProviderPick::Remove => "Remove Provider",
-            };
-            let labels = entries
-                .iter()
-                .map(|entry| format!("{} — {}", entry.name, entry.url))
-                .collect();
-            let picker = cx.open_overlay(SearchListOverlay::new(title, labels));
-            cx.subscribe_once::<SearchListEvent, SearchListOverlay, _>(
-                picker,
-                move |event, view, _picker, cx| {
-                    let SearchListEvent::Chosen(index) = event else {
-                        return;
-                    };
-                    let Some(entry) = entries.get(*index).cloned() else {
-                        return;
-                    };
-                    match pick {
-                        ProviderPick::Edit => edit_provider(view, cx, entry),
-                        ProviderPick::Remove => remove_provider(view, cx, entry.name),
-                    }
-                },
-            );
+                let picker = cx.open_overlay(picker);
+                cx.subscribe_once::<SearchListEvent, SearchListOverlay, _>(
+                    picker,
+                    move |event, view, _picker, cx| {
+                        let SearchListEvent::Chosen(index) = event else {
+                            return;
+                        };
+                        let Some(entry) = entries.get(*index).cloned() else {
+                            return;
+                        };
+                        match pick {
+                            ProviderPick::Edit => edit_provider(view, cx, entry),
+                            ProviderPick::Remove => remove_provider(view, cx, entry.name),
+                        }
+                    },
+                );
+            }
+            Err(error) => {
+                let mut picker = SearchListOverlay::new(title, Vec::new());
+                picker.set_empty_message(format!("unable to load providers: {error}"));
+                cx.open_overlay(picker);
+            }
         },
     );
+}
+
+/// Action chosen from the custom-provider picker.
+#[derive(Clone, Copy)]
+enum ProviderPick {
+    Edit,
+    Remove,
 }
 
 fn edit_provider(

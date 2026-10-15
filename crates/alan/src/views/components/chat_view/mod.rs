@@ -51,13 +51,6 @@ const EDITOR_BOTTOM_PAD: u16 = 1;
 /// Fixed-rate repaint interval while an agent stream is in flight.
 const STREAM_REPAINT_INTERVAL: std::time::Duration = std::time::Duration::from_millis(32);
 
-/// Action chosen from the custom-provider picker.
-#[derive(Clone, Copy)]
-pub(crate) enum ProviderPick {
-    Edit,
-    Remove,
-}
-
 #[derive(Debug, Clone, Copy)]
 pub struct LoginRequested;
 
