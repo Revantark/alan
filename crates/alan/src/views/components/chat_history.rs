@@ -313,10 +313,18 @@ impl View {
             return;
         };
         let text = selection::extract_selected_text(self.layout.lines(), sel);
-        if !text.is_empty()
-            && let Ok(mut clipboard) = arboard::Clipboard::new()
-        {
-            let _ = clipboard.set_text(text);
+        if text.is_empty() {
+            return;
+        }
+
+        match arboard::Clipboard::new().and_then(|mut clipboard| clipboard.set_text(&text)) {
+            Ok(()) => {}
+            Err(error) => {
+                tracing::debug!(%error, "clipboard: system copy failed, trying OSC 52");
+                if let Err(error) = copy_via_osc52(&text) {
+                    tracing::debug!(%error, "clipboard: OSC 52 copy failed");
+                }
+            }
         }
     }
 }
@@ -406,6 +414,17 @@ impl Component<AlanAction> for ChatHistory {
             frame.render_stateful_widget(scrollbar_widget, scrollbar_area, &mut scrollbar);
         }
     }
+}
+
+fn copy_via_osc52(text: &str) -> std::io::Result<()> {
+    write_osc52(&mut std::io::stdout().lock(), text)
+}
+
+fn write_osc52<W: std::io::Write>(out: &mut W, text: &str) -> std::io::Result<()> {
+    use base64::Engine;
+    let payload = base64::engine::general_purpose::STANDARD.encode(text);
+    write!(out, "\x1b]52;c;{payload}\x07")?;
+    out.flush()
 }
 
 fn momentum_ticks() -> impl Stream<Item = ()> + Send + 'static {

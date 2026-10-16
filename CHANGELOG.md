@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed text selection not being copied in the ssh environment.
+
 ## 0.1.7 - 2026-10-14
 
 ### Added
