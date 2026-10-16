@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - Update default system prompt to include output formatting.
+- Assistant responses and info entries now wrap at word boundaries instead of splitting mid-word; long unbreakable words such as URLs are hard-split to fit the line.
 
 ## 0.1.8 - 2026-10-16
 
