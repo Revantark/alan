@@ -11,6 +11,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `/provider add`, `/provider edit` and `/provider remove` to use any Chat Completions server by name. Alan checks the server's `/models` before saving, lists all of its models in `/models`, and keeps the key in `auth.json` so `/login` can change it.
 
+### Changed
+
+- Update default system prompt to include output formatting.
+- Assistant responses and info entries now wrap at word boundaries instead of splitting mid-word; long unbreakable words such as URLs are hard-split to fit the line.
+
+## 0.1.8 - 2026-10-16
+
+### Fixed
+
+- Fixed text selection not being copied in the ssh environment.
+
 ## 0.1.7 - 2026-10-14
 
 ### Added
