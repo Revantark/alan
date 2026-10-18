@@ -5,8 +5,8 @@
 
 use anyhow::Result;
 use providers::{
-    ApiId, Credential, CredentialStore, CustomProvider, ModelInfo, ProviderError, ProviderId,
-    ProviderRegistry, fetch_catalog,
+    ApiId, Credential, CredentialStore, CustomProvider, ModelInfo, Provider, ProviderError,
+    ProviderId, ProviderRegistry, fetch_catalog,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -63,35 +63,94 @@ pub struct CustomProviderEntry {
     pub api: ApiId,
 }
 
-/// `providers.json`: the saved custom providers, in the order they were added.
+/// The saved custom providers: entries in `providers.json`, in the order
+/// they were added, and their keys in `auth.json`.
 ///
 /// Entries are edited as raw JSON, matched by name, so one Alan cannot read
 /// (a hand edit, or an API standard from a newer Alan) is kept and does not
 /// block saving the others.
 pub struct CustomProviderStore {
     store: JsonStore,
+    credentials: Arc<dyn CredentialStore>,
 }
 
 impl CustomProviderStore {
-    pub fn new(path: impl Into<PathBuf>) -> Self {
+    pub fn new(path: impl Into<PathBuf>, credentials: Arc<dyn CredentialStore>) -> Self {
         Self {
             store: JsonStore::new(path),
+            credentials,
         }
     }
 
     /// The entries Alan can read.
-    pub async fn load(&self) -> Result<Vec<CustomProviderEntry>> {
+    pub async fn entries(&self) -> Result<Vec<CustomProviderEntry>> {
         Ok(self.load_each().await?.into_iter().flatten().collect())
     }
 
+    /// The saved key, to prefill the edit form.
+    pub async fn key(&self, name: &ProviderName) -> Result<Option<String>> {
+        Ok(self
+            .credentials
+            .read(&name.id())
+            .await?
+            .and_then(|credential| match credential {
+                Credential::ApiKey { key } => Some(key),
+                // `/provider` only saves API keys; sign-in tokens belong to built-ins.
+                Credential::OAuth { .. } => None,
+            }))
+    }
+
+    /// Save a new provider and its key, or neither.
+    pub async fn add(&self, entry: &CustomProviderEntry, key: Option<String>) -> Result<()> {
+        self.put(entry.clone()).await?;
+        if let Err(error) = self.save_key(&entry.name, key).await {
+            if let Err(undo) = self.remove_entry(&entry.name).await {
+                return Err(error.context(format!(
+                    "{} is still in providers.json: {undo:#}",
+                    entry.name
+                )));
+            }
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    /// Save a changed provider. No key removes the saved one.
+    pub async fn update(&self, entry: &CustomProviderEntry, key: Option<String>) -> Result<()> {
+        self.put(entry.clone()).await?;
+        self.save_key(&entry.name, key).await
+    }
+
+    pub async fn remove(&self, name: &ProviderName) -> Result<()> {
+        self.remove_entry(name).await?;
+        self.credentials.delete(&name.id()).await?;
+        Ok(())
+    }
+
+    /// The provider to register for `entry`; it reads its key from this
+    /// store's `auth.json` on every request.
+    pub fn provider(
+        &self,
+        entry: &CustomProviderEntry,
+        models: Vec<ModelInfo>,
+    ) -> Result<Arc<dyn Provider>> {
+        Ok(Arc::new(CustomProvider::new(
+            entry.name.id(),
+            entry.api.clone(),
+            entry.url.clone(),
+            Arc::clone(&self.credentials),
+            models,
+        )?))
+    }
+
     /// Each saved entry on its own, with the reason for any it cannot read.
-    pub async fn load_each(&self) -> Result<Vec<serde_json::Result<CustomProviderEntry>>> {
+    async fn load_each(&self) -> Result<Vec<serde_json::Result<CustomProviderEntry>>> {
         let values = raw_entries(self.store.get(PROVIDERS_KEY).await?)?;
         Ok(values.into_iter().map(serde_json::from_value).collect())
     }
 
     /// Save `entry`, replacing a saved provider with the same name.
-    pub async fn put(&self, entry: CustomProviderEntry) -> Result<()> {
+    async fn put(&self, entry: CustomProviderEntry) -> Result<()> {
         let name = entry.name.to_string();
         let value = serde_json::to_value(entry)?;
         self.store
@@ -106,7 +165,7 @@ impl CustomProviderStore {
             .await
     }
 
-    pub async fn remove(&self, name: &ProviderName) -> Result<()> {
+    async fn remove_entry(&self, name: &ProviderName) -> Result<()> {
         let name = name.to_string();
         self.store
             .update(PROVIDERS_KEY, move |saved| {
@@ -115,6 +174,18 @@ impl CustomProviderStore {
                 Ok(((!values.is_empty()).then_some(Value::Array(values)), ()))
             })
             .await
+    }
+
+    async fn save_key(&self, name: &ProviderName, key: Option<String>) -> Result<()> {
+        match key {
+            Some(key) => {
+                self.credentials
+                    .put(&name.id(), Credential::ApiKey { key })
+                    .await?
+            }
+            None => self.credentials.delete(&name.id()).await?,
+        }
+        Ok(())
     }
 }
 
@@ -134,179 +205,75 @@ pub fn default_providers_path() -> Result<PathBuf> {
     paths::data_file("providers.json")
 }
 
-/// Adds, edits and removes custom providers, keeping `providers.json`,
-/// `auth.json` and the live registry in step.
-pub struct CustomProviders {
-    store: CustomProviderStore,
-    registry: Arc<ProviderRegistry>,
-    credentials: Arc<dyn CredentialStore>,
+/// Register every saved provider Alan can use; their models are fetched the
+/// next time `/models` opens. Entries it cannot read or bind are skipped.
+/// Call it once the built-ins are registered: returns a notice for each entry
+/// removed because a built-in now takes its name.
+pub async fn load(store: &CustomProviderStore, registry: &ProviderRegistry) -> Result<Vec<String>> {
+    let mut notices = Vec::new();
+    for entry in store.load_each().await? {
+        let Ok(entry) = entry.inspect_err(|error| {
+            tracing::warn!(%error, "skipping an unreadable entry in providers.json");
+        }) else {
+            continue;
+        };
+        // The name, and its key slot in `auth.json`, now belong to the
+        // built-in, so only the entry goes.
+        if registry.get(&entry.name.id()).is_some() {
+            store.remove_entry(&entry.name).await?;
+            notices.push(format!(
+                "custom provider {} ({}) was removed: a built-in provider now uses that name; add it again under another name",
+                entry.name, entry.url
+            ));
+            continue;
+        }
+        match store.provider(&entry, Vec::new()) {
+            Ok(provider) => registry.insert(provider),
+            Err(error) => {
+                tracing::warn!(%error, provider = %entry.name, "skipping a custom provider")
+            }
+        }
+    }
+    Ok(notices)
 }
 
-impl CustomProviders {
-    pub fn new(
-        store: CustomProviderStore,
-        registry: Arc<ProviderRegistry>,
-        credentials: Arc<dyn CredentialStore>,
-    ) -> Self {
-        Self {
-            store,
-            registry,
-            credentials,
-        }
-    }
+/// Refuse a name `/provider add` cannot take, before any request.
+pub async fn ensure_new_name(
+    store: &CustomProviderStore,
+    registry: &ProviderRegistry,
+    name: &ProviderName,
+) -> Result<()> {
+    let saved = store.entries().await?;
+    anyhow::ensure!(
+        saved.iter().all(|entry| entry.name.id() != name.id()),
+        "{name} already exists; change it with /provider edit"
+    );
+    // A built-in's key in `auth.json` sits under the same name.
+    anyhow::ensure!(
+        registry.get(&name.id()).is_none(),
+        "{name} is a built-in provider; pick another name, e.g. {name}-2"
+    );
+    Ok(())
+}
 
-    /// Register every saved provider Alan can use; their models are fetched
-    /// the next time `/models` opens. Entries it cannot read or bind are
-    /// skipped. Returns a notice for each entry removed because a built-in now
-    /// takes its name.
-    pub async fn load(&self) -> Result<Vec<String>> {
-        let mut notices = Vec::new();
-        for entry in self.store.load_each().await? {
-            let Ok(entry) = entry.inspect_err(|error| {
-                tracing::warn!(%error, "skipping an unreadable entry in providers.json");
-            }) else {
-                continue;
-            };
-            // The name, and its key slot in `auth.json`, now belong to the
-            // built-in, so only the entry goes.
-            if self.registry.is_builtin(&entry.name.id()) {
-                self.store.remove(&entry.name).await?;
-                notices.push(format!(
-                    "custom provider {} ({}) was removed: a built-in provider now uses that name; add it again under another name",
-                    entry.name, entry.url
-                ));
-                continue;
-            }
-            if let Err(error) = self.register(&entry, Vec::new()) {
-                tracing::warn!(%error, provider = %entry.name, "skipping a custom provider");
-            }
-        }
-        Ok(notices)
-    }
-
-    pub async fn entries(&self) -> Result<Vec<CustomProviderEntry>> {
-        self.store.load().await
-    }
-
-    /// The saved key, to prefill the edit form.
-    pub async fn key(&self, name: &ProviderName) -> Result<Option<String>> {
-        Ok(self
-            .credentials
-            .read(&name.id())
-            .await?
-            .and_then(|credential| match credential {
-                Credential::ApiKey { key } => Some(key),
-                // `/provider` only saves API keys; sign-in tokens belong to built-ins.
-                Credential::OAuth { .. } => None,
-            }))
-    }
-
-    /// Check `url` with a `/models` call, then save the provider and its key.
-    /// Returns how many models the server lists. Nothing is saved when the
-    /// check fails.
-    pub async fn add(
-        &self,
-        name: ProviderName,
-        api: ApiId,
-        url: &str,
-        key: Option<String>,
-    ) -> Result<usize> {
-        // A built-in's key in `auth.json` sits under the same name.
-        anyhow::ensure!(
-            !self.registry.is_builtin(&name.id()),
-            "{name} is a built-in provider; pick another name, e.g. {name}-2"
-        );
-        anyhow::ensure!(
-            self.registry.custom(&name.id()).is_none(),
-            "{name} already exists; change it with /provider edit"
-        );
-        let (entry, models) = self.check(name, api, url, key.as_deref()).await?;
-        self.store.put(entry.clone()).await?;
-        if let Err(error) = self.save_key(&entry.name, key).await {
-            if let Err(undo) = self.store.remove(&entry.name).await {
-                return Err(error.context(format!(
-                    "{} is still in providers.json: {undo:#}",
-                    entry.name
-                )));
-            }
-            return Err(error);
-        }
-        let count = models.len();
-        self.register(&entry, models)?;
-        Ok(count)
-    }
-
-    /// [`add`](Self::add) for a saved provider. No key removes the saved one.
-    pub async fn update(
-        &self,
-        name: ProviderName,
-        api: ApiId,
-        url: &str,
-        key: Option<String>,
-    ) -> Result<usize> {
-        let (entry, models) = self.check(name, api, url, key.as_deref()).await?;
-        self.store.put(entry.clone()).await?;
-        self.save_key(&entry.name, key).await?;
-        let count = models.len();
-        self.register(&entry, models)?;
-        Ok(count)
-    }
-
-    pub async fn remove(&self, name: &ProviderName) -> Result<()> {
-        self.store.remove(name).await?;
-        self.credentials.delete(&name.id()).await?;
-        self.registry.remove_custom(&name.id());
-        Ok(())
-    }
-
-    async fn check(
-        &self,
-        name: ProviderName,
-        api: ApiId,
-        url: &str,
-        key: Option<&str>,
-    ) -> Result<(CustomProviderEntry, Vec<ModelInfo>)> {
-        let url = url.trim().trim_end_matches('/').to_owned();
-        // The reason already names the URL; the error's own prefix would
-        // only repeat that the check failed.
-        let models =
-            fetch_catalog(&name.id(), &api, &url, key)
-                .await
-                .map_err(|error| match error {
-                    ProviderError::Fetch(reason) => anyhow::anyhow!(reason),
-                    other => other.into(),
-                })?;
-        Ok((CustomProviderEntry { name, url, api }, models))
-    }
-
-    async fn save_key(&self, name: &ProviderName, key: Option<String>) -> Result<()> {
-        match key {
-            Some(key) => {
-                self.credentials
-                    .put(&name.id(), Credential::ApiKey { key })
-                    .await?
-            }
-            None => self.credentials.delete(&name.id()).await?,
-        }
-        Ok(())
-    }
-
-    fn register(&self, entry: &CustomProviderEntry, models: Vec<ModelInfo>) -> Result<()> {
-        // A bound model keeps its provider's API client: replacing the
-        // provider on an edit would leave the running model on the old URL.
-        if let Some(provider) = self.registry.custom(&entry.name.id()) {
-            provider.set_base_url(entry.url.clone());
-            return Ok(());
-        }
-        self.registry.add_custom(Arc::new(CustomProvider::new(
-            entry.name.id(),
-            entry.api.clone(),
-            entry.url.clone(),
-            Arc::clone(&self.credentials),
-            models,
-        )?));
-        Ok(())
-    }
+/// Check `url` with a `/models` call. Returns the entry to save and the
+/// models the server lists.
+pub async fn check(
+    name: ProviderName,
+    api: ApiId,
+    url: &str,
+    key: Option<&str>,
+) -> Result<(CustomProviderEntry, Vec<ModelInfo>)> {
+    let url = url.trim().trim_end_matches('/').to_owned();
+    // The reason already names the URL; the error's own prefix would only
+    // repeat that the check failed.
+    let models = fetch_catalog(&name.id(), &api, &url, key)
+        .await
+        .map_err(|error| match error {
+            ProviderError::Fetch(reason) => anyhow::anyhow!(reason),
+            other => other.into(),
+        })?;
+    Ok((CustomProviderEntry { name, url, api }, models))
 }
 
 #[cfg(test)]
@@ -338,7 +305,15 @@ pub(crate) mod tests {
         ProviderName::parse(value).unwrap()
     }
 
-    pub(crate) fn provider(id: &str, models: &[&str]) -> Arc<CustomProvider> {
+    fn entry(value: &str, url: &str) -> CustomProviderEntry {
+        CustomProviderEntry {
+            name: name(value),
+            url: url.into(),
+            api: ApiId::ChatCompletions,
+        }
+    }
+
+    pub(crate) fn provider(id: &str, models: &[&str]) -> Arc<dyn Provider> {
         let models = models
             .iter()
             .map(|model| ModelInfo::new(model, ProviderId::new(id)))
@@ -355,48 +330,40 @@ pub(crate) mod tests {
         )
     }
 
-    fn service(
-        file: &str,
-    ) -> (
-        CustomProviders,
-        Arc<ProviderRegistry>,
-        Arc<InMemoryCredentialStore>,
-    ) {
-        let registry = Arc::new(ProviderRegistry::new([]));
+    fn store(file: &str) -> (CustomProviderStore, Arc<InMemoryCredentialStore>) {
         let credentials = Arc::new(InMemoryCredentialStore::new());
-        let providers = CustomProviders::new(
-            CustomProviderStore::new(temp_path(file)),
-            Arc::clone(&registry),
-            credentials.clone(),
-        );
-        (providers, registry, credentials)
+        let store = CustomProviderStore::new(temp_path(file), credentials.clone());
+        (store, credentials)
     }
 
-    // Replies `response` to `count` connections, hands back each request.
-    async fn serve(
-        response: &'static str,
-        count: usize,
-    ) -> (String, tokio::task::JoinHandle<Vec<String>>) {
+    async fn names(store: &CustomProviderStore) -> Vec<String> {
+        store
+            .entries()
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|e| e.name.to_string())
+            .collect()
+    }
+
+    // Replies `response` to one connection, hands back the request.
+    async fn serve(response: &'static str) -> (String, tokio::task::JoinHandle<String>) {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
             .await
             .unwrap();
         let address = listener.local_addr().unwrap();
         let server = tokio::spawn(async move {
-            let mut requests = Vec::new();
-            for _ in 0..count {
-                let (mut socket, _) = listener.accept().await.unwrap();
-                let mut request = Vec::new();
-                let mut buffer = [0; 4096];
-                while !request.windows(4).any(|window| window == b"\r\n\r\n") {
-                    let read = socket.read(&mut buffer).await.unwrap();
-                    assert!(read > 0);
-                    request.extend_from_slice(&buffer[..read]);
-                }
-                socket.write_all(response.as_bytes()).await.unwrap();
-                requests.push(String::from_utf8(request).unwrap());
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            let mut buffer = [0; 4096];
+            while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                let read = socket.read(&mut buffer).await.unwrap();
+                assert!(read > 0);
+                request.extend_from_slice(&buffer[..read]);
             }
-            requests
+            socket.write_all(response.as_bytes()).await.unwrap();
+            String::from_utf8(request).unwrap()
         });
         (format!("http://{address}/v1/"), server)
     }
@@ -414,52 +381,74 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn add_refuses_a_builtin_name_before_any_request() {
-        let registry = Arc::new(ProviderRegistry::new([
-            provider("deepseek", &[]) as Arc<dyn providers::Provider>
-        ]));
-        let providers = CustomProviders::new(
-            CustomProviderStore::new(temp_path("builtin")),
-            registry,
-            Arc::new(InMemoryCredentialStore::new()),
-        );
+    async fn ensure_new_name_refuses_saved_and_builtin_names() {
+        let (store, _credentials) = store("names");
+        store.add(&entry("grok", "http://x"), None).await.unwrap();
+        let registry = ProviderRegistry::new([provider("deepseek", &[])]);
 
-        // Port 1 is closed: reaching the network would say "could not connect".
-        let error = providers
-            .add(
-                name("deepseek"),
-                ApiId::ChatCompletions,
-                "http://127.0.0.1:1/v1",
-                None,
-            )
+        let saved = ensure_new_name(&store, &registry, &name("grok"))
+            .await
+            .unwrap_err();
+        let builtin = ensure_new_name(&store, &registry, &name("deepseek"))
             .await
             .unwrap_err();
 
         assert_eq!(
-            error.to_string(),
+            saved.to_string(),
+            "grok already exists; change it with /provider edit"
+        );
+        assert_eq!(
+            builtin.to_string(),
             "deepseek is a built-in provider; pick another name, e.g. deepseek-2"
+        );
+        assert!(
+            ensure_new_name(&store, &registry, &name("groq"))
+                .await
+                .is_ok()
+        );
+        cleanup("names");
+    }
+
+    #[tokio::test]
+    async fn check_trims_the_url_and_lists_the_models() {
+        let url = serve(OK_TWO_MODELS).await.0;
+
+        let (entry, models) = check(name("grok"), ApiId::ChatCompletions, &url, None)
+            .await
+            .unwrap();
+
+        assert_eq!(entry.url, url.trim_end_matches('/'));
+        assert_eq!(models.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn check_reports_only_the_reason() {
+        let url = serve("HTTP/1.1 401 Unauthorized\r\nconnection: close\r\n\r\n{}")
+            .await
+            .0;
+
+        let error = check(name("grok"), ApiId::ChatCompletions, &url, Some("bad"))
+            .await
+            .unwrap_err();
+
+        assert_eq!(
+            format!("{error:#}"),
+            "the API key was rejected (HTTP 401 Unauthorized)"
         );
     }
 
     #[tokio::test]
-    async fn store_put_replaces_by_name_and_keeps_order() {
-        let store = CustomProviderStore::new(temp_path("put"));
+    async fn put_replaces_by_name_and_keeps_order() {
+        let (store, _credentials) = store("put");
         for (n, url) in [
             ("a", "http://one"),
             ("b", "http://two"),
             ("a", "http://three"),
         ] {
-            store
-                .put(CustomProviderEntry {
-                    name: name(n),
-                    url: url.into(),
-                    api: ApiId::ChatCompletions,
-                })
-                .await
-                .unwrap();
+            store.put(entry(n, url)).await.unwrap();
         }
         let urls: Vec<_> = store
-            .load()
+            .entries()
             .await
             .unwrap()
             .into_iter()
@@ -479,34 +468,14 @@ pub(crate) mod tests {
             )
             .await
             .unwrap();
-        let store = CustomProviderStore::new(path.clone());
+        let store =
+            CustomProviderStore::new(path.clone(), Arc::new(InMemoryCredentialStore::new()));
 
-        store
-            .put(CustomProviderEntry {
-                name: name("grok"),
-                url: "http://one".into(),
-                api: ApiId::ChatCompletions,
-            })
-            .await
-            .unwrap();
+        store.add(&entry("grok", "http://one"), None).await.unwrap();
         store.remove(&name("grok")).await.unwrap();
-        store
-            .put(CustomProviderEntry {
-                name: name("groq"),
-                url: "http://two".into(),
-                api: ApiId::ChatCompletions,
-            })
-            .await
-            .unwrap();
+        store.add(&entry("groq", "http://two"), None).await.unwrap();
 
-        let names: Vec<_> = store
-            .load()
-            .await
-            .unwrap()
-            .into_iter()
-            .map(|e| e.name.to_string())
-            .collect();
-        assert_eq!(names, ["groq"]);
+        assert_eq!(names(&store).await, ["groq"]);
         let raw = JsonStore::new(path)
             .get(PROVIDERS_KEY)
             .await
@@ -517,89 +486,23 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn add_checks_then_saves_entry_key_and_provider() {
-        let (providers, registry, _credentials) = service("add");
-        let url = serve(OK_TWO_MODELS, 1).await.0;
+    async fn add_saves_the_entry_and_key_and_remove_deletes_both() {
+        let (store, _credentials) = store("add-remove");
 
-        let count = providers
-            .add(
-                name("grok"),
-                ApiId::ChatCompletions,
-                &url,
-                Some("sk".into()),
-            )
+        store
+            .add(&entry("grok", "http://x/v1"), Some("sk".into()))
             .await
             .unwrap();
-
-        assert_eq!(count, 2);
-        let entries = providers.entries().await.unwrap();
-        assert_eq!(entries[0].url, url.trim_end_matches('/'));
-        assert_eq!(entries[0].api, ApiId::ChatCompletions);
+        assert_eq!(names(&store).await, ["grok"]);
         assert_eq!(
-            providers.key(&name("grok")).await.unwrap().as_deref(),
+            store.key(&name("grok")).await.unwrap().as_deref(),
             Some("sk")
         );
-        let provider = registry.get(&name("grok").id()).unwrap();
-        assert_eq!(provider.models().len(), 2);
-        cleanup("add");
-    }
 
-    #[tokio::test]
-    async fn add_saves_nothing_when_the_check_fails() {
-        let (providers, registry, credentials) = service("add-fails");
-        let url = serve(
-            "HTTP/1.1 401 Unauthorized\r\nconnection: close\r\n\r\n{}",
-            1,
-        )
-        .await
-        .0;
-
-        let error = providers
-            .add(
-                name("grok"),
-                ApiId::ChatCompletions,
-                &url,
-                Some("bad".into()),
-            )
-            .await
-            .unwrap_err();
-
-        assert_eq!(
-            format!("{error:#}"),
-            "the API key was rejected (HTTP 401 Unauthorized)"
-        );
-        assert!(providers.entries().await.unwrap().is_empty());
-        assert!(
-            credentials
-                .read(&name("grok").id())
-                .await
-                .unwrap()
-                .is_none()
-        );
-        assert!(registry.get(&name("grok").id()).is_none());
-        cleanup("add-fails");
-    }
-
-    #[tokio::test]
-    async fn add_refuses_a_taken_name_before_any_request() {
-        let (providers, registry, _credentials) = service("taken");
-        registry.add_custom(provider("taken", &[]));
-
-        // Port 1 is closed: reaching the network would say "could not connect".
-        let error = providers
-            .add(
-                name("taken"),
-                ApiId::ChatCompletions,
-                "http://127.0.0.1:1/v1",
-                None,
-            )
-            .await
-            .unwrap_err();
-
-        assert_eq!(
-            error.to_string(),
-            "taken already exists; change it with /provider edit"
-        );
+        store.remove(&name("grok")).await.unwrap();
+        assert!(names(&store).await.is_empty());
+        assert!(store.key(&name("grok")).await.unwrap().is_none());
+        cleanup("add-remove");
     }
 
     #[tokio::test]
@@ -608,20 +511,10 @@ pub(crate) mod tests {
         let path = temp_path("unwritable");
         std::fs::create_dir_all(&path).unwrap();
         let credentials = Arc::new(InMemoryCredentialStore::new());
-        let providers = CustomProviders::new(
-            CustomProviderStore::new(path.clone()),
-            Arc::new(ProviderRegistry::new([])),
-            credentials.clone(),
-        );
-        let url = serve(OK_TWO_MODELS, 1).await.0;
+        let store = CustomProviderStore::new(path.clone(), credentials.clone());
 
-        let result = providers
-            .add(
-                name("grok"),
-                ApiId::ChatCompletions,
-                &url,
-                Some("sk".into()),
-            )
+        let result = store
+            .add(&entry("grok", "http://x"), Some("sk".into()))
             .await;
 
         assert!(result.is_err());
@@ -638,27 +531,14 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn add_takes_the_entry_back_when_the_key_cannot_be_saved() {
-        let (providers_json, credentials) = (temp_path("key-fails"), Arc::new(FailingKeys));
-        let registry = Arc::new(ProviderRegistry::new([]));
-        let providers = CustomProviders::new(
-            CustomProviderStore::new(providers_json),
-            Arc::clone(&registry),
-            credentials,
-        );
-        let url = serve(OK_TWO_MODELS, 1).await.0;
+        let store = CustomProviderStore::new(temp_path("key-fails"), Arc::new(FailingKeys));
 
-        let result = providers
-            .add(
-                name("grok"),
-                ApiId::ChatCompletions,
-                &url,
-                Some("sk".into()),
-            )
+        let result = store
+            .add(&entry("grok", "http://x"), Some("sk".into()))
             .await;
 
         assert!(result.is_err());
-        assert!(providers.entries().await.unwrap().is_empty());
-        assert!(registry.custom(&name("grok").id()).is_none());
+        assert!(names(&store).await.is_empty());
         cleanup("key-fails");
     }
 
@@ -686,80 +566,20 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn update_without_a_key_deletes_the_saved_one() {
-        let (providers, _registry, credentials) = service("update");
-        credentials
-            .put(&name("grok").id(), Credential::ApiKey { key: "old".into() })
-            .await
-            .unwrap();
-        let url = serve(OK_TWO_MODELS, 1).await.0;
-
-        providers
-            .update(name("grok"), ApiId::ChatCompletions, &url, None)
+        let (store, _credentials) = store("update");
+        store
+            .add(&entry("grok", "http://one"), Some("old".into()))
             .await
             .unwrap();
 
-        assert!(providers.key(&name("grok")).await.unwrap().is_none());
+        store
+            .update(&entry("grok", "http://two"), None)
+            .await
+            .unwrap();
+
+        assert!(store.key(&name("grok")).await.unwrap().is_none());
+        assert_eq!(store.entries().await.unwrap()[0].url, "http://two");
         cleanup("update");
-    }
-
-    #[tokio::test]
-    async fn update_moves_models_already_bound_to_the_new_url() {
-        let (providers, registry, _credentials) = service("edit-bound");
-        let old_url = serve(OK_TWO_MODELS, 1).await.0;
-        providers
-            .add(name("grok"), ApiId::ChatCompletions, &old_url, None)
-            .await
-            .unwrap();
-        let provider = registry.get(&name("grok").id()).unwrap();
-        let model = providers::bind_model(provider.as_ref(), "m1", Default::default()).unwrap();
-
-        // The new server answers the edit's check, then the chat request.
-        let (new_url, server) = serve(OK_TWO_MODELS, 2).await;
-        providers
-            .update(name("grok"), ApiId::ChatCompletions, &new_url, None)
-            .await
-            .unwrap();
-        let messages = [llm::Message::user("hi")];
-        let _ = model
-            .stream(llm::CompletionInput {
-                messages: &messages,
-                tools: &[],
-                options: &Default::default(),
-                extensions: &Default::default(),
-            })
-            .await;
-
-        let requests = tokio::time::timeout(std::time::Duration::from_secs(5), server)
-            .await
-            .expect("the chat request never reached the new URL")
-            .unwrap();
-        assert!(
-            requests[1].starts_with("POST /v1/chat/completions"),
-            "{requests:?}"
-        );
-        cleanup("edit-bound");
-    }
-
-    #[tokio::test]
-    async fn remove_deletes_entry_key_and_provider() {
-        let (providers, registry, _credentials) = service("remove-all");
-        let url = serve(OK_TWO_MODELS, 1).await.0;
-        providers
-            .add(
-                name("grok"),
-                ApiId::ChatCompletions,
-                &url,
-                Some("sk".into()),
-            )
-            .await
-            .unwrap();
-
-        providers.remove(&name("grok")).await.unwrap();
-
-        assert!(providers.entries().await.unwrap().is_empty());
-        assert!(providers.key(&name("grok")).await.unwrap().is_none());
-        assert!(registry.get(&name("grok").id()).is_none());
-        cleanup("remove-all");
     }
 
     #[tokio::test]
@@ -777,14 +597,10 @@ pub(crate) mod tests {
             )
             .await
             .unwrap();
-        let registry = Arc::new(ProviderRegistry::new([]));
-        let providers = CustomProviders::new(
-            CustomProviderStore::new(path),
-            Arc::clone(&registry),
-            Arc::new(InMemoryCredentialStore::new()),
-        );
+        let registry = ProviderRegistry::new([]);
+        let store = CustomProviderStore::new(path, Arc::new(InMemoryCredentialStore::new()));
 
-        let notices = providers.load().await.unwrap();
+        let notices = load(&store, &registry).await.unwrap();
 
         assert!(notices.is_empty(), "{notices:?}");
         let ids: Vec<_> = registry.providers().iter().map(|p| p.id().0).collect();
@@ -802,19 +618,10 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn load_drops_an_entry_a_builtin_now_names_and_keeps_the_builtins_key() {
-        let path = temp_path("load-clash");
-        let store = CustomProviderStore::new(path.clone());
+        let (store, credentials) = store("load-clash");
         for n in ["openai", "grok"] {
-            store
-                .put(CustomProviderEntry {
-                    name: name(n),
-                    url: "http://localhost:1/v1".into(),
-                    api: ApiId::ChatCompletions,
-                })
-                .await
-                .unwrap();
+            store.put(entry(n, "http://localhost:1/v1")).await.unwrap();
         }
-        let credentials = Arc::new(InMemoryCredentialStore::new());
         credentials
             .put(
                 &name("openai").id(),
@@ -822,16 +629,9 @@ pub(crate) mod tests {
             )
             .await
             .unwrap();
-        let registry = Arc::new(ProviderRegistry::new([
-            provider("openai", &[]) as Arc<dyn providers::Provider>
-        ]));
-        let providers = CustomProviders::new(
-            CustomProviderStore::new(path),
-            Arc::clone(&registry),
-            credentials.clone(),
-        );
+        let registry = ProviderRegistry::new([provider("openai", &["gpt"])]);
 
-        let notices = providers.load().await.unwrap();
+        let notices = load(&store, &registry).await.unwrap();
 
         assert_eq!(
             notices,
@@ -839,17 +639,11 @@ pub(crate) mod tests {
                 "custom provider openai (http://localhost:1/v1) was removed: a built-in provider now uses that name; add it again under another name"
             ]
         );
-        assert!(registry.custom(&name("openai").id()).is_none());
-        assert!(registry.custom(&name("grok").id()).is_some());
-        let names: Vec<_> = providers
-            .entries()
-            .await
-            .unwrap()
-            .into_iter()
-            .map(|e| e.name.to_string())
-            .collect();
-        assert_eq!(names, ["grok"]);
-        // The key under that name now belongs to the built-in.
+        assert_eq!(names(&store).await, ["grok"]);
+        // The built-in keeps its place and its key.
+        let openai = registry.get(&name("openai").id()).unwrap();
+        assert_eq!(openai.models()[0].id, "gpt");
+        assert!(registry.get(&name("grok").id()).is_some());
         assert!(
             credentials
                 .read(&name("openai").id())

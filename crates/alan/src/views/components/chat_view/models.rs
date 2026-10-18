@@ -17,7 +17,7 @@ use crate::views::components::{SearchListEvent, SearchListOverlay};
 use super::{ChatView, parse_provider_order, persist_provider_order};
 
 use crate::core::custom_providers::{CustomProviderEntry, ProviderName};
-use crate::provider_overlay::ProviderOverlay;
+use crate::provider_overlay::{ProviderOverlay, ProviderSaved};
 
 /// `/models`: open the model picker overlay.
 pub(crate) fn open_models_picker(view: &mut ChatView, cx: &mut Context<'_, ChatView, AlanAction>) {
@@ -185,7 +185,9 @@ pub(crate) fn handle_provider_command(
     let args = SlashCommand::parse_with_args(text).map(|(_, a)| a.trim().to_owned());
     match args.as_deref() {
         Some("add") => {
-            cx.open_overlay(ProviderOverlay::add(view.custom_providers()));
+            let form =
+                ProviderOverlay::add(view.custom_provider_store(), Arc::clone(&view.providers));
+            open_provider_form(cx, form);
         }
         Some("edit") => open_provider_picker(view, cx, ProviderPick::Edit),
         Some("remove") => open_provider_picker(view, cx, ProviderPick::Remove),
@@ -205,9 +207,9 @@ fn open_provider_picker(
         ProviderPick::Edit => "Edit Provider",
         ProviderPick::Remove => "Remove Provider",
     };
-    let providers = view.custom_providers();
+    let store = view.custom_provider_store();
     cx.spawn(
-        async move { providers.entries().await.map_err(super::to_task) },
+        async move { store.entries().await.map_err(super::to_task) },
         move |result, _view, cx| match result {
             Ok(entries) => {
                 let labels = entries
@@ -256,19 +258,59 @@ fn edit_provider(
     cx: &mut Context<'_, ChatView, AlanAction>,
     entry: CustomProviderEntry,
 ) {
-    let providers = view.custom_providers();
+    let store = view.custom_provider_store();
     cx.spawn(
         async move {
-            let key = providers.key(&entry.name).await.map_err(super::to_task)?;
-            Ok((entry, key))
+            let key = store.key(&entry.name).await.map_err(super::to_task)?;
+            Ok((store, entry, key))
         },
         move |result, view, cx| match result {
-            Ok((entry, key)) => {
-                cx.open_overlay(ProviderOverlay::edit(view.custom_providers(), entry, key));
+            Ok((store, entry, key)) => {
+                let form = ProviderOverlay::edit(store, Arc::clone(&view.providers), entry, key);
+                open_provider_form(cx, form);
             }
             Err(error) => {
                 view.controller
                     .push_info(format!("failed to read the provider's key: {error}"));
+                cx.notify();
+            }
+        },
+    );
+}
+
+fn open_provider_form(cx: &mut Context<'_, ChatView, AlanAction>, form: ProviderOverlay) {
+    let form = cx.open_overlay(form);
+    cx.subscribe_once::<ProviderSaved, ProviderOverlay, _>(form, |saved, view, _form, cx| {
+        rebind_model(view, cx, saved.0.clone());
+    });
+}
+
+/// A bound model keeps the provider it was bound from, so after an edit the
+/// running model is bound again from the registered replacement.
+fn rebind_model(
+    view: &mut ChatView,
+    cx: &mut Context<'_, ChatView, AlanAction>,
+    provider: ProviderId,
+) {
+    let agent = view.controller.agent();
+    let providers = Arc::clone(&view.providers);
+    cx.spawn(
+        async move {
+            let info = agent.info().await;
+            if info.provider != provider {
+                return Ok(());
+            }
+            let model = bind_model_info(&providers, &info, agent.model_options().await)?;
+            agent
+                .set_model(model)
+                .await
+                .map_err(|e| TaskError(e.into()))
+        },
+        |result, view, cx| {
+            if let Err(error) = result {
+                view.controller.push_info(format!(
+                    "saved, but the running model still uses the old settings: {error}"
+                ));
                 cx.notify();
             }
         },
@@ -303,10 +345,12 @@ fn remove_idle_provider(
     cx: &mut Context<'_, ChatView, AlanAction>,
     name: ProviderName,
 ) {
-    let providers = view.custom_providers();
+    let store = view.custom_provider_store();
+    let providers = Arc::clone(&view.providers);
     cx.spawn(
         async move {
-            providers.remove(&name).await.map_err(super::to_task)?;
+            store.remove(&name).await.map_err(super::to_task)?;
+            providers.remove(&name.id());
             Ok(name)
         },
         |result, view, cx| {
@@ -395,8 +439,8 @@ mod tests {
     #[test]
     fn picker_models_hides_only_the_replaced_provider() {
         let registry = ProviderRegistry::new([]);
-        registry.add_custom(provider("grok", &["grok-4"]));
-        registry.add_custom(provider("groq", &["llama"]));
+        registry.insert(provider("grok", &["grok-4"]));
+        registry.insert(provider("groq", &["llama"]));
 
         let all: Vec<_> = picker_models(&registry, None)
             .into_iter()

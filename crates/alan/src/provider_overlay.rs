@@ -1,12 +1,12 @@
 //! `/provider add` and `/provider edit`: the form for a custom provider.
 
-use crate::core::custom_providers::{CustomProviderEntry, CustomProviders, ProviderName};
+use crate::core::custom_providers::{self, CustomProviderEntry, CustomProviderStore, ProviderName};
 use crate::root::AlanAction;
 use crate::views::theme;
 use alan_tui::context::Context;
 use alan_tui::{ActionStatus, Component, RenderContext, TaskError};
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
-use providers::ApiId;
+use providers::{ApiId, ProviderId, ProviderRegistry};
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Rect};
 use ratatui::style::{Modifier, Style};
@@ -65,6 +65,9 @@ enum OverlayState {
     Error(String),
 }
 
+/// Emitted once a provider is saved and registered under this id.
+pub struct ProviderSaved(pub ProviderId);
+
 /// What a key press needs from the host beyond the overlay's own state.
 #[derive(Debug, PartialEq, Eq)]
 enum KeyOutcome {
@@ -75,7 +78,8 @@ enum KeyOutcome {
 }
 
 pub struct ProviderOverlay {
-    providers: Arc<CustomProviders>,
+    store: Arc<CustomProviderStore>,
+    registry: Arc<ProviderRegistry>,
     mode: Mode,
     api: ApiId,
     fields: FormFields,
@@ -84,9 +88,10 @@ pub struct ProviderOverlay {
 }
 
 impl ProviderOverlay {
-    pub fn add(providers: Arc<CustomProviders>) -> Self {
+    pub fn add(store: Arc<CustomProviderStore>, registry: Arc<ProviderRegistry>) -> Self {
         Self {
-            providers,
+            store,
+            registry,
             mode: Mode::Add,
             api: ApiId::ChatCompletions,
             fields: FormFields::default(),
@@ -98,7 +103,8 @@ impl ProviderOverlay {
     /// The name is fixed: `auth.json`, `settings.json` and profiles refer to
     /// the provider by it.
     pub fn edit(
-        providers: Arc<CustomProviders>,
+        store: Arc<CustomProviderStore>,
+        registry: Arc<ProviderRegistry>,
         entry: CustomProviderEntry,
         key: Option<String>,
     ) -> Self {
@@ -111,7 +117,7 @@ impl ProviderOverlay {
                 api_key: key.unwrap_or_default(),
             },
             focused: URL,
-            ..Self::add(providers)
+            ..Self::add(store, registry)
         }
     }
 
@@ -180,21 +186,22 @@ impl ProviderOverlay {
                 return;
             }
         };
-        let providers = Arc::clone(&self.providers);
+        let store = Arc::clone(&self.store);
+        let registry = Arc::clone(&self.registry);
         let mode = self.mode;
         let api = self.api.clone();
         cx.spawn(
             async move {
-                let Submission { name, url, key } = submission;
-                match mode {
-                    Mode::Add => providers.add(name, api, &url, key).await,
-                    Mode::Edit => providers.update(name, api, &url, key).await,
-                }
-                .map_err(|error| TaskError(format!("{error:#}").into()))
+                save(&store, &registry, mode, api, submission)
+                    .await
+                    .map_err(|error| TaskError(format!("{error:#}").into()))
             },
             |result, overlay, cx| {
                 overlay.state = match result {
-                    Ok(count) => OverlayState::Saved(count),
+                    Ok((id, count)) => {
+                        cx.emit(ProviderSaved(id));
+                        OverlayState::Saved(count)
+                    }
                     Err(error) => OverlayState::Error(error.to_string()),
                 };
                 cx.notify();
@@ -203,6 +210,29 @@ impl ProviderOverlay {
         self.state = OverlayState::Checking;
         cx.notify();
     }
+}
+
+/// Check the server, save the provider, then register it. Nothing is saved
+/// when the check fails. Returns how many models the server lists.
+async fn save(
+    store: &CustomProviderStore,
+    registry: &ProviderRegistry,
+    mode: Mode,
+    api: ApiId,
+    submission: Submission,
+) -> anyhow::Result<(ProviderId, usize)> {
+    let Submission { name, url, key } = submission;
+    if mode == Mode::Add {
+        custom_providers::ensure_new_name(store, registry, &name).await?;
+    }
+    let (entry, models) = custom_providers::check(name, api, &url, key.as_deref()).await?;
+    match mode {
+        Mode::Add => store.add(&entry, key).await?,
+        Mode::Edit => store.update(&entry, key).await?,
+    }
+    let count = models.len();
+    registry.insert(store.provider(&entry, models)?);
+    Ok((entry.name.id(), count))
 }
 
 impl Component<AlanAction> for ProviderOverlay {
@@ -404,19 +434,21 @@ fn render_fields(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::custom_providers::CustomProviderStore;
-    use providers::{InMemoryCredentialStore, ProviderRegistry};
+    use providers::InMemoryCredentialStore;
     use ratatui::{Terminal, backend::TestBackend};
 
-    fn providers() -> Arc<CustomProviders> {
-        Arc::new(CustomProviders::new(
-            CustomProviderStore::new(std::env::temp_dir().join(format!(
+    fn store() -> Arc<CustomProviderStore> {
+        Arc::new(CustomProviderStore::new(
+            std::env::temp_dir().join(format!(
                 "alan-provider-overlay-test-{}.json",
                 std::process::id()
-            ))),
-            Arc::new(ProviderRegistry::new([])),
+            )),
             Arc::new(InMemoryCredentialStore::new()),
         ))
+    }
+
+    fn overlay() -> ProviderOverlay {
+        ProviderOverlay::add(store(), Arc::new(ProviderRegistry::new([])))
     }
 
     fn press(overlay: &mut ProviderOverlay, code: KeyCode) -> KeyOutcome {
@@ -447,7 +479,7 @@ mod tests {
 
     #[test]
     fn typing_fills_the_focused_field_and_tab_moves_on() {
-        let mut overlay = ProviderOverlay::add(providers());
+        let mut overlay = overlay();
         type_text(&mut overlay, "grok");
         press(&mut overlay, KeyCode::Tab);
         type_text(&mut overlay, "https://api.x.ai/v1");
@@ -468,7 +500,12 @@ mod tests {
             url: "https://api.x.ai/v1".into(),
             api: ApiId::ChatCompletions,
         };
-        let mut overlay = ProviderOverlay::edit(providers(), entry, Some("xai-1".into()));
+        let mut overlay = ProviderOverlay::edit(
+            store(),
+            Arc::new(ProviderRegistry::new([])),
+            entry,
+            Some("xai-1".into()),
+        );
         assert_eq!(overlay.focused, URL);
         press(&mut overlay, KeyCode::BackTab);
         assert_eq!(press(&mut overlay, KeyCode::Char('x')), KeyOutcome::Ignore);
@@ -478,7 +515,7 @@ mod tests {
 
     #[test]
     fn an_error_goes_back_to_the_form_with_fields_kept() {
-        let mut overlay = ProviderOverlay::add(providers());
+        let mut overlay = overlay();
         type_text(&mut overlay, "grok");
         overlay.state =
             OverlayState::Error("the API key was rejected (HTTP 401 Unauthorized)".into());
@@ -490,7 +527,7 @@ mod tests {
 
     #[test]
     fn saved_closes_and_esc_cancels() {
-        let mut overlay = ProviderOverlay::add(providers());
+        let mut overlay = overlay();
         assert_eq!(press(&mut overlay, KeyCode::Esc), KeyOutcome::Close);
         overlay.state = OverlayState::Saved(3);
         assert_eq!(press(&mut overlay, KeyCode::Enter), KeyOutcome::Close);

@@ -13,7 +13,7 @@ mod session;
 mod steering;
 
 use crate::core::chat::ChatController;
-use crate::core::custom_providers::{self, CustomProviderStore, CustomProviders};
+use crate::core::custom_providers::{self, CustomProviderStore};
 use crate::core::permissions::PermissionHandler;
 use crate::core::permissions::PermissionRequest;
 use crate::core::permissions::{Answer, Policy, ToolPolicy};
@@ -111,13 +111,12 @@ impl ChatView {
     }
 
     /// What `/provider` saves through. It holds only handles, so a fresh one
-    /// sees the same providers as the one `main.rs` loaded them with.
-    fn custom_providers(&self) -> Arc<CustomProviders> {
+    /// sees the same files as the one `main.rs` loaded them from.
+    fn custom_provider_store(&self) -> Arc<CustomProviderStore> {
         let path = custom_providers::default_providers_path()
             .expect("main.rs resolved the data directory at startup");
-        Arc::new(CustomProviders::new(
-            CustomProviderStore::new(path),
-            Arc::clone(&self.providers),
+        Arc::new(CustomProviderStore::new(
+            path,
             Arc::clone(&self.credentials),
         ))
     }

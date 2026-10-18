@@ -1,7 +1,6 @@
 use crate::Model;
 use crate::auth::AuthResolver;
 use crate::catalog::{ApiId, ModelInfo, ProviderId, ServerToolInfo};
-use crate::custom::CustomProvider;
 use crate::model::ModelOptions;
 use async_trait::async_trait;
 use llm::LlmApi;
@@ -79,50 +78,28 @@ pub trait Provider: Auth + Send + Sync {
     }
 }
 
-/// Every provider a model can bind to, in two tracks: the built-ins fixed at
-/// construction, and custom providers added and removed at runtime. The
-/// custom track keeps their type so an edit can reach them.
+/// Every provider a model can bind to: the built-ins, then the custom
+/// providers `/provider add` registers at runtime.
 pub struct ProviderRegistry {
-    builtin: Vec<Arc<dyn Provider>>,
-    custom: RwLock<Vec<Arc<CustomProvider>>>,
+    providers: RwLock<Vec<Arc<dyn Provider>>>,
 }
 
 impl ProviderRegistry {
-    pub fn new(builtin: impl IntoIterator<Item = Arc<dyn Provider>>) -> Self {
+    pub fn new(providers: impl IntoIterator<Item = Arc<dyn Provider>>) -> Self {
         Self {
-            builtin: builtin.into_iter().collect(),
-            custom: RwLock::new(Vec::new()),
+            providers: RwLock::new(providers.into_iter().collect()),
         }
     }
 
-    /// A snapshot of both tracks, built-ins first.
     pub fn providers(&self) -> Vec<Arc<dyn Provider>> {
-        let custom = self.custom.read().unwrap_or_else(|e| e.into_inner());
-        self.builtin
-            .iter()
-            .cloned()
-            .chain(
-                custom
-                    .iter()
-                    .map(|provider| Arc::clone(provider) as Arc<dyn Provider>),
-            )
-            .collect()
+        self.providers
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 
     pub fn get(&self, id: &ProviderId) -> Option<Arc<dyn Provider>> {
-        self.builtin
-            .iter()
-            .find(|p| p.id() == *id)
-            .cloned()
-            .or_else(|| self.custom(id).map(|p| p as Arc<dyn Provider>))
-    }
-
-    pub fn is_builtin(&self, id: &ProviderId) -> bool {
-        self.builtin.iter().any(|p| p.id() == *id)
-    }
-
-    pub fn custom(&self, id: &ProviderId) -> Option<Arc<CustomProvider>> {
-        self.custom
+        self.providers
             .read()
             .unwrap_or_else(|e| e.into_inner())
             .iter()
@@ -130,15 +107,17 @@ impl ProviderRegistry {
             .cloned()
     }
 
-    pub fn add_custom(&self, provider: Arc<CustomProvider>) {
-        self.custom
-            .write()
-            .unwrap_or_else(|e| e.into_inner())
-            .push(provider);
+    /// Add `provider`, or replace the one with its id in place.
+    pub fn insert(&self, provider: Arc<dyn Provider>) {
+        let mut providers = self.providers.write().unwrap_or_else(|e| e.into_inner());
+        match providers.iter_mut().find(|p| p.id() == provider.id()) {
+            Some(saved) => *saved = provider,
+            None => providers.push(provider),
+        }
     }
 
-    pub fn remove_custom(&self, id: &ProviderId) {
-        self.custom
+    pub fn remove(&self, id: &ProviderId) {
+        self.providers
             .write()
             .unwrap_or_else(|e| e.into_inner())
             .retain(|provider| provider.id() != *id);
@@ -175,56 +154,45 @@ mod tests {
     use super::*;
     use crate::{CustomProvider, InMemoryCredentialStore};
 
-    fn custom(name: &str, model: &str) -> Arc<CustomProvider> {
+    fn provider(name: &str, url: &str) -> Arc<dyn Provider> {
         Arc::new(
             CustomProvider::new(
                 ProviderId::new(name),
                 ApiId::ChatCompletions,
-                "http://localhost:11434/v1",
+                url,
                 Arc::new(InMemoryCredentialStore::new()),
-                vec![ModelInfo::new(model, ProviderId::new(name))],
+                vec![ModelInfo::new(url, ProviderId::new(name))],
             )
             .unwrap(),
         )
     }
 
-    // Any provider stands in for a built-in: only the track it sits in matters.
-    fn builtin(name: &str) -> Arc<dyn Provider> {
-        custom(name, "m")
+    fn ids_and_models(registry: &ProviderRegistry) -> Vec<(String, String)> {
+        registry
+            .providers()
+            .iter()
+            .map(|p| (p.id().0, p.models()[0].id.clone()))
+            .collect()
     }
 
     #[test]
-    fn providers_lists_builtins_before_custom() {
-        let registry = ProviderRegistry::new([builtin("openrouter")]);
-        registry.add_custom(custom("grok", "grok-4"));
+    fn insert_replaces_a_provider_in_place_and_remove_drops_it() {
+        let registry = ProviderRegistry::new([provider("openrouter", "a")]);
+        registry.insert(provider("grok", "b"));
+        registry.insert(provider("groq", "c"));
 
-        let ids: Vec<_> = registry.providers().iter().map(|p| p.id().0).collect();
+        registry.insert(provider("grok", "d"));
+        assert_eq!(
+            ids_and_models(&registry),
+            [
+                ("openrouter".into(), "a".into()),
+                ("grok".into(), "d".into()),
+                ("groq".into(), "c".into())
+            ]
+        );
 
-        assert_eq!(ids, ["openrouter", "grok"]);
-    }
-
-    #[test]
-    fn each_lookup_sees_the_right_track() {
-        let registry = ProviderRegistry::new([builtin("openrouter")]);
-        registry.add_custom(custom("grok", "grok-4"));
-
-        assert!(registry.get(&ProviderId::new("openrouter")).is_some());
-        assert!(registry.get(&ProviderId::new("grok")).is_some());
-        assert!(registry.is_builtin(&ProviderId::new("openrouter")));
-        assert!(!registry.is_builtin(&ProviderId::new("grok")));
-        assert!(registry.custom(&ProviderId::new("grok")).is_some());
-        assert!(registry.custom(&ProviderId::new("openrouter")).is_none());
-    }
-
-    #[test]
-    fn remove_custom_leaves_builtins_alone() {
-        let registry = ProviderRegistry::new([builtin("openrouter")]);
-        registry.add_custom(custom("grok", "grok-4"));
-
-        registry.remove_custom(&ProviderId::new("grok"));
-        registry.remove_custom(&ProviderId::new("openrouter"));
-
+        registry.remove(&ProviderId::new("grok"));
         assert!(registry.get(&ProviderId::new("grok")).is_none());
-        assert!(registry.get(&ProviderId::new("openrouter")).is_some());
+        assert!(registry.get(&ProviderId::new("groq")).is_some());
     }
 }

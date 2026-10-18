@@ -6,7 +6,7 @@ mod provider_overlay;
 mod root;
 mod views;
 
-use crate::core::custom_providers::{self, CustomProviderStore, CustomProviders};
+use crate::core::custom_providers::{self, CustomProviderStore};
 use crate::core::permissions::AlanPermissionManager;
 use crate::core::permissions::ToolPolicy;
 use crate::core::permissions_store;
@@ -73,15 +73,16 @@ async fn main() -> anyhow::Result<()> {
     let providers = build_providers(&credential_store_for_providers)?;
     let registry = Arc::new(ProviderRegistry::new(providers));
 
-    let custom_providers = CustomProviders::new(
-        CustomProviderStore::new(custom_providers::default_providers_path()?),
-        Arc::clone(&registry),
+    let custom_provider_store = CustomProviderStore::new(
+        custom_providers::default_providers_path()?,
         Arc::clone(&credential_store_for_providers),
     );
-    let startup_notices = custom_providers.load().await.unwrap_or_else(|error| {
-        tracing::warn!(%error, "failed to load custom providers");
-        Vec::new()
-    });
+    let startup_notices = custom_providers::load(&custom_provider_store, &registry)
+        .await
+        .unwrap_or_else(|error| {
+            tracing::warn!(%error, "failed to load custom providers");
+            Vec::new()
+        });
     let session_manager = Arc::new(SessionManager::new(sessions_path()?));
     let resumed_session = load_resumed_session(&session_manager).await?;
     let model = select_model(&registry, &settings, resumed_session.as_ref())?;
