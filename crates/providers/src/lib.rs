@@ -2,20 +2,20 @@ mod auth;
 mod catalog;
 mod chatgpt;
 mod credentials;
+mod custom;
 mod deepseek;
 mod google;
-mod local;
 mod model;
 mod oauth;
 mod openrouter;
 mod provider;
-mod store;
 mod zai;
 
+pub use custom::{CustomProvider, fetch_catalog};
 pub use deepseek::{DeepSeekBuilder, DeepSeekProvider};
 
 pub use auth::{
-    ApiKeyAuth, AuthError, AuthMethod, AuthResolver, AuthResult, CredentialAuth, NoAuth, Resolved,
+    ApiKeyAuth, AuthError, AuthMethod, AuthResolver, AuthResult, CredentialAuth, Resolved,
 };
 pub use catalog::{ApiId, ModelCapabilities, ModelInfo, ModelPricing, ProviderId, ServerToolInfo};
 pub use chatgpt::{
@@ -27,7 +27,6 @@ pub use credentials::{
     FileCredentialStore, InMemoryCredentialStore, SharedCredentialStore,
 };
 pub use google::{GoogleBuilder, GoogleProvider};
-pub use local::{LocalApi, LocalModelEntry, LocalProvider, bind_local_model, list_local_models};
 pub use model::{Model, ModelError, ModelOptions};
 pub use oauth::{
     OAuthConfig, OAuthError, SignInStart, Tokens as OAuthTokens, exchange_code,
@@ -36,5 +35,4 @@ pub use oauth::{
 };
 pub use openrouter::{OpenRouterBuilder, OpenRouterProvider, Options as OpenRouterOptions};
 pub use provider::{Auth, Provider, ProviderError, ProviderRegistry, bind_model};
-pub use store::LocalModelStore;
 pub use zai::{ZaiBuilder, ZaiProvider};

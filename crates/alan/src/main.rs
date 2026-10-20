@@ -1,22 +1,23 @@
 mod core;
 mod keymap;
-mod local_model_overlay;
-mod local_model_store;
 mod logging;
 mod login_overlay;
+mod provider_overlay;
 mod root;
 mod views;
 
+use crate::core::custom_providers::{self, CustomProviderStore};
 use crate::core::permissions::AlanPermissionManager;
 use crate::core::permissions::ToolPolicy;
 use crate::core::permissions_store;
 use crate::core::server_tools::server_tools;
 use crate::core::settings::patch_from_profile;
-use crate::core::settings::{DEFAULT_MODEL, PatchSettings, Settings, SettingsStore};
+use crate::core::settings::{
+    DEFAULT_MODEL, DEFAULT_PROVIDER, PatchSettings, Settings, SettingsStore,
+};
 use crate::core::update::current_version;
 use crate::core::{ChatController, SlashCommand};
 use crate::keymap::AlanKeyMapper;
-use crate::local_model_store::JsonLocalModelStore;
 use crate::logging::init;
 use crate::root::AlanRoot;
 use agent::{
@@ -25,8 +26,8 @@ use agent::{
 use alan_tui::Runtime;
 use llm::ReasoningEffort;
 use providers::{
-    ChatGptProvider, DeepSeekProvider, FileCredentialStore, LocalProvider, ModelOptions,
-    OpenRouterProvider, Provider, ProviderRegistry, ZaiProvider, bind_local_model, bind_model,
+    ChatGptProvider, DeepSeekProvider, FileCredentialStore, ModelOptions, OpenRouterProvider,
+    Provider, ProviderId, ProviderRegistry, ZaiProvider, bind_model,
 };
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -69,20 +70,19 @@ async fn main() -> anyhow::Result<()> {
     let credential_store = Arc::new(FileCredentialStore::new(auth_path()?));
     let credential_store_for_providers =
         credential_store.clone() as Arc<dyn providers::CredentialStore>;
-    let local_provider = load_local_provider().await?;
-    let providers = build_providers(&credential_store_for_providers, &local_provider)?;
+    let providers = build_providers(&credential_store_for_providers)?;
+    let registry = Arc::new(ProviderRegistry::new(providers));
+
+    let custom_provider_store = CustomProviderStore::new(
+        custom_providers::default_providers_path()?,
+        Arc::clone(&credential_store_for_providers),
+    );
+    if let Err(error) = custom_providers::load(&custom_provider_store, &registry).await {
+        tracing::warn!(%error, "failed to load custom providers");
+    }
     let session_manager = Arc::new(SessionManager::new(sessions_path()?));
     let resumed_session = load_resumed_session(&session_manager).await?;
-    let model = select_model(
-        &providers,
-        &local_provider,
-        &settings,
-        resumed_session.as_ref(),
-    )?;
-    let registry = Arc::new(ProviderRegistry::with_local_provider(
-        providers,
-        Arc::clone(&local_provider),
-    ));
+    let model = select_model(&registry, &settings, resumed_session.as_ref())?;
 
     let current_dir = std::env::current_dir()?;
 
@@ -199,20 +199,8 @@ async fn load_or_create_settings(store: &SettingsStore) -> anyhow::Result<Settin
     }
 }
 
-async fn load_local_provider() -> anyhow::Result<Arc<LocalProvider>> {
-    let store = Arc::new(JsonLocalModelStore::new(
-        core::paths::alan_data_dir()?.join("local_models.json"),
-    ));
-    let provider = Arc::new(LocalProvider::new(store));
-    if let Err(error) = provider.load().await {
-        tracing::warn!("failed to load local models: {error}");
-    }
-    Ok(provider)
-}
-
 fn build_providers(
     credential_store: &Arc<dyn providers::CredentialStore>,
-    local_provider: &Arc<LocalProvider>,
 ) -> anyhow::Result<Vec<Arc<dyn Provider>>> {
     Ok(vec![
         Arc::new(ZaiProvider::from_store(Arc::clone(credential_store)).build()?),
@@ -221,7 +209,6 @@ fn build_providers(
         Arc::new(OpenRouterProvider::from_store(Arc::clone(credential_store)).build()?),
         Arc::new(DeepSeekProvider::from_store(Arc::clone(credential_store)).build()?),
         Arc::new(ChatGptProvider::from_store(Arc::clone(credential_store)).build()),
-        Arc::clone(local_provider) as Arc<dyn Provider>,
     ])
 }
 
@@ -236,24 +223,22 @@ async fn load_resumed_session(
 }
 
 fn select_model(
-    providers: &[Arc<dyn Provider>],
-    local_provider: &LocalProvider,
+    registry: &ProviderRegistry,
     settings: &Settings,
     resumed_session: Option<&agent::Session>,
 ) -> anyhow::Result<providers::Model> {
     let (provider_id, model_id) = match resumed_session {
         Some(session) => (session.provider.as_str(), session.model.clone()),
         None => (
-            settings.provider.as_deref().unwrap_or("openrouter"),
+            settings.provider.as_deref().unwrap_or(DEFAULT_PROVIDER),
             settings
                 .model
                 .clone()
                 .unwrap_or_else(|| DEFAULT_MODEL.into()),
         ),
     };
-    let provider = providers
-        .iter()
-        .find(|provider| provider.id().0 == provider_id)
+    let provider = registry
+        .get(&ProviderId::new(provider_id))
         .ok_or_else(|| anyhow::anyhow!("Provider not found: {provider_id}"))?;
     let options = ModelOptions {
         server_tools: server_tools(
@@ -264,12 +249,6 @@ fn select_model(
         reasoning_effort: settings.reasoning.unwrap_or_default(),
         extensions: settings.extensions(&model_id),
     };
-    if provider_id == "local" {
-        let entry = local_provider.find_entry(&model_id).ok_or_else(|| {
-            anyhow::anyhow!("Local model not found: {model_id} (manage it with /local)")
-        })?;
-        return Ok(bind_local_model(&entry, options)?);
-    }
     Ok(bind_model(provider.as_ref(), &model_id, options)?)
 }
 

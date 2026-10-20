@@ -13,6 +13,7 @@ mod session;
 mod steering;
 
 use crate::core::chat::ChatController;
+use crate::core::custom_providers::{self, CustomProviderStore};
 use crate::core::permissions::PermissionHandler;
 use crate::core::permissions::PermissionRequest;
 use crate::core::permissions::{Answer, Policy, ToolPolicy};
@@ -29,7 +30,7 @@ use alan_tui::entity::Entity;
 use alan_tui::{Subscription, SubscriptionEvent};
 use crossterm::event::{Event, KeyCode, KeyEventKind};
 use futures_util::Stream;
-use providers::ProviderRegistry;
+use providers::{CredentialStore, ProviderRegistry};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::Style;
@@ -50,12 +51,6 @@ const EDITOR_BOTTOM_PAD: u16 = 1;
 /// Fixed-rate repaint interval while an agent stream is in flight.
 const STREAM_REPAINT_INTERVAL: std::time::Duration = std::time::Duration::from_millis(32);
 
-/// Action chosen from the local-model picker.
-pub(crate) enum LocalPick {
-    Remove,
-    Edit,
-}
-
 #[derive(Debug, Clone, Copy)]
 pub struct LoginRequested;
 
@@ -71,6 +66,7 @@ pub struct ChatView {
     permission: Option<Entity<permissions::PermissionPrompt>>,
 
     providers: Arc<ProviderRegistry>,
+    credentials: Arc<dyn CredentialStore>,
     permission_handler: PermissionHandler,
     policy: ToolPolicy,
     /// Subscription to the permission-request stream.
@@ -89,6 +85,7 @@ impl ChatView {
     pub fn new(
         controller: ChatController,
         providers: Arc<ProviderRegistry>,
+        credentials: Arc<dyn CredentialStore>,
         permission_handler: PermissionHandler,
         policy: ToolPolicy,
         skill_roots: Vec<PathBuf>,
@@ -101,6 +98,7 @@ impl ChatView {
             pending_permission: None,
             permission: None,
             providers,
+            credentials,
             permission_handler,
             policy,
             permission_subscription: None,
@@ -110,6 +108,17 @@ impl ChatView {
             skills: Vec::new(),
             skill_roots,
         }
+    }
+
+    /// What `/provider` saves through. It holds only handles, so a fresh one
+    /// sees the same files as the one `main.rs` loaded them from.
+    fn custom_provider_store(&self) -> Arc<CustomProviderStore> {
+        let path = custom_providers::default_providers_path()
+            .expect("main.rs resolved the data directory at startup");
+        Arc::new(CustomProviderStore::new(
+            path,
+            Arc::clone(&self.credentials),
+        ))
     }
 
     fn set_tool_policy(&mut self, policy: Policy, cx: &mut Context<'_, Self, AlanAction>) {
@@ -250,7 +259,7 @@ impl ChatView {
                 Cmd::Help => controller.push_info(crate::core::SlashCommand::help()),
                 Cmd::New => session::start_new_session(self, cx),
                 Cmd::Models => models::open_models_picker(self, cx),
-                Cmd::Local => models::handle_local_command(self, &submission.text, cx),
+                Cmd::Provider => models::handle_provider_command(self, &submission.text, cx),
                 Cmd::Profile => profiles::handle_profile_command(self, &submission.text, cx),
                 Cmd::Quit => cx.quit(),
             }

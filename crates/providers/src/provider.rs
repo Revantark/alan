@@ -1,24 +1,23 @@
 use crate::Model;
 use crate::auth::AuthResolver;
 use crate::catalog::{ApiId, ModelInfo, ProviderId, ServerToolInfo};
-use crate::local::LocalProvider;
 use crate::model::ModelOptions;
 use async_trait::async_trait;
 use llm::LlmApi;
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum ProviderError {
-    #[error("model not found: {0}")]
-    ModelNotFound(String),
     #[error("API is not configured for model {model}")]
     MissingApi { model: String },
     #[error("authentication is not configured")]
     MissingAuth,
     #[error("failed to fetch models: {0}")]
     Fetch(String),
+    #[error("{0:?} is not supported for custom providers yet")]
+    UnsupportedApi(ApiId),
     #[error("issued OAuth tokens did not contain a usable credential: {0}")]
     SignIn(String),
 }
@@ -79,40 +78,49 @@ pub trait Provider: Auth + Send + Sync {
     }
 }
 
+/// Every provider a model can bind to: the built-ins, then the custom
+/// providers `/provider add` registers at runtime.
 pub struct ProviderRegistry {
-    providers: Vec<Arc<dyn Provider>>,
-    local_provider: Option<Arc<LocalProvider>>,
+    providers: RwLock<Vec<Arc<dyn Provider>>>,
 }
 
 impl ProviderRegistry {
     pub fn new(providers: impl IntoIterator<Item = Arc<dyn Provider>>) -> Self {
         Self {
-            providers: providers.into_iter().collect(),
-            local_provider: None,
+            providers: RwLock::new(providers.into_iter().collect()),
         }
     }
 
-    pub fn with_local_provider(
-        providers: impl IntoIterator<Item = Arc<dyn Provider>>,
-        local_provider: Arc<LocalProvider>,
-    ) -> Self {
-        Self {
-            providers: providers.into_iter().collect(),
-            local_provider: Some(local_provider),
-        }
-    }
-
-    pub fn providers(&self) -> &[Arc<dyn Provider>] {
-        &self.providers
+    pub fn providers(&self) -> Vec<Arc<dyn Provider>> {
+        self.providers
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 
     pub fn get(&self, id: &ProviderId) -> Option<Arc<dyn Provider>> {
-        self.providers.iter().find(|p| p.id() == *id).cloned()
+        self.providers
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .find(|p| p.id() == *id)
+            .cloned()
     }
 
-    /// Return an `Arc` clone of the local provider, if registered.
-    pub fn local(&self) -> Option<Arc<LocalProvider>> {
-        self.local_provider.clone()
+    /// Add `provider`, or replace the one with its id in place.
+    pub fn insert(&self, provider: Arc<dyn Provider>) {
+        let mut providers = self.providers.write().unwrap_or_else(|e| e.into_inner());
+        match providers.iter_mut().find(|p| p.id() == provider.id()) {
+            Some(saved) => *saved = provider,
+            None => providers.push(provider),
+        }
+    }
+
+    pub fn remove(&self, id: &ProviderId) {
+        self.providers
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .retain(|provider| provider.id() != *id);
     }
 }
 
@@ -139,4 +147,52 @@ pub fn bind_model(
         provider.auth(),
         options,
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{CustomProvider, InMemoryCredentialStore};
+
+    fn provider(name: &str, url: &str) -> Arc<dyn Provider> {
+        Arc::new(
+            CustomProvider::new(
+                ProviderId::new(name),
+                ApiId::ChatCompletions,
+                url,
+                Arc::new(InMemoryCredentialStore::new()),
+                vec![ModelInfo::new(url, ProviderId::new(name))],
+            )
+            .unwrap(),
+        )
+    }
+
+    fn ids_and_models(registry: &ProviderRegistry) -> Vec<(String, String)> {
+        registry
+            .providers()
+            .iter()
+            .map(|p| (p.id().0, p.models()[0].id.clone()))
+            .collect()
+    }
+
+    #[test]
+    fn insert_replaces_a_provider_in_place_and_remove_drops_it() {
+        let registry = ProviderRegistry::new([provider("openrouter", "a")]);
+        registry.insert(provider("grok", "b"));
+        registry.insert(provider("groq", "c"));
+
+        registry.insert(provider("grok", "d"));
+        assert_eq!(
+            ids_and_models(&registry),
+            [
+                ("openrouter".into(), "a".into()),
+                ("grok".into(), "d".into()),
+                ("groq".into(), "c".into())
+            ]
+        );
+
+        registry.remove(&ProviderId::new("grok"));
+        assert!(registry.get(&ProviderId::new("grok")).is_none());
+        assert!(registry.get(&ProviderId::new("groq")).is_some());
+    }
 }

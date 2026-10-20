@@ -143,6 +143,7 @@ impl Component<AlanAction> for AlanRoot {
                 .take()
                 .expect("chat component installed once"),
             Arc::clone(&self.providers),
+            Arc::clone(&self.credentials),
             self.permission_handler.clone(),
             self.policy.clone(),
             self.skill_roots.clone(),
