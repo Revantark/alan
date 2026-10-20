@@ -271,10 +271,9 @@ pub fn default_providers_path() -> Result<PathBuf> {
 
 /// Register every saved provider Alan can use; their models are fetched the
 /// next time `/models` opens. Entries it cannot read or bind are skipped.
-/// Call it once the built-ins are registered: returns a notice for each entry
-/// removed because a built-in now takes its name.
-pub async fn load(store: &CustomProviderStore, registry: &ProviderRegistry) -> Result<Vec<String>> {
-    let mut notices = Vec::new();
+/// Call it once the built-ins are registered, so an entry whose name a
+/// built-in now takes is removed.
+pub async fn load(store: &CustomProviderStore, registry: &ProviderRegistry) -> Result<()> {
     for entry in store.load_each().await? {
         let Ok(entry) = entry.inspect_err(|error| {
             tracing::warn!(%error, "skipping an unreadable entry in providers.json");
@@ -285,10 +284,11 @@ pub async fn load(store: &CustomProviderStore, registry: &ProviderRegistry) -> R
         // built-in, so only the entry goes.
         if registry.get(&entry.name.id()).is_some() {
             store.remove_entry(&entry.name).await?;
-            notices.push(format!(
-                "custom provider {} ({}) was removed: a built-in provider now uses that name; add it again under another name",
-                entry.name, entry.url
-            ));
+            tracing::warn!(
+                provider = %entry.name,
+                url = %entry.url,
+                "removed a custom provider: a built-in provider now uses its name"
+            );
             continue;
         }
         match store.provider(&entry, Vec::new()) {
@@ -298,7 +298,7 @@ pub async fn load(store: &CustomProviderStore, registry: &ProviderRegistry) -> R
             }
         }
     }
-    Ok(notices)
+    Ok(())
 }
 
 /// Refuse a name `/provider add` cannot take, before any request.
@@ -734,9 +734,8 @@ pub(crate) mod tests {
         let registry = ProviderRegistry::new([]);
         let store = CustomProviderStore::new(path, Arc::new(InMemoryCredentialStore::new()));
 
-        let notices = load(&store, &registry).await.unwrap();
+        load(&store, &registry).await.unwrap();
 
-        assert!(notices.is_empty(), "{notices:?}");
         let ids: Vec<_> = registry.providers().iter().map(|p| p.id().0).collect();
         assert_eq!(ids, ["grok"]);
         // Models come with the first `/models`, not at startup.
@@ -765,14 +764,8 @@ pub(crate) mod tests {
             .unwrap();
         let registry = ProviderRegistry::new([provider("openai", &["gpt"])]);
 
-        let notices = load(&store, &registry).await.unwrap();
+        load(&store, &registry).await.unwrap();
 
-        assert_eq!(
-            notices,
-            [
-                "custom provider openai (http://localhost:1/v1) was removed: a built-in provider now uses that name; add it again under another name"
-            ]
-        );
         assert_eq!(names(&store).await, ["grok"]);
         // The built-in keeps its place and its key.
         let openai = registry.get(&name("openai").id()).unwrap();
