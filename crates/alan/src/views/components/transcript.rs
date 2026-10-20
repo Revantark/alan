@@ -307,8 +307,7 @@ impl tui_markdown::StyleSheet for MarkdownStyleSheet {
     fn heading(&self, level: u8) -> Style {
         let style = Style::default().fg(theme::HEADING_FG);
         match level {
-            1 => style.bold().underlined(),
-            2 | 3 => style.bold(),
+            1..=3 => style.bold(),
             _ => style,
         }
     }
