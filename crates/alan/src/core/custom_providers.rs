@@ -21,7 +21,7 @@ const PROVIDERS_KEY: &str = "providers";
 
 /// A custom provider's name, and its id in `/models`, `auth.json`,
 /// `settings.json` and `ALAN_PROVIDER`.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(try_from = "String")]
 pub struct ProviderName(String);
 
@@ -171,7 +171,7 @@ impl CustomProviderStore {
             .entries()
             .await?
             .into_iter()
-            .find(|saved| saved.name.id() == name.id()))
+            .find(|saved| saved.name == *name))
     }
 
     /// Whether any entry uses `name`, even one this Alan cannot read.
