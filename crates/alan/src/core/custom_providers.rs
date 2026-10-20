@@ -115,9 +115,8 @@ impl CustomProviderStore {
     }
 
     pub async fn remove(&self, name: &ProviderName) -> Result<()> {
-        self.remove_entry(name).await?;
         self.credentials.delete(&name.id()).await?;
-        Ok(())
+        self.remove_entry(name).await
     }
 
     /// The provider to register for `entry`; it reads its key from this
@@ -584,6 +583,16 @@ pub(crate) mod tests {
         cleanup("edit-key-fails");
     }
 
+    #[tokio::test]
+    async fn remove_keeps_the_entry_when_the_key_cannot_be_deleted() {
+        let store = CustomProviderStore::new(temp_path("delete-fails"), Arc::new(FailingKeys));
+        store.put(&entry("grok", "http://one")).await.unwrap();
+
+        assert!(store.remove(&name("grok")).await.is_err());
+        assert_eq!(names(&store).await, ["grok"]);
+        cleanup("delete-fails");
+    }
+
     /// A key store whose writes always fail.
     struct FailingKeys;
 
@@ -602,7 +611,7 @@ pub(crate) mod tests {
         }
 
         async fn delete(&self, _: &ProviderId) -> Result<(), CredentialError> {
-            Ok(())
+            Err(CredentialError::LockBusy)
         }
     }
 
