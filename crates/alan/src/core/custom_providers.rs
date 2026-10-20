@@ -102,7 +102,7 @@ impl CustomProviderStore {
 
     /// Save a new provider and its key, or neither.
     pub async fn add(&self, entry: &CustomProviderEntry, key: Option<String>) -> Result<()> {
-        self.put(entry.clone()).await?;
+        self.put(entry).await?;
         if let Err(error) = self.save_key(&entry.name, key).await {
             if let Err(undo) = self.remove_entry(&entry.name).await {
                 return Err(error.context(format!(
@@ -117,7 +117,7 @@ impl CustomProviderStore {
 
     /// Save a changed provider. No key removes the saved one.
     pub async fn update(&self, entry: &CustomProviderEntry, key: Option<String>) -> Result<()> {
-        self.put(entry.clone()).await?;
+        self.put(entry).await?;
         self.save_key(&entry.name, key).await
     }
 
@@ -150,7 +150,7 @@ impl CustomProviderStore {
     }
 
     /// Save `entry`, replacing a saved provider with the same name.
-    async fn put(&self, entry: CustomProviderEntry) -> Result<()> {
+    async fn put(&self, entry: &CustomProviderEntry) -> Result<()> {
         let name = entry.name.to_string();
         let value = serde_json::to_value(entry)?;
         self.store
@@ -445,7 +445,7 @@ pub(crate) mod tests {
             ("b", "http://two"),
             ("a", "http://three"),
         ] {
-            store.put(entry(n, url)).await.unwrap();
+            store.put(&entry(n, url)).await.unwrap();
         }
         let urls: Vec<_> = store
             .entries()
@@ -620,7 +620,7 @@ pub(crate) mod tests {
     async fn load_drops_an_entry_a_builtin_now_names_and_keeps_the_builtins_key() {
         let (store, credentials) = store("load-clash");
         for n in ["openai", "grok"] {
-            store.put(entry(n, "http://localhost:1/v1")).await.unwrap();
+            store.put(&entry(n, "http://localhost:1/v1")).await.unwrap();
         }
         credentials
             .put(
