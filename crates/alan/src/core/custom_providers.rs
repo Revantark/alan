@@ -177,9 +177,7 @@ impl CustomProviderStore {
     /// Whether any entry uses `name`, even one this Alan cannot read.
     async fn contains(&self, name: &ProviderName) -> Result<bool> {
         let values = raw_entries(self.store.get(PROVIDERS_KEY).await?)?;
-        Ok(values
-            .iter()
-            .any(|saved| has_name(saved, &name.to_string())))
+        Ok(values.iter().any(|saved| has_name(saved, name)))
     }
 
     /// Each saved entry on its own, with the reason for any it cannot read.
@@ -190,7 +188,7 @@ impl CustomProviderStore {
 
     /// Save `entry`, replacing a saved provider with the same name.
     async fn put(&self, entry: &CustomProviderEntry) -> Result<()> {
-        let name = entry.name.to_string();
+        let name = entry.name.clone();
         let value = serde_json::to_value(entry)?;
         self.store
             .update(PROVIDERS_KEY, move |saved| {
@@ -212,10 +210,7 @@ impl CustomProviderStore {
         self.store
             .update(PROVIDERS_KEY, move |saved| {
                 let mut values = raw_entries(saved)?;
-                if values
-                    .iter()
-                    .any(|saved| has_name(saved, &name.to_string()))
-                {
+                if values.iter().any(|saved| has_name(saved, &name)) {
                     return Err(already_exists(&name));
                 }
 
@@ -226,7 +221,7 @@ impl CustomProviderStore {
     }
 
     async fn remove_entry(&self, name: &ProviderName) -> Result<()> {
-        let name = name.to_string();
+        let name = name.clone();
         self.store
             .update(PROVIDERS_KEY, move |saved| {
                 let mut values = raw_entries(saved)?;
@@ -256,8 +251,8 @@ fn raw_entries(value: Option<Value>) -> Result<Vec<Value>> {
         .unwrap_or_default())
 }
 
-fn has_name(entry: &Value, name: &str) -> bool {
-    entry.get("name").and_then(Value::as_str) == Some(name)
+fn has_name(entry: &Value, name: &ProviderName) -> bool {
+    entry.get("name").and_then(Value::as_str) == Some(name.0.as_str())
 }
 
 fn already_exists(name: &ProviderName) -> anyhow::Error {
