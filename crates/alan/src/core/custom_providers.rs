@@ -135,15 +135,19 @@ impl CustomProviderStore {
         )?))
     }
 
-    /// Write `entry`, then its key. A refused key puts `previous` back, or
-    /// takes a new entry out.
+    /// Write `entry`, then its key. Without `previous` the entry is new and
+    /// its name must be free. A refused key puts `previous` back, or takes the
+    /// new entry out.
     async fn save_provider(
         &self,
         entry: &CustomProviderEntry,
         key: Option<String>,
         previous: Option<CustomProviderEntry>,
     ) -> Result<()> {
-        self.put(entry).await?;
+        match &previous {
+            Some(_) => self.put(entry).await?,
+            None => self.insert(entry).await?,
+        }
         let Err(error) = self.save_key(&entry.name, key).await else {
             return Ok(());
         };
@@ -170,6 +174,14 @@ impl CustomProviderStore {
             .find(|saved| saved.name.id() == name.id()))
     }
 
+    /// Whether any entry uses `name`, even one this Alan cannot read.
+    async fn contains(&self, name: &ProviderName) -> Result<bool> {
+        let values = raw_entries(self.store.get(PROVIDERS_KEY).await?)?;
+        Ok(values
+            .iter()
+            .any(|saved| has_name(saved, &name.to_string())))
+    }
+
     /// Each saved entry on its own, with the reason for any it cannot read.
     async fn load_each(&self) -> Result<Vec<serde_json::Result<CustomProviderEntry>>> {
         let values = raw_entries(self.store.get(PROVIDERS_KEY).await?)?;
@@ -187,6 +199,27 @@ impl CustomProviderStore {
                     Some(saved) => *saved = value,
                     None => values.push(value),
                 }
+                Ok((Some(Value::Array(values)), ()))
+            })
+            .await
+    }
+
+    /// Save `entry` under a name no entry uses. The check and the write share
+    /// one lock, so another Alan cannot take the name in between.
+    async fn insert(&self, entry: &CustomProviderEntry) -> Result<()> {
+        let name = entry.name.clone();
+        let value = serde_json::to_value(entry)?;
+        self.store
+            .update(PROVIDERS_KEY, move |saved| {
+                let mut values = raw_entries(saved)?;
+                if values
+                    .iter()
+                    .any(|saved| has_name(saved, &name.to_string()))
+                {
+                    return Err(already_exists(&name));
+                }
+
+                values.push(value);
                 Ok((Some(Value::Array(values)), ()))
             })
             .await
@@ -225,6 +258,10 @@ fn raw_entries(value: Option<Value>) -> Result<Vec<Value>> {
 
 fn has_name(entry: &Value, name: &str) -> bool {
     entry.get("name").and_then(Value::as_str) == Some(name)
+}
+
+fn already_exists(name: &ProviderName) -> anyhow::Error {
+    anyhow::anyhow!("{name} already exists; change it with /provider edit")
 }
 
 /// Default location of providers.json inside the Alan data directory.
@@ -270,11 +307,9 @@ pub async fn ensure_new_name(
     registry: &ProviderRegistry,
     name: &ProviderName,
 ) -> Result<()> {
-    let saved = store.entries().await?;
-    anyhow::ensure!(
-        saved.iter().all(|entry| entry.name.id() != name.id()),
-        "{name} already exists; change it with /provider edit"
-    );
+    if store.contains(name).await? {
+        return Err(already_exists(name));
+    }
     // A built-in's key in `auth.json` sits under the same name.
     anyhow::ensure!(
         registry.get(&name.id()).is_none(),
@@ -434,6 +469,54 @@ pub(crate) mod tests {
                 .is_ok()
         );
         cleanup("names");
+    }
+
+    #[tokio::test]
+    async fn add_refuses_a_saved_name_and_update_a_missing_one() {
+        let (store, _credentials) = store("wrong-name");
+        store.add(&entry("grok", "http://one"), None).await.unwrap();
+
+        let added = store.add(&entry("grok", "http://two"), None).await;
+        let updated = store.update(&entry("groq", "http://two"), None).await;
+
+        assert_eq!(
+            added.unwrap_err().to_string(),
+            "grok already exists; change it with /provider edit"
+        );
+        assert_eq!(
+            updated.unwrap_err().to_string(),
+            "groq is not saved; add it with /provider add"
+        );
+        assert_eq!(store.entries().await.unwrap()[0].url, "http://one");
+        cleanup("wrong-name");
+    }
+
+    #[tokio::test]
+    async fn add_refuses_a_name_only_a_newer_alan_can_read() {
+        let path = temp_path("newer-name");
+        let newer = json!({"name": "grok", "url": "http://x", "api": "SomeFutureStandard"});
+        JsonStore::new(path.clone())
+            .set(PROVIDERS_KEY, json!([newer.clone()]))
+            .await
+            .unwrap();
+        let store = CustomProviderStore::new(path.clone(), Arc::new(FailingKeys));
+
+        let error = store
+            .add(&entry("grok", "http://one"), Some("sk".into()))
+            .await
+            .unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "grok already exists; change it with /provider edit"
+        );
+        let raw = JsonStore::new(path)
+            .get(PROVIDERS_KEY)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(raw, json!([newer]));
+        cleanup("newer-name");
     }
 
     #[tokio::test]
