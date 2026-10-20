@@ -102,24 +102,16 @@ impl CustomProviderStore {
 
     /// Save a new provider and its key, or neither.
     pub async fn add(&self, entry: &CustomProviderEntry, key: Option<String>) -> Result<()> {
-        self.put(entry).await?;
-        let Err(error) = self.save_key(&entry.name, key).await else {
-            return Ok(());
-        };
-
-        Err(match self.remove_entry(&entry.name).await {
-            Ok(()) => error,
-            Err(undo) => error.context(format!(
-                "{} is still in providers.json: {undo:#}",
-                entry.name
-            )),
-        })
+        self.save_provider(entry, key, None).await
     }
 
-    /// Save a changed provider. No key removes the saved one.
+    /// Save a changed provider and its key, or neither. No key removes the
+    /// saved one.
     pub async fn update(&self, entry: &CustomProviderEntry, key: Option<String>) -> Result<()> {
-        self.put(entry).await?;
-        self.save_key(&entry.name, key).await
+        let previous = self.find(&entry.name).await?.ok_or_else(|| {
+            anyhow::anyhow!("{} is not saved; add it with /provider add", entry.name)
+        })?;
+        self.save_provider(entry, key, Some(previous)).await
     }
 
     pub async fn remove(&self, name: &ProviderName) -> Result<()> {
@@ -142,6 +134,41 @@ impl CustomProviderStore {
             Arc::clone(&self.credentials),
             models,
         )?))
+    }
+
+    /// Write `entry`, then its key. A refused key puts `previous` back, or
+    /// takes a new entry out.
+    async fn save_provider(
+        &self,
+        entry: &CustomProviderEntry,
+        key: Option<String>,
+        previous: Option<CustomProviderEntry>,
+    ) -> Result<()> {
+        self.put(entry).await?;
+        let Err(error) = self.save_key(&entry.name, key).await else {
+            return Ok(());
+        };
+
+        let undo = match &previous {
+            Some(previous) => self.put(previous).await,
+            None => self.remove_entry(&entry.name).await,
+        };
+
+        Err(match undo {
+            Ok(()) => error,
+            Err(undo) => error.context(format!(
+                "{} is still in providers.json: {undo:#}",
+                entry.name
+            )),
+        })
+    }
+
+    async fn find(&self, name: &ProviderName) -> Result<Option<CustomProviderEntry>> {
+        Ok(self
+            .entries()
+            .await?
+            .into_iter()
+            .find(|saved| saved.name.id() == name.id()))
     }
 
     /// Each saved entry on its own, with the reason for any it cannot read.
@@ -541,6 +568,20 @@ pub(crate) mod tests {
         assert!(result.is_err());
         assert!(names(&store).await.is_empty());
         cleanup("key-fails");
+    }
+
+    #[tokio::test]
+    async fn update_puts_the_old_entry_back_when_the_key_cannot_be_saved() {
+        let store = CustomProviderStore::new(temp_path("edit-key-fails"), Arc::new(FailingKeys));
+        store.put(&entry("grok", "http://one")).await.unwrap();
+
+        let result = store
+            .update(&entry("grok", "http://two"), Some("sk".into()))
+            .await;
+
+        assert!(result.is_err());
+        assert_eq!(store.entries().await.unwrap()[0].url, "http://one");
+        cleanup("edit-key-fails");
     }
 
     /// A key store whose writes always fail.
