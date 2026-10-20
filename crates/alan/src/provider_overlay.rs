@@ -227,7 +227,7 @@ async fn save(
 ) -> anyhow::Result<(ProviderId, usize)> {
     let Submission { name, url, key } = submission;
     if mode == Mode::Add {
-        custom_providers::ensure_new_name(store, registry, &name).await?;
+        custom_providers::check_name(store, registry, &name).await?;
     }
     let (entry, models) = custom_providers::check(name, api, &url, key.as_deref()).await?;
     let count = models.len();

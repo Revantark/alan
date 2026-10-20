@@ -287,7 +287,7 @@ pub async fn load(store: &CustomProviderStore, registry: &ProviderRegistry) -> R
 }
 
 /// Refuse a name `/provider add` cannot take, before any request.
-pub async fn ensure_new_name(
+pub async fn check_name(
     store: &CustomProviderStore,
     registry: &ProviderRegistry,
     name: &ProviderName,
@@ -428,15 +428,15 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn ensure_new_name_refuses_saved_and_builtin_names() {
+    async fn check_name_refuses_saved_and_builtin_names() {
         let (store, _credentials) = store("names");
         store.add(&entry("grok", "http://x"), None).await.unwrap();
         let registry = ProviderRegistry::new([provider("deepseek", &[])]);
 
-        let saved = ensure_new_name(&store, &registry, &name("grok"))
+        let saved = check_name(&store, &registry, &name("grok"))
             .await
             .unwrap_err();
-        let builtin = ensure_new_name(&store, &registry, &name("deepseek"))
+        let builtin = check_name(&store, &registry, &name("deepseek"))
             .await
             .unwrap_err();
 
@@ -448,11 +448,7 @@ pub(crate) mod tests {
             builtin.to_string(),
             "deepseek is a built-in provider; pick another name, e.g. deepseek-2"
         );
-        assert!(
-            ensure_new_name(&store, &registry, &name("groq"))
-                .await
-                .is_ok()
-        );
+        assert!(check_name(&store, &registry, &name("groq")).await.is_ok());
         cleanup("names");
     }
 
