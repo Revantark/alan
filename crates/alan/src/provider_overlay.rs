@@ -167,13 +167,17 @@ impl ProviderOverlay {
     }
 
     fn edit_focused(&mut self, edit: impl FnOnce(&mut String)) -> KeyOutcome {
-        let field = match self.focused {
-            NAME if self.mode == Mode::Add => &mut self.fields.name,
-            URL => &mut self.fields.url,
-            API_KEY => &mut self.fields.api_key,
+        match self.focused {
+            // The name is an id that `auth.json`, `settings.json` and the
+            // registry match exactly, so capitals are lowercased as typed.
+            NAME if self.mode == Mode::Add => {
+                edit(&mut self.fields.name);
+                self.fields.name.make_ascii_lowercase();
+            }
+            URL => edit(&mut self.fields.url),
+            API_KEY => edit(&mut self.fields.api_key),
             _ => return KeyOutcome::Ignore,
-        };
-        edit(field);
+        }
         KeyOutcome::Redraw
     }
 
@@ -494,6 +498,15 @@ mod tests {
         assert_eq!(overlay.fields.name, "grok");
         assert_eq!(overlay.fields.url, "https://api.x.ai/v1");
         assert_eq!(overlay.fields.api_key, "xai-1");
+    }
+
+    #[test]
+    fn the_name_is_lowercased_as_it_is_typed_or_pasted() {
+        let mut overlay = overlay();
+        type_text(&mut overlay, "Isoquant");
+        overlay.edit_focused(|field| field.push_str("-AI"));
+
+        assert_eq!(overlay.fields.name, "isoquant-ai");
     }
 
     #[test]
