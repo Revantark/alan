@@ -10,6 +10,8 @@ pub const TOOL_DONE_BG: Color = Color::Rgb(43, 67, 52);
 pub const TOOL_ERROR_FG: Color = Color::Rgb(240, 180, 184);
 pub const TOOL_ERROR_BG: Color = Color::Rgb(70, 43, 47);
 pub const RESPONSE_FG: Color = Color::Gray;
+/// Markdown heading text: one accent color for every level, no background.
+pub const HEADING_FG: Color = Color::Cyan;
 pub const MUTED_FG: Color = Color::DarkGray;
 pub const REASONING_FG: Color = Color::DarkGray;
 pub const EDITOR_BG: Color = Color::Rgb(28, 32, 39);

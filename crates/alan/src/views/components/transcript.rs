@@ -305,7 +305,12 @@ struct MarkdownStyleSheet;
 
 impl tui_markdown::StyleSheet for MarkdownStyleSheet {
     fn heading(&self, level: u8) -> Style {
-        tui_markdown::DefaultStyleSheet.heading(level).bold()
+        let style = Style::default().fg(theme::HEADING_FG);
+        match level {
+            1 => style.bold().underlined(),
+            2 | 3 => style.bold(),
+            _ => style,
+        }
     }
 
     fn code(&self) -> Style {
@@ -336,12 +341,14 @@ fn wrap_markdown(text: &str, width: usize) -> Vec<Line<'static>> {
         content.clear();
         graphemes.clear();
         runs.clear();
+
+        let base = response_style.patch(source.style);
         let line_bytes: usize = source.spans.iter().map(|span| span.content.len()).sum();
         content.reserve(line_bytes);
         graphemes.reserve(line_bytes);
 
         for span in &source.spans {
-            let style = response_style.patch(span.style);
+            let style = base.patch(span.style);
             if runs.last().is_none_or(|(_, run_style)| *run_style != style) {
                 runs.push((content.len(), style));
             }
@@ -367,7 +374,7 @@ fn wrap_markdown(text: &str, width: usize) -> Vec<Line<'static>> {
                     push_styled_range(&mut spans, &content, &runs, fragment.whitespace);
                 }
             }
-            spans.insert(0, Span::styled(prefix.clone(), response_style));
+            spans.insert(0, Span::styled(prefix.clone(), base));
             lines.push(Line {
                 style: source.style,
                 alignment: source.alignment,
@@ -580,11 +587,11 @@ mod tests {
             .lines
             .into_iter()
             .map(|mut line| {
+                let base = response_style.patch(line.style);
                 for span in &mut line.spans {
-                    span.style = response_style.patch(span.style);
+                    span.style = base.patch(span.style);
                 }
-                line.spans
-                    .insert(0, Span::styled(prefix.clone(), response_style));
+                line.spans.insert(0, Span::styled(prefix.clone(), base));
                 line
             })
             .collect();

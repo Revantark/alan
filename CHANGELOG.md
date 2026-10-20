@@ -15,6 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Update default system prompt to include output formatting.
 - Assistant responses and info entries now wrap at word boundaries instead of splitting mid-word; long unbreakable words such as URLs are hard-split to fit the line.
+- Markdown headings render in the cyan accent color, with weight separating the top levels, instead of body-colored text; H1 no longer paints a full-width background band.
 
 ## 0.1.8 - 2026-10-16
 
