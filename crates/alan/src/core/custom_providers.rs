@@ -271,8 +271,9 @@ pub fn default_providers_path() -> Result<PathBuf> {
 
 /// Register every saved provider Alan can use; their models are fetched the
 /// next time `/models` opens. Entries it cannot read or bind are skipped.
-/// Call it once the built-ins are registered, so an entry whose name a
-/// built-in now takes is removed.
+/// Call it once the built-ins are registered: a provider saved before a
+/// release added a built-in with its name replaces that built-in, so the
+/// user's settings, sessions and key keep pointing where they did.
 pub async fn load(store: &CustomProviderStore, registry: &ProviderRegistry) -> Result<()> {
     for entry in store.load_each().await? {
         let Ok(entry) = entry.inspect_err(|error| {
@@ -280,17 +281,6 @@ pub async fn load(store: &CustomProviderStore, registry: &ProviderRegistry) -> R
         }) else {
             continue;
         };
-        // The name, and its key slot in `auth.json`, now belong to the
-        // built-in, so only the entry goes.
-        if registry.get(&entry.name.id()).is_some() {
-            store.remove_entry(&entry.name).await?;
-            tracing::warn!(
-                provider = %entry.name,
-                url = %entry.url,
-                "removed a custom provider: a built-in provider now uses its name"
-            );
-            continue;
-        }
         match store.provider(&entry, Vec::new()) {
             Ok(provider) => registry.insert(provider),
             Err(error) => {
@@ -750,34 +740,21 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn load_drops_an_entry_a_builtin_now_names_and_keeps_the_builtins_key() {
-        let (store, credentials) = store("load-clash");
+    async fn load_keeps_a_custom_provider_a_newer_builtin_shares_a_name_with() {
+        let (store, _credentials) = store("load-clash");
         for n in ["openai", "grok"] {
             store.put(&entry(n, "http://localhost:1/v1")).await.unwrap();
         }
-        credentials
-            .put(
-                &name("openai").id(),
-                Credential::ApiKey { key: "sk".into() },
-            )
-            .await
-            .unwrap();
         let registry = ProviderRegistry::new([provider("openai", &["gpt"])]);
 
         load(&store, &registry).await.unwrap();
 
-        assert_eq!(names(&store).await, ["grok"]);
-        // The built-in keeps its place and its key.
+        assert_eq!(names(&store).await, ["openai", "grok"]);
+        let ids: Vec<_> = registry.providers().iter().map(|p| p.id().0).collect();
+        assert_eq!(ids, ["openai", "grok"]);
+        // The custom provider took the built-in's place: no models fetched yet.
         let openai = registry.get(&name("openai").id()).unwrap();
-        assert_eq!(openai.models()[0].id, "gpt");
-        assert!(registry.get(&name("grok").id()).is_some());
-        assert!(
-            credentials
-                .read(&name("openai").id())
-                .await
-                .unwrap()
-                .is_some()
-        );
+        assert!(openai.models().is_empty());
         cleanup("load-clash");
     }
 }

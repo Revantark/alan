@@ -67,7 +67,9 @@ OPENROUTER_API_KEY=... cargo run -p alan
 ```
 
 `ProviderRegistry` holds the built-ins from `build_providers`, then the custom
-providers added with `/provider add`; a built-in wins a name clash.
+providers added with `/provider add`. `/provider add` refuses a built-in's
+name; a custom provider saved before a release added a built-in with its name
+replaces that built-in.
 `core::custom_providers::CustomProviderStore` keeps a custom provider's name,
 URL and API standard (`ApiId`) in `<data dir>/providers.json` and its key in
 `auth.json`. `/provider` saves there first, then registers a
