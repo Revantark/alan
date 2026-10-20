@@ -103,16 +103,17 @@ impl CustomProviderStore {
     /// Save a new provider and its key, or neither.
     pub async fn add(&self, entry: &CustomProviderEntry, key: Option<String>) -> Result<()> {
         self.put(entry).await?;
-        if let Err(error) = self.save_key(&entry.name, key).await {
-            if let Err(undo) = self.remove_entry(&entry.name).await {
-                return Err(error.context(format!(
-                    "{} is still in providers.json: {undo:#}",
-                    entry.name
-                )));
-            }
-            return Err(error);
-        }
-        Ok(())
+        let Err(error) = self.save_key(&entry.name, key).await else {
+            return Ok(());
+        };
+
+        Err(match self.remove_entry(&entry.name).await {
+            Ok(()) => error,
+            Err(undo) => error.context(format!(
+                "{} is still in providers.json: {undo:#}",
+                entry.name
+            )),
+        })
     }
 
     /// Save a changed provider. No key removes the saved one.
