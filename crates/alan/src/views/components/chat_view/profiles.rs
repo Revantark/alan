@@ -3,7 +3,6 @@
 
 use crate::core::SlashCommand;
 use crate::core::profile::{self, Profile, ProfileStore};
-use crate::core::server_tools::web_flags;
 use crate::core::settings::{self, PatchSettings};
 use crate::root::AlanAction;
 use crate::views::components::{SearchListEvent, SearchListOverlay};
@@ -161,18 +160,18 @@ fn save_profile(view: &mut ChatView, cx: &mut Context<'_, ChatView, AlanAction>,
     store_profile(view, cx, name.to_owned());
 }
 
-async fn profile_from_runtime(agent: &Arc<agent::Agent>) -> Profile {
+async fn profile_from_runtime(agent: &Arc<agent::Agent>) -> Result<Profile, TaskError> {
     let info = agent.info().await;
     let options = agent.model_options().await;
-    let (web_fetch, web_search) = web_flags(&options.server_tools);
+    let settings = settings::get_settings().await.map_err(super::to_task)?;
 
-    Profile {
+    Ok(Profile {
         provider: info.provider.0,
         model: info.id,
         reasoning: options.reasoning_effort,
-        web_fetch,
-        web_search,
-    }
+        web_fetch: settings.web_fetch.unwrap_or(false),
+        web_search: settings.web_search.unwrap_or(false),
+    })
 }
 
 fn apply_profile(
@@ -191,7 +190,7 @@ fn apply_profile(
             options.reasoning_effort = profile.reasoning;
             options.server_tools = server_tools_for_provider(
                 &providers,
-                &profile.provider,
+                &ProviderId::new(profile.provider.clone()),
                 profile.web_fetch,
                 profile.web_search,
             );
@@ -270,7 +269,7 @@ fn store_profile(view: &mut ChatView, cx: &mut Context<'_, ChatView, AlanAction>
 
     cx.spawn(
         async move {
-            let profile = profile_from_runtime(&agent).await;
+            let profile = profile_from_runtime(&agent).await?;
 
             profile_store()?
                 .save_new(&name, profile)

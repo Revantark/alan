@@ -1,5 +1,5 @@
 //! Mapping between provider server tools and the settings that toggle them,
-//! shared by startup resolution, the profile apply flow, and profile capture.
+//! shared by startup resolution, the model picker, and the profile apply flow.
 
 use providers::ServerToolInfo;
 
@@ -42,21 +42,6 @@ pub fn server_tools(
         .collect()
 }
 
-/// Recover the `web_fetch`/`web_search` settings from the tools a model was
-/// bound with, so a saved profile round-trips them.
-pub fn web_flags(tools: &[llm::ServerTool]) -> (bool, bool) {
-    let enabled = |kind: WebTool| {
-        let id = WEB_TOOLS
-            .iter()
-            .find(|(_, k)| *k == kind)
-            .map(|(id, _)| *id);
-
-        tools.iter().any(|tool| Some(tool.kind.as_str()) == id)
-    };
-
-    (enabled(WebTool::Fetch), enabled(WebTool::Search))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -96,25 +81,18 @@ mod tests {
     }
 
     #[test]
-    fn web_flags_round_trip_through_server_tools() {
-        for (fetch, search) in [(false, false), (true, false), (false, true), (true, true)] {
-            let available = [
-                tool("openrouter:web_fetch"),
-                tool("openrouter:web_search"),
-                tool("some_other_provider:web_fetch"),
-            ];
-            let enabled = server_tools(&available, fetch, search);
+    fn unlisted_provider_tools_are_never_enabled() {
+        let available = [
+            tool("openrouter:web_fetch"),
+            tool("some_other_provider:web_fetch"),
+        ];
+        let enabled = server_tools(&available, true, true);
 
-            assert_eq!(web_flags(&enabled), (fetch, search));
-        }
-    }
-
-    #[test]
-    fn web_flags_ignores_unlisted_tools() {
-        let bound = vec![llm::ServerTool {
-            kind: "some_other_provider:web_fetch".to_owned(),
-        }];
-
-        assert_eq!(web_flags(&bound), (false, false));
+        assert_eq!(
+            enabled,
+            vec![llm::ServerTool {
+                kind: "openrouter:web_fetch".to_owned()
+            }]
+        );
     }
 }

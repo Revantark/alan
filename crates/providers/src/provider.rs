@@ -141,6 +141,23 @@ pub fn bind_model(
             .ok_or_else(|| ProviderError::MissingApi {
                 model: model_info.id.clone(),
             })?;
+
+    let ModelOptions {
+        server_tools,
+        reasoning_effort,
+        extensions,
+    } = options;
+
+    let options = ModelOptions {
+        server_tools: crate::model::supported_server_tools(
+            server_tools,
+            provider.server_tools(),
+            &model_info.provider,
+        ),
+        reasoning_effort,
+        extensions,
+    };
+
     Ok(Model::new_with_options(
         model_info,
         api,
