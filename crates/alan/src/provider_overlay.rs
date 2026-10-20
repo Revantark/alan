@@ -226,12 +226,15 @@ async fn save(
         custom_providers::ensure_new_name(store, registry, &name).await?;
     }
     let (entry, models) = custom_providers::check(name, api, &url, key.as_deref()).await?;
+    let count = models.len();
+    // Built before saving, so nothing can fail between the save and the
+    // registry update.
+    let provider = store.provider(&entry, models)?;
     match mode {
         Mode::Add => store.add(&entry, key).await?,
         Mode::Edit => store.update(&entry, key).await?,
     }
-    let count = models.len();
-    registry.insert(store.provider(&entry, models)?);
+    registry.insert(provider);
     Ok((entry.name.id(), count))
 }
 
