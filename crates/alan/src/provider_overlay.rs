@@ -60,13 +60,16 @@ struct Submission {
 enum OverlayState {
     Editing,
     Checking,
-    /// Saved; the server lists this many models.
-    Saved(usize),
     Error(String),
 }
 
-/// Emitted once a provider is saved and registered under this id.
-pub struct ProviderSaved(pub ProviderId);
+/// Emitted once a provider is saved and registered. The host closes the
+/// form: an event emitted from a task callback is delivered after the
+/// overlay's own close would have removed it.
+pub struct ProviderSaved {
+    pub id: ProviderId,
+    pub models: usize,
+}
 
 /// What a key press needs from the host beyond the overlay's own state.
 #[derive(Debug, PartialEq, Eq)]
@@ -125,10 +128,6 @@ impl ProviderOverlay {
         match &self.state {
             OverlayState::Editing => self.on_editing_key(key),
             OverlayState::Checking => KeyOutcome::Ignore,
-            OverlayState::Saved(_) => match key.code {
-                KeyCode::Enter | KeyCode::Esc => KeyOutcome::Close,
-                _ => KeyOutcome::Ignore,
-            },
             // Back to the form with everything typed, to fix the URL or key.
             OverlayState::Error(_) => match key.code {
                 KeyCode::Enter | KeyCode::Esc => {
@@ -146,7 +145,13 @@ impl ProviderOverlay {
             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 KeyOutcome::Close
             }
-            KeyCode::Enter => KeyOutcome::Submit,
+            // Enter walks the fields like Tab and saves from the last one.
+            // The API row is fixed, so Enter skips it.
+            KeyCode::Enter => match self.focused {
+                API_KEY => KeyOutcome::Submit,
+                NAME => self.focus(URL),
+                _ => self.focus(API_KEY),
+            },
             KeyCode::Tab | KeyCode::Down => self.move_focus(1),
             KeyCode::BackTab | KeyCode::Up => self.move_focus(-1),
             KeyCode::Backspace => self.edit_focused(|field| {
@@ -162,7 +167,11 @@ impl ProviderOverlay {
     }
 
     fn move_focus(&mut self, delta: isize) -> KeyOutcome {
-        self.focused = (self.focused as isize + delta).rem_euclid(FIELD_COUNT as isize) as usize;
+        self.focus((self.focused as isize + delta).rem_euclid(FIELD_COUNT as isize) as usize)
+    }
+
+    fn focus(&mut self, field: usize) -> KeyOutcome {
+        self.focused = field;
         KeyOutcome::Redraw
     }
 
@@ -200,15 +209,12 @@ impl ProviderOverlay {
                     .await
                     .map_err(|error| TaskError(format!("{error:#}").into()))
             },
-            |result, overlay, cx| {
-                overlay.state = match result {
-                    Ok((id, count)) => {
-                        cx.emit(ProviderSaved(id));
-                        OverlayState::Saved(count)
-                    }
-                    Err(error) => OverlayState::Error(error.to_string()),
-                };
-                cx.notify();
+            |result, overlay, cx| match result {
+                Ok((id, models)) => cx.emit(ProviderSaved { id, models }),
+                Err(error) => {
+                    overlay.state = OverlayState::Error(error.to_string());
+                    cx.notify();
+                }
             },
         );
         self.state = OverlayState::Checking;
@@ -315,13 +321,12 @@ fn render_provider_overlay(
                 Mode::Edit => "Edit Provider",
             },
             if width >= 60 {
-                " Tab move   Enter check and save   Esc cancel "
+                " Tab move   Enter next, saves on API Key   Esc cancel "
             } else {
                 " Tab · Enter · Esc "
             },
         ),
         OverlayState::Checking => ("Checking…", ""),
-        OverlayState::Saved(_) => ("Saved", " Enter / Esc close "),
         OverlayState::Error(_) => ("Not saved", " Enter / Esc back to the form "),
     };
     let block = Block::bordered()
@@ -345,15 +350,6 @@ fn render_provider_overlay(
         OverlayState::Editing => render_fields(frame, inner, fields, focused, mode, accent, muted),
         OverlayState::Checking => frame.render_widget(
             Paragraph::new(format!("  Checking {url}/models…")).style(accent),
-            inner,
-        ),
-        OverlayState::Saved(count) => frame.render_widget(
-            Paragraph::new(format!(
-                "  Saved {}: {count} model{}. Pick one with /models.",
-                fields.name.trim(),
-                if *count == 1 { "" } else { "s" }
-            ))
-            .style(accent),
             inner,
         ),
         OverlayState::Error(error) => frame.render_widget(
@@ -561,13 +557,23 @@ mod tests {
     }
 
     #[test]
-    fn saved_closes_and_esc_cancels() {
+    fn esc_cancels_and_checking_ignores_keys() {
         let mut overlay = overlay();
         assert_eq!(press(&mut overlay, KeyCode::Esc), KeyOutcome::Close);
-        overlay.state = OverlayState::Saved(3);
-        assert_eq!(press(&mut overlay, KeyCode::Enter), KeyOutcome::Close);
         overlay.state = OverlayState::Checking;
         assert_eq!(press(&mut overlay, KeyCode::Esc), KeyOutcome::Ignore);
+    }
+
+    #[test]
+    fn enter_moves_to_the_next_field_and_saves_from_the_key() {
+        let mut overlay = overlay();
+        type_text(&mut overlay, "groq");
+
+        assert_eq!(press(&mut overlay, KeyCode::Enter), KeyOutcome::Redraw);
+        assert_eq!(overlay.focused, URL);
+        assert_eq!(press(&mut overlay, KeyCode::Enter), KeyOutcome::Redraw);
+        assert_eq!(overlay.focused, API_KEY);
+        assert_eq!(press(&mut overlay, KeyCode::Enter), KeyOutcome::Submit);
     }
 
     #[test]

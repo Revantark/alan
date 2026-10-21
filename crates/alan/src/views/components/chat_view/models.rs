@@ -285,7 +285,15 @@ fn edit_provider(
 fn open_provider_form(cx: &mut Context<'_, ChatView, AlanAction>, form: ProviderOverlay) {
     let form = cx.open_overlay(form);
     cx.subscribe_once::<ProviderSaved, ProviderOverlay, _>(form, |saved, view, _form, cx| {
-        rebind_model(view, cx, saved.0.clone());
+        cx.close_overlay();
+        view.controller.push_info(format!(
+            "saved provider: {} ({} model{}); pick one with /models",
+            saved.id,
+            saved.models,
+            if saved.models == 1 { "" } else { "s" }
+        ));
+        cx.notify();
+        rebind_model(view, cx, saved.id.clone());
     });
 }
 
