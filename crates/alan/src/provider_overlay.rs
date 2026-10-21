@@ -13,7 +13,7 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Clear, Paragraph, Wrap};
 use std::sync::Arc;
-use unicode_width::UnicodeWidthStr;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 const FIELD_COUNT: usize = 4;
 const FIELD_LABELS: [&str; FIELD_COUNT] = ["Name", "URL", "API", "API Key"];
@@ -387,13 +387,7 @@ fn render_fields(
         }
         let is_focused = i == focused;
         let text = if i == NAME { &fields.name } else { &fields.url };
-        let value = match i {
-            API => Span::styled("Chat Completions", value_style),
-            API_KEY if fields.api_key.is_empty() => Span::styled("optional", muted),
-            API_KEY => Span::styled("•".repeat(fields.api_key.chars().count()), value_style),
-            _ if text.is_empty() => Span::styled("required", muted),
-            _ => Span::styled(text.as_str(), value_style),
-        };
+        let mask = "•".repeat(fields.api_key.chars().count());
         let mut spans = vec![
             Span::styled(if is_focused { " › " } else { "   " }, accent),
             Span::styled(
@@ -407,15 +401,23 @@ fn render_fields(
             Span::styled(": ", muted),
         ];
         let value_column: usize = spans.iter().map(Span::width).sum();
-        spans.push(value);
+        // One column stays free for the cursor after the last character.
+        let room = (inner.width as usize).saturating_sub(value_column + 1);
+        spans.push(match i {
+            API => Span::styled("Chat Completions", value_style),
+            API_KEY if fields.api_key.is_empty() => Span::styled("optional", muted),
+            API_KEY => Span::styled(tail(&mask, room), value_style),
+            _ if text.is_empty() => Span::styled("required", muted),
+            _ => Span::styled(tail(text, room), value_style),
+        });
         frame.render_widget(
             Paragraph::new(Line::from(spans)),
             Rect::new(inner.x, y, inner.width, 1),
         );
         let typed = match i {
-            NAME if mode == Mode::Add => Some(fields.name.width()),
-            URL => Some(fields.url.width()),
-            API_KEY => Some(fields.api_key.chars().count()),
+            NAME if mode == Mode::Add => Some(tail(&fields.name, room).width()),
+            URL => Some(tail(&fields.url, room).width()),
+            API_KEY => Some(tail(&mask, room).width()),
             _ => None,
         };
         if is_focused && let Some(typed) = typed {
@@ -436,6 +438,23 @@ fn render_fields(
             );
         }
     }
+}
+
+/// The end of `text` that fits in `width` columns, so a long URL or key shows
+/// what was typed last.
+fn tail(text: &str, width: usize) -> &str {
+    let mut used = 0;
+    let start = text
+        .char_indices()
+        .rev()
+        .take_while(|(_, c)| {
+            used += c.width().unwrap_or(0);
+            used <= width
+        })
+        .last()
+        .map_or(text.len(), |(start, _)| start);
+
+    &text[start..]
 }
 
 #[cfg(test)]
@@ -649,6 +668,43 @@ mod tests {
             .unwrap();
         let cursor = terminal.get_cursor_position().unwrap();
         assert_eq!((cursor.x, cursor.y), (x, y));
+    }
+
+    #[test]
+    fn a_long_url_shows_its_end_with_the_cursor_after_it() {
+        let fields = FormFields {
+            name: "grok".into(),
+            url: format!("https://gateway.example/{}END", "a".repeat(200)),
+            ..FormFields::default()
+        };
+        let mut terminal = Terminal::new(TestBackend::new(80, 18)).unwrap();
+        terminal
+            .draw(|frame| {
+                render_provider_overlay(
+                    frame,
+                    frame.area(),
+                    &fields,
+                    URL,
+                    &OverlayState::Editing,
+                    Mode::Add,
+                )
+            })
+            .unwrap();
+
+        let cursor = terminal.get_cursor_position().unwrap();
+        let buffer = terminal.backend().buffer();
+        let before: String = (cursor.x - 3..cursor.x)
+            .map(|x| buffer[(x, cursor.y)].symbol())
+            .collect();
+        assert_eq!(before, "END");
+    }
+
+    #[test]
+    fn tail_keeps_the_end_that_fits() {
+        assert_eq!(tail("abcdef", 3), "def");
+        assert_eq!(tail("ab", 3), "ab");
+        assert_eq!(tail("日本語", 4), "本語");
+        assert_eq!(tail("abc", 0), "");
     }
 
     #[test]
