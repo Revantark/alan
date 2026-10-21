@@ -8,7 +8,6 @@ use llm::{
     ChatCompletionsApi, CodecChunk, Credential as RequestCredential, HttpClient, LlmApi,
     LlmApiCodec, LlmError, LlmRequest,
 };
-use serde::Deserialize;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
@@ -249,18 +248,19 @@ fn parse_catalog(
     source: &str,
     payload: &str,
 ) -> Result<Vec<ModelInfo>, ProviderError> {
-    #[derive(Deserialize)]
-    struct Listing {
-        data: Vec<serde_json::Value>,
-    }
-
-    let listing: Listing = serde_json::from_str(payload).map_err(|error| {
+    let listing: serde_json::Value = serde_json::from_str(payload).map_err(|error| {
         ProviderError::Fetch(format!(
             "{source}/models did not return a Chat Completions model list: {error}"
         ))
     })?;
-    let mut models: Vec<ModelInfo> = listing
-        .data
+
+    let Some(entries) = listing.get("data").unwrap_or(&listing).as_array() else {
+        return Err(ProviderError::Fetch(format!(
+            "{source}/models did not return a Chat Completions model list"
+        )));
+    };
+
+    let mut models: Vec<ModelInfo> = entries
         .iter()
         .filter_map(|entry| {
             let id = entry.get("id")?.as_str()?.trim();
@@ -385,6 +385,13 @@ mod tests {
         .unwrap();
         let ids: Vec<_> = models.iter().map(|m| m.id.as_str()).collect();
         assert_eq!(ids, ["a", "b"]);
+    }
+
+    #[test]
+    fn parse_catalog_reads_a_bare_array() {
+        let models = parse_catalog(&id(), SOURCE, r#"[{"id":"a","context_length":4096}]"#).unwrap();
+        assert_eq!(models[0].id, "a");
+        assert_eq!(models[0].context_length, Some(4096));
     }
 
     #[test]
