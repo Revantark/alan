@@ -3,7 +3,11 @@ use crate::{
     ModelInfo, Provider, ProviderError, ProviderId, Resolved, ServerToolInfo,
 };
 use async_trait::async_trait;
-use llm::{ChatCompletionsApi, Credential as RequestCredential, HttpClient, LlmApi};
+use llm::apis::chat_completions::{BaseRequest, DefaultChatCompletionsCodec};
+use llm::{
+    ChatCompletionsApi, CodecChunk, Credential as RequestCredential, HttpClient, LlmApi,
+    LlmApiCodec, LlmError, LlmRequest,
+};
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
@@ -41,10 +45,10 @@ impl CustomProvider {
     ) -> Result<Self, ProviderError> {
         let base_url = base_url.into();
         let client: Arc<dyn LlmApi> = match &api {
-            ApiId::ChatCompletions => Arc::new(ChatCompletionsApi::new(
-                base_url.clone(),
-                Arc::new(HttpClient::new()),
-            )),
+            ApiId::ChatCompletions => Arc::new(
+                ChatCompletionsApi::new(base_url.clone(), Arc::new(HttpClient::new()))
+                    .with_codec(Arc::new(PlainChatCompletionsCodec)),
+            ),
             other => return Err(ProviderError::UnsupportedApi(other.clone())),
         };
         Ok(Self {
@@ -59,6 +63,28 @@ impl CustomProvider {
             base_url,
             id,
         })
+    }
+}
+
+/// The canonical body without OpenRouter's `reasoning` object and the cache
+/// fields: strict servers such as OpenAI, Mistral and Groq refuse any request
+/// carrying a field they do not know.
+struct PlainChatCompletionsCodec;
+
+impl LlmApiCodec for PlainChatCompletionsCodec {
+    fn request(&self, request: &LlmRequest<'_>) -> Result<String, LlmError> {
+        let mut json =
+            serde_json::to_value(BaseRequest::new(request)).map_err(LlmError::Serialization)?;
+        if let Some(object) = json.as_object_mut() {
+            for field in ["reasoning", "prompt_cache_key", "cache_control"] {
+                object.remove(field);
+            }
+        }
+        serde_json::to_string(&json).map_err(LlmError::Serialization)
+    }
+
+    fn response(&self, data: &str) -> Result<CodecChunk, LlmError> {
+        DefaultChatCompletionsCodec.response(data)
     }
 }
 
@@ -359,6 +385,33 @@ mod tests {
         .unwrap();
         let ids: Vec<_> = models.iter().map(|m| m.id.as_str()).collect();
         assert_eq!(ids, ["a", "b"]);
+    }
+
+    #[test]
+    fn requests_carry_no_fields_strict_servers_reject() {
+        let messages = [llm::Message::user("hi")];
+        let options = llm::RequestOptions {
+            cache_control: Some(llm::PromptCacheControl::one_hour()),
+            ..llm::RequestOptions::default()
+        };
+        let mut extensions = llm::Extensions::default();
+        extensions.insert(llm::SessionId("session".into()));
+        let request = LlmRequest {
+            model_id: "m1",
+            messages: &messages,
+            tools: &[],
+            options: &options,
+            credential: None,
+            reasoning_effort: llm::ReasoningEffort::High,
+            extensions,
+        };
+
+        let json: serde_json::Value =
+            serde_json::from_str(&PlainChatCompletionsCodec.request(&request).unwrap()).unwrap();
+
+        let mut keys: Vec<_> = json.as_object().unwrap().keys().collect();
+        keys.sort();
+        assert_eq!(keys, ["messages", "model", "stream"]);
     }
 
     #[test]
