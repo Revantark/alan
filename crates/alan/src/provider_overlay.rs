@@ -13,7 +13,7 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Clear, Paragraph, Wrap};
 use std::sync::Arc;
-use unicode_width::UnicodeWidthStr;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 const FIELD_COUNT: usize = 4;
 const FIELD_LABELS: [&str; FIELD_COUNT] = ["Name", "URL", "API", "API Key"];
@@ -60,13 +60,16 @@ struct Submission {
 enum OverlayState {
     Editing,
     Checking,
-    /// Saved; the server lists this many models.
-    Saved(usize),
     Error(String),
 }
 
-/// Emitted once a provider is saved and registered under this id.
-pub struct ProviderSaved(pub ProviderId);
+/// Emitted once a provider is saved and registered. The host closes the
+/// form: an event emitted from a task callback is delivered after the
+/// overlay's own close would have removed it.
+pub struct ProviderSaved {
+    pub id: ProviderId,
+    pub models: usize,
+}
 
 /// What a key press needs from the host beyond the overlay's own state.
 #[derive(Debug, PartialEq, Eq)]
@@ -125,10 +128,6 @@ impl ProviderOverlay {
         match &self.state {
             OverlayState::Editing => self.on_editing_key(key),
             OverlayState::Checking => KeyOutcome::Ignore,
-            OverlayState::Saved(_) => match key.code {
-                KeyCode::Enter | KeyCode::Esc => KeyOutcome::Close,
-                _ => KeyOutcome::Ignore,
-            },
             // Back to the form with everything typed, to fix the URL or key.
             OverlayState::Error(_) => match key.code {
                 KeyCode::Enter | KeyCode::Esc => {
@@ -146,7 +145,13 @@ impl ProviderOverlay {
             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 KeyOutcome::Close
             }
-            KeyCode::Enter => KeyOutcome::Submit,
+            // Enter walks the fields like Tab and saves from the last one.
+            // The API row is fixed, so Enter skips it.
+            KeyCode::Enter => match self.focused {
+                API_KEY => KeyOutcome::Submit,
+                NAME => self.focus(URL),
+                _ => self.focus(API_KEY),
+            },
             KeyCode::Tab | KeyCode::Down => self.move_focus(1),
             KeyCode::BackTab | KeyCode::Up => self.move_focus(-1),
             KeyCode::Backspace => self.edit_focused(|field| {
@@ -162,7 +167,11 @@ impl ProviderOverlay {
     }
 
     fn move_focus(&mut self, delta: isize) -> KeyOutcome {
-        self.focused = (self.focused as isize + delta).rem_euclid(FIELD_COUNT as isize) as usize;
+        self.focus((self.focused as isize + delta).rem_euclid(FIELD_COUNT as isize) as usize)
+    }
+
+    fn focus(&mut self, field: usize) -> KeyOutcome {
+        self.focused = field;
         KeyOutcome::Redraw
     }
 
@@ -200,15 +209,12 @@ impl ProviderOverlay {
                     .await
                     .map_err(|error| TaskError(format!("{error:#}").into()))
             },
-            |result, overlay, cx| {
-                overlay.state = match result {
-                    Ok((id, count)) => {
-                        cx.emit(ProviderSaved(id));
-                        OverlayState::Saved(count)
-                    }
-                    Err(error) => OverlayState::Error(error.to_string()),
-                };
-                cx.notify();
+            |result, overlay, cx| match result {
+                Ok((id, models)) => cx.emit(ProviderSaved { id, models }),
+                Err(error) => {
+                    overlay.state = OverlayState::Error(error.to_string());
+                    cx.notify();
+                }
             },
         );
         self.state = OverlayState::Checking;
@@ -315,13 +321,12 @@ fn render_provider_overlay(
                 Mode::Edit => "Edit Provider",
             },
             if width >= 60 {
-                " Tab move   Enter check and save   Esc cancel "
+                " Tab move   Enter next, saves on API Key   Esc cancel "
             } else {
                 " Tab · Enter · Esc "
             },
         ),
         OverlayState::Checking => ("Checking…", ""),
-        OverlayState::Saved(_) => ("Saved", " Enter / Esc close "),
         OverlayState::Error(_) => ("Not saved", " Enter / Esc back to the form "),
     };
     let block = Block::bordered()
@@ -345,15 +350,6 @@ fn render_provider_overlay(
         OverlayState::Editing => render_fields(frame, inner, fields, focused, mode, accent, muted),
         OverlayState::Checking => frame.render_widget(
             Paragraph::new(format!("  Checking {url}/models…")).style(accent),
-            inner,
-        ),
-        OverlayState::Saved(count) => frame.render_widget(
-            Paragraph::new(format!(
-                "  Saved {}: {count} model{}. Pick one with /models.",
-                fields.name.trim(),
-                if *count == 1 { "" } else { "s" }
-            ))
-            .style(accent),
             inner,
         ),
         OverlayState::Error(error) => frame.render_widget(
@@ -387,13 +383,7 @@ fn render_fields(
         }
         let is_focused = i == focused;
         let text = if i == NAME { &fields.name } else { &fields.url };
-        let value = match i {
-            API => Span::styled("Chat Completions", value_style),
-            API_KEY if fields.api_key.is_empty() => Span::styled("optional", muted),
-            API_KEY => Span::styled("•".repeat(fields.api_key.chars().count()), value_style),
-            _ if text.is_empty() => Span::styled("required", muted),
-            _ => Span::styled(text.as_str(), value_style),
-        };
+        let mask = "•".repeat(fields.api_key.chars().count());
         let mut spans = vec![
             Span::styled(if is_focused { " › " } else { "   " }, accent),
             Span::styled(
@@ -407,15 +397,23 @@ fn render_fields(
             Span::styled(": ", muted),
         ];
         let value_column: usize = spans.iter().map(Span::width).sum();
-        spans.push(value);
+        // One column stays free for the cursor after the last character.
+        let room = (inner.width as usize).saturating_sub(value_column + 1);
+        spans.push(match i {
+            API => Span::styled("Chat Completions", value_style),
+            API_KEY if fields.api_key.is_empty() => Span::styled("optional", muted),
+            API_KEY => Span::styled(tail(&mask, room), value_style),
+            _ if text.is_empty() => Span::styled("required", muted),
+            _ => Span::styled(tail(text, room), value_style),
+        });
         frame.render_widget(
             Paragraph::new(Line::from(spans)),
             Rect::new(inner.x, y, inner.width, 1),
         );
         let typed = match i {
-            NAME if mode == Mode::Add => Some(fields.name.width()),
-            URL => Some(fields.url.width()),
-            API_KEY => Some(fields.api_key.chars().count()),
+            NAME if mode == Mode::Add => Some(tail(&fields.name, room).width()),
+            URL => Some(tail(&fields.url, room).width()),
+            API_KEY => Some(tail(&mask, room).width()),
             _ => None,
         };
         if is_focused && let Some(typed) = typed {
@@ -436,6 +434,23 @@ fn render_fields(
             );
         }
     }
+}
+
+/// The end of `text` that fits in `width` columns, so a long URL or key shows
+/// what was typed last.
+fn tail(text: &str, width: usize) -> &str {
+    let mut used = 0;
+    let start = text
+        .char_indices()
+        .rev()
+        .take_while(|(_, c)| {
+            used += c.width().unwrap_or(0);
+            used <= width
+        })
+        .last()
+        .map_or(text.len(), |(start, _)| start);
+
+    &text[start..]
 }
 
 #[cfg(test)]
@@ -542,13 +557,23 @@ mod tests {
     }
 
     #[test]
-    fn saved_closes_and_esc_cancels() {
+    fn esc_cancels_and_checking_ignores_keys() {
         let mut overlay = overlay();
         assert_eq!(press(&mut overlay, KeyCode::Esc), KeyOutcome::Close);
-        overlay.state = OverlayState::Saved(3);
-        assert_eq!(press(&mut overlay, KeyCode::Enter), KeyOutcome::Close);
         overlay.state = OverlayState::Checking;
         assert_eq!(press(&mut overlay, KeyCode::Esc), KeyOutcome::Ignore);
+    }
+
+    #[test]
+    fn enter_moves_to_the_next_field_and_saves_from_the_key() {
+        let mut overlay = overlay();
+        type_text(&mut overlay, "groq");
+
+        assert_eq!(press(&mut overlay, KeyCode::Enter), KeyOutcome::Redraw);
+        assert_eq!(overlay.focused, URL);
+        assert_eq!(press(&mut overlay, KeyCode::Enter), KeyOutcome::Redraw);
+        assert_eq!(overlay.focused, API_KEY);
+        assert_eq!(press(&mut overlay, KeyCode::Enter), KeyOutcome::Submit);
     }
 
     #[test]
@@ -649,6 +674,43 @@ mod tests {
             .unwrap();
         let cursor = terminal.get_cursor_position().unwrap();
         assert_eq!((cursor.x, cursor.y), (x, y));
+    }
+
+    #[test]
+    fn a_long_url_shows_its_end_with_the_cursor_after_it() {
+        let fields = FormFields {
+            name: "grok".into(),
+            url: format!("https://gateway.example/{}END", "a".repeat(200)),
+            ..FormFields::default()
+        };
+        let mut terminal = Terminal::new(TestBackend::new(80, 18)).unwrap();
+        terminal
+            .draw(|frame| {
+                render_provider_overlay(
+                    frame,
+                    frame.area(),
+                    &fields,
+                    URL,
+                    &OverlayState::Editing,
+                    Mode::Add,
+                )
+            })
+            .unwrap();
+
+        let cursor = terminal.get_cursor_position().unwrap();
+        let buffer = terminal.backend().buffer();
+        let before: String = (cursor.x - 3..cursor.x)
+            .map(|x| buffer[(x, cursor.y)].symbol())
+            .collect();
+        assert_eq!(before, "END");
+    }
+
+    #[test]
+    fn tail_keeps_the_end_that_fits() {
+        assert_eq!(tail("abcdef", 3), "def");
+        assert_eq!(tail("ab", 3), "ab");
+        assert_eq!(tail("日本語", 4), "本語");
+        assert_eq!(tail("abc", 0), "");
     }
 
     #[test]
