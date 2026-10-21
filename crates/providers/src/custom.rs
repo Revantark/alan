@@ -197,10 +197,11 @@ async fn fetch_chat_completions_catalog(
 ) -> Result<Vec<ModelInfo>, ProviderError> {
     let base = base_url.trim().trim_end_matches('/');
     let url = format!("{base}/models");
+    let api_key = api_key.filter(|key| !key.is_empty());
     let mut request = reqwest::Client::new()
         .get(&url)
         .timeout(std::time::Duration::from_secs(10));
-    if let Some(key) = api_key.filter(|key| !key.is_empty()) {
+    if let Some(key) = api_key {
         request = request.bearer_auth(key);
     }
     // reqwest's own message ("error sending request") hides why.
@@ -218,9 +219,10 @@ async fn fetch_chat_completions_catalog(
     let status = response.status();
     match status {
         reqwest::StatusCode::UNAUTHORIZED => {
-            return Err(ProviderError::Fetch(format!(
-                "the API key was rejected (HTTP {status})"
-            )));
+            return Err(ProviderError::Fetch(match api_key {
+                Some(_) => format!("the API key was rejected (HTTP {status})"),
+                None => format!("the server needs an API key (HTTP {status})"),
+            }));
         }
         // The usual mistake: a base URL without the `/v1` the API lives under.
         reqwest::StatusCode::NOT_FOUND => {
@@ -524,6 +526,21 @@ mod tests {
             error.to_string().contains(
                 "/v1/models was not found; the URL should end where /chat/completions would start, e.g. …/v1"
             ),
+            "{error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn fetch_catalog_asks_for_a_key_when_none_was_sent() {
+        let (url, _server) =
+            serve_once("HTTP/1.1 401 Unauthorized\r\nconnection: close\r\n\r\n").await;
+        let error = fetch_catalog(&id(), &ApiId::ChatCompletions, &url, None)
+            .await
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("the server needs an API key (HTTP 401 Unauthorized)"),
             "{error}"
         );
     }
