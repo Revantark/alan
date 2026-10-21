@@ -16,6 +16,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Update default system prompt to include output formatting.
 - Assistant responses and info entries now wrap at word boundaries instead of splitting mid-word; long unbreakable words such as URLs are hard-split to fit the line.
 - Markdown headings render in the cyan accent color, with weight separating the top levels, instead of body-colored text; H1 no longer paints a full-width background band.
+- A refused request shows a short message such as "the provider rejected the credentials (HTTP 401 Unauthorized)" instead of the server's raw reply; the reply goes to the log.
 
 ## 0.1.8 - 2026-10-16
 

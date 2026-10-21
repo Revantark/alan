@@ -460,15 +460,14 @@ mod tests {
         };
         server.await.unwrap();
 
-        let rendered = error.to_string();
-        assert!(rendered.contains("403"));
-        assert!(rendered.contains("[truncated]"));
+        let LlmError::Http { status, body } = &error else {
+            panic!("expected an HTTP error, got {error}");
+        };
+        assert_eq!(*status, 403);
+        assert!(body.ends_with("[truncated]"));
         // Bounded, not a wall of HTML.
-        assert!(
-            rendered.len() < 1000,
-            "error message too long: {}",
-            rendered.len()
-        );
+        assert!(body.len() < 1000, "error body too long: {}", body.len());
+        assert!(!error.to_string().contains("<html>"));
     }
 
     #[tokio::test]

@@ -1,8 +1,8 @@
 use crate::{Credential, LlmError};
 use std::time::Duration;
 
-/// Upper bound for error bodies surfaced in [`LlmError::Http`], so HTML
-/// challenge pages do not flood logs or the UI.
+/// Upper bound for error bodies kept in [`LlmError::Http`], so HTML
+/// challenge pages do not flood the log.
 const MAX_ERROR_BODY: usize = 512;
 
 fn truncate_bytes(value: &str, limit: usize) -> String {
@@ -58,8 +58,8 @@ impl HttpClient {
     }
 
     /// POST a streaming request. A non-success status becomes
-    /// [`LlmError::Http`], with the body capped at `MAX_ERROR_BODY` bytes so an
-    /// HTML challenge page stays readable.
+    /// [`LlmError::Http`], with the body capped at `MAX_ERROR_BODY` bytes and
+    /// logged, since the error's message leaves it out.
     pub async fn post_stream(
         &self,
         url: &str,
@@ -73,9 +73,11 @@ impl HttpClient {
         let status = response.status();
         if !status.is_success() {
             let body = response.text().await.map_err(LlmError::Transport)?;
+            let body = truncate_bytes(&body, MAX_ERROR_BODY);
+            tracing::warn!(status = status.as_u16(), %body, "provider refused the request");
             return Err(LlmError::Http {
                 status: status.as_u16(),
-                body: truncate_bytes(&body, MAX_ERROR_BODY),
+                body,
             });
         }
         Ok(response)
