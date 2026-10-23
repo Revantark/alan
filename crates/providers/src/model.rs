@@ -151,7 +151,77 @@ impl Model {
 mod tests {
     use super::*;
     use crate::provider::bind_model;
-    use crate::{ApiId, CustomProvider, InMemoryCredentialStore};
+    use crate::{
+        ApiId, ApiKeyAuth, Auth, AuthMethod, AuthResult, CustomProvider, InMemoryCredentialStore,
+        Provider, ProviderError,
+    };
+
+    struct OrderedProvider {
+        apis: Vec<(ApiId, Arc<dyn LlmApi>)>,
+    }
+
+    #[async_trait::async_trait]
+    impl Auth for OrderedProvider {
+        fn auth(&self) -> Arc<dyn AuthResolver> {
+            Arc::new(ApiKeyAuth::new("test-key"))
+        }
+
+        fn auth_methods(&self) -> Vec<AuthMethod> {
+            vec![AuthMethod::ApiKey]
+        }
+
+        async fn validate_auth(&self, _result: &AuthResult) -> Result<(), AuthError> {
+            Ok(())
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl Provider for OrderedProvider {
+        fn id(&self) -> ProviderId {
+            ProviderId::new("ordered")
+        }
+
+        fn models(&self) -> Vec<ModelInfo> {
+            Vec::new()
+        }
+
+        fn server_tools(&self) -> &[ServerToolInfo] {
+            &[]
+        }
+
+        fn apis(&self) -> &[(ApiId, Arc<dyn LlmApi>)] {
+            &self.apis
+        }
+    }
+
+    #[test]
+    fn bind_model_uses_the_first_api_in_provider_order() {
+        let http = Arc::new(llm::HttpClient::new());
+        let chat: Arc<dyn LlmApi> =
+            Arc::new(llm::ChatCompletionsApi::new("http://unused", http.clone()));
+        let responses: Arc<dyn LlmApi> = Arc::new(llm::ResponsesApi::new("http://unused", http));
+        let mut provider = OrderedProvider {
+            apis: vec![
+                (ApiId::OpenAiResponses, responses.clone()),
+                (ApiId::ChatCompletions, chat.clone()),
+            ],
+        };
+        let model = bind_model(&provider, "model", ModelOptions::default()).unwrap();
+        assert!(Arc::ptr_eq(&model.api, &responses));
+
+        provider.apis.swap(0, 1);
+        let model = bind_model(&provider, "model", ModelOptions::default()).unwrap();
+        assert!(Arc::ptr_eq(&model.api, &chat));
+    }
+
+    #[test]
+    fn bind_model_reports_missing_api_for_an_empty_list() {
+        let provider = OrderedProvider { apis: Vec::new() };
+        assert!(matches!(
+            bind_model(&provider, "missing", ModelOptions::default()),
+            Err(ProviderError::MissingApi { model }) if model == "missing"
+        ));
+    }
 
     fn advertised(id: &str) -> ServerToolInfo {
         ServerToolInfo {

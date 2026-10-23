@@ -1,7 +1,10 @@
 mod codec;
 
-use super::stream::{StreamHandler, ToolIndices, sse_events, stream_error};
-use crate::{Credential, HttpClient, LlmApi, LlmError, LlmEvent, LlmRequest, LlmStream, Usage};
+use super::stream::{ToolIndices, sse_events, stream_error};
+use crate::{
+    Credential, HttpClient, LlmApi, LlmError, LlmEvent, LlmRequest, LlmStream, LlmStreamDecoder,
+    Usage,
+};
 use async_trait::async_trait;
 use std::sync::Arc;
 
@@ -43,7 +46,7 @@ impl LlmApi for InteractionsApi {
 
         Ok(sse_events(
             response.bytes_stream(),
-            InteractionsHandler::default(),
+            Box::new(InteractionsHandler::default()),
         ))
     }
 }
@@ -64,7 +67,7 @@ struct InteractionsHandler {
     tool_indices: ToolIndices,
 }
 
-impl StreamHandler for InteractionsHandler {
+impl LlmStreamDecoder for InteractionsHandler {
     fn done(&self) -> bool {
         self.done
     }

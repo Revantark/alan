@@ -4,29 +4,40 @@ use crate::{
 };
 use async_trait::async_trait;
 use llm::apis::chat_completions::{BaseRequest, BaseResponse, WireUsage, decode_stream_response};
-use llm::{ChatCompletionsApi, CodecChunk, HttpClient, LlmApi, LlmApiCodec, LlmError, LlmRequest};
+use llm::apis::responses::{BaseRequest as ResponsesBaseRequest, ResponsesDecoder, decode_usage};
+use llm::{
+    ChatCompletionsApi, CodecChunk, HttpClient, LlmApi, LlmApiCodec, LlmError, LlmRequest,
+    OpenRouterOptions, ResponsesApi,
+};
 use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, sync::Arc};
+use std::sync::Arc;
 
 const BASE_URL: &str = "https://openrouter.ai/api/v1";
 
 /// OpenRouter's `/chat/completions` wire format: the canonical body plus
-/// provider routing and a sticky-session key.
+/// routing and a sticky-session key.
 struct OpenRouterCodec;
+
+/// OpenRouter's `/responses` codec.
+struct OpenRouterResponsesCodec;
 
 /// OpenRouter routing options, attached to a request's extensions by the
 /// application.
-pub struct Options {
-    /// Providers to prioritize, in order.
-    pub provider_order: Vec<String>,
+pub type Options = OpenRouterOptions;
+
+fn provider_block(options: Option<&OpenRouterOptions>) -> Option<WireProvider<'_>> {
+    let options = options?;
+    (!options.only.is_empty()).then(|| WireProvider {
+        only: &options.only,
+        allow_fallbacks: false,
+    })
 }
 
-/// OpenRouter's `provider` routing block: which upstream providers to prefer.
 #[derive(Serialize)]
-pub(crate) struct WireProvider {
-    pub(crate) only: Vec<String>,
-    pub(crate) allow_fallbacks: bool,
+struct WireProvider<'a> {
+    only: &'a [String],
+    allow_fallbacks: bool,
 }
 
 #[derive(Serialize)]
@@ -34,9 +45,26 @@ struct OpenRouterRequest<'a> {
     #[serde(flatten)]
     base: BaseRequest<'a>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    provider: Option<WireProvider>,
+    provider: Option<WireProvider<'a>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     session_id: Option<&'a str>,
+}
+
+#[derive(Serialize)]
+struct OpenRouterResponsesRequest<'a> {
+    #[serde(flatten)]
+    base: ResponsesBaseRequest<'a>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    provider: Option<WireProvider<'a>>,
+    /// Pins the upstream provider for prompt-cache reuse.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    session_id: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    prompt_cache_key: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cache_control: Option<&'a llm::PromptCacheControl>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_output_tokens: Option<u32>,
 }
 
 #[derive(Deserialize)]
@@ -62,24 +90,27 @@ struct CostDetails {
 
 impl LlmApiCodec for OpenRouterCodec {
     fn request(&self, request: &LlmRequest<'_>) -> Result<String, LlmError> {
-        let provider = request
-            .extensions
-            .get::<Options>()
-            .map(|options| options.provider_order.as_slice())
-            .filter(|order| !order.is_empty())
-            .map(|order| WireProvider {
-                only: order.to_vec(),
-                allow_fallbacks: order.is_empty(),
-            });
-        let session_id = request.extensions.get::<llm::SessionId>();
         let wire = OpenRouterRequest {
             base: BaseRequest::new(request),
-            provider,
-            session_id: session_id.map(|session| session.0.as_str()),
+            provider: provider_block(request.extensions.get::<OpenRouterOptions>()),
+            session_id: request
+                .extensions
+                .get::<llm::SessionId>()
+                .map(|session| session.0.as_str()),
         };
         serde_json::to_string(&wire).map_err(LlmError::Serialization)
     }
 
+    fn decoder(&self) -> Box<dyn llm::LlmStreamDecoder> {
+        Box::new(
+            llm::apis::chat_completions::ChatCompletionsDecoder::with_chunk_decoder(|data| {
+                OpenRouterCodec.response(data)
+            }),
+        )
+    }
+}
+
+impl OpenRouterCodec {
     fn response(&self, data: &str) -> Result<CodecChunk, LlmError> {
         let chunk: OpenRouterStreamChunk =
             serde_json::from_str(data).map_err(LlmError::Serialization)?;
@@ -112,17 +143,73 @@ impl LlmApiCodec for OpenRouterCodec {
     }
 }
 
+impl LlmApiCodec for OpenRouterResponsesCodec {
+    fn request(&self, request: &LlmRequest<'_>) -> Result<String, LlmError> {
+        let session_id = request
+            .extensions
+            .get::<llm::SessionId>()
+            .map(|session| session.0.as_str());
+        let wire = OpenRouterResponsesRequest {
+            base: ResponsesBaseRequest::new(request)?,
+            provider: provider_block(request.extensions.get::<OpenRouterOptions>()),
+            session_id,
+            prompt_cache_key: session_id,
+            cache_control: request.options.cache_control.as_ref(),
+            max_output_tokens: request.options.max_tokens,
+        };
+        serde_json::to_string(&wire).map_err(LlmError::Serialization)
+    }
+
+    fn decoder(&self) -> Box<dyn llm::LlmStreamDecoder> {
+        Box::new(ResponsesDecoder::with_usage_decoder(|value| {
+            let mut usage = decode_usage(value)?;
+            let extras: OpenRouterCost =
+                serde_json::from_value(value.clone()).map_err(LlmError::Serialization)?;
+            usage.cost = extras.cost;
+            usage.upstream_inference_cost = extras
+                .cost_details
+                .and_then(|details| details.upstream_inference_cost);
+            Ok(usage)
+        }))
+    }
+}
+
+#[derive(Deserialize)]
+struct OpenRouterCost {
+    cost: Option<f64>,
+    cost_details: Option<CostDetails>,
+}
+
 #[cfg(test)]
 mod codec_tests {
     use super::*;
     use llm::{Extensions, Message, RequestOptions};
 
+    #[test]
+    fn api_bindings_put_responses_first() {
+        let provider = OpenRouterProvider::builder("test-key").build().unwrap();
+        let ids: Vec<_> = provider.apis().iter().map(|(id, _)| id.clone()).collect();
+        assert_eq!(ids, vec![ApiId::OpenAiResponses, ApiId::ChatCompletions]);
+    }
+
+    #[test]
+    fn injected_api_replaces_default_bindings() {
+        let api: Arc<dyn LlmApi> = Arc::new(ResponsesApi::new(
+            "http://unused",
+            Arc::new(HttpClient::new()),
+        ));
+        let provider = OpenRouterProvider::builder("test-key")
+            .with_api(api.clone())
+            .build()
+            .unwrap();
+        assert_eq!(provider.apis().len(), 1);
+        assert!(Arc::ptr_eq(&provider.apis()[0].1, &api));
+    }
+
     fn wire_request(order: Option<Vec<String>>, session: Option<&str>) -> (String, Vec<Message>) {
         let mut extensions = Extensions::default();
         if let Some(order) = order {
-            extensions.insert(Options {
-                provider_order: order,
-            });
+            extensions.insert(Options { only: order });
         }
         if let Some(session) = session {
             extensions.insert(llm::SessionId(session.to_string()));
@@ -154,6 +241,7 @@ mod codec_tests {
             json["provider"]["only"],
             serde_json::json!(["deepseek", "fireworks"])
         );
+        assert_eq!(json["provider"]["allow_fallbacks"], false);
         assert_eq!(json["session_id"], "s-1");
         assert_eq!(json["model"], "model-a");
     }
@@ -190,15 +278,100 @@ mod codec_tests {
         assert_eq!(usage.cost, None);
         assert_eq!(usage.upstream_inference_cost, None);
     }
+
+    fn responses_wire_request(
+        order: Option<Vec<String>>,
+        session: Option<&str>,
+        options: &RequestOptions,
+        tools: &[llm::ToolSpec],
+    ) -> (String, Vec<Message>) {
+        let mut extensions = Extensions::default();
+        if let Some(order) = order {
+            extensions.insert(Options { only: order });
+        }
+        if let Some(session) = session {
+            extensions.insert(llm::SessionId(session.to_string()));
+        }
+        let messages = vec![Message::user("hello")];
+        let request = LlmRequest {
+            model_id: "model-a",
+            messages: &messages,
+            tools,
+            options,
+            credential: None,
+            reasoning_effort: llm::ReasoningEffort::None,
+            extensions,
+        };
+        let body = OpenRouterResponsesCodec.request(&request).unwrap();
+        (body, messages)
+    }
+
+    #[test]
+    fn responses_injects_routing_session_cache_and_output_limit() {
+        let options = RequestOptions {
+            temperature: Some(0.7),
+            max_tokens: Some(256),
+            cache_control: Some(llm::PromptCacheControl::one_hour()),
+        };
+        let (body, _keep) =
+            responses_wire_request(Some(vec!["deepseek".into()]), Some("s-1"), &options, &[]);
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+
+        assert_eq!(json["model"], "model-a");
+        assert_eq!(json["store"], false);
+        assert_eq!(json["stream"], true);
+        assert_eq!(json["provider"]["only"], serde_json::json!(["deepseek"]));
+        assert_eq!(json["provider"]["allow_fallbacks"], false);
+        assert_eq!(json["session_id"], "s-1");
+        assert_eq!(json["prompt_cache_key"], "s-1");
+        assert_eq!(
+            json["cache_control"],
+            serde_json::json!({"type": "ephemeral", "ttl": "1h"})
+        );
+        assert!(json.get("temperature").is_none());
+        assert_eq!(json["max_output_tokens"], 256);
+    }
+
+    #[test]
+    fn responses_omits_extras_when_unconfigured() {
+        let (body, _keep) = responses_wire_request(None, None, &RequestOptions::default(), &[]);
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+
+        for field in [
+            "provider",
+            "session_id",
+            "prompt_cache_key",
+            "cache_control",
+            "temperature",
+            "max_output_tokens",
+        ] {
+            assert!(json.get(field).is_none(), "{field} must be omitted");
+        }
+    }
+
+    #[test]
+    fn responses_sends_server_tools_as_typed_items() {
+        let tools = [llm::ToolSpec::Server(llm::ServerTool {
+            kind: "openrouter:web_search".into(),
+        })];
+        let (body, _keep) = responses_wire_request(None, None, &RequestOptions::default(), &tools);
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+
+        assert_eq!(
+            json["tools"][0],
+            serde_json::json!({"type": "openrouter:web_search"})
+        );
+    }
 }
 
 pub struct OpenRouterProvider {
     id: ProviderId,
     models: std::sync::RwLock<Vec<ModelInfo>>,
     server_tools: Vec<ServerToolInfo>,
-    apis: HashMap<ApiId, Arc<dyn LlmApi>>,
+    apis: Vec<(ApiId, Arc<dyn LlmApi>)>,
     auth: Arc<dyn AuthResolver>,
     fetch_lock: tokio::sync::Mutex<()>,
+    http: reqwest::Client,
 }
 
 impl OpenRouterProvider {
@@ -220,8 +393,8 @@ impl OpenRouterProvider {
     }
 }
 
-async fn validate_api_key(key: &str) -> Result<(), AuthError> {
-    let response = reqwest::Client::new()
+async fn validate_api_key(http: &reqwest::Client, key: &str) -> Result<(), AuthError> {
+    let response = http
         .get("https://openrouter.ai/api/v1/key")
         .bearer_auth(key)
         .send()
@@ -257,13 +430,14 @@ impl Provider for OpenRouterProvider {
         &self.server_tools
     }
 
-    fn apis(&self) -> &HashMap<ApiId, Arc<dyn LlmApi>> {
+    fn apis(&self) -> &[(ApiId, Arc<dyn LlmApi>)] {
         &self.apis
     }
 
     async fn fetch_models(&self) -> Result<(), ProviderError> {
         let _guard = self.fetch_lock.lock().await;
-        let response = reqwest::Client::new()
+        let response = self
+            .http
             .get(format!("{BASE_URL}/models"))
             .send()
             .await
@@ -299,7 +473,7 @@ impl Auth for OpenRouterProvider {
         auth_result: &crate::auth::AuthResult,
     ) -> Result<(), crate::auth::AuthError> {
         match auth_result {
-            crate::auth::AuthResult::ApiKey(key) => validate_api_key(key).await,
+            crate::auth::AuthResult::ApiKey(key) => validate_api_key(&self.http, key).await,
             _ => Err(crate::auth::AuthError::Missing),
         }
     }
@@ -347,15 +521,32 @@ impl OpenRouterBuilder {
     }
 
     pub fn build(self) -> Result<OpenRouterProvider, ProviderError> {
-        let api = self.api.unwrap_or_else(|| {
-            Arc::new(
-                ChatCompletionsApi::new(BASE_URL, Arc::new(HttpClient::new()))
-                    .with_codec(Arc::new(OpenRouterCodec)),
-            )
-        });
+        let http = Arc::new(HttpClient::new());
+        let apis: Vec<(ApiId, Arc<dyn LlmApi>)> = match self.api {
+            Some(api) => vec![(ApiId::ChatCompletions, api)],
+            None => vec![
+                (
+                    ApiId::OpenAiResponses,
+                    Arc::new(
+                        ResponsesApi::new(BASE_URL, http.clone())
+                            .with_codec(Arc::new(OpenRouterResponsesCodec)),
+                    ),
+                ),
+                (
+                    ApiId::ChatCompletions,
+                    Arc::new(
+                        ChatCompletionsApi::new(BASE_URL, http)
+                            .with_codec(Arc::new(OpenRouterCodec)),
+                    ),
+                ),
+            ],
+        };
         let auth = self
             .auth
             .unwrap_or_else(|| Arc::new(ApiKeyAuth::new(self.api_key)));
+        let client = reqwest::Client::builder().build().map_err(|error| {
+            ProviderError::Fetch(format!("failed to build HTTP client: {error}"))
+        })?;
         Ok(OpenRouterProvider {
             id: ProviderId::new("openrouter"),
             models: std::sync::RwLock::new(self.models),
@@ -369,9 +560,10 @@ impl OpenRouterBuilder {
                     description: "Search the web".into(),
                 },
             ],
-            apis: HashMap::from([(ApiId::ChatCompletions, api)]),
+            apis,
             auth,
             fetch_lock: tokio::sync::Mutex::new(()),
+            http: client,
         })
     }
 }
@@ -387,8 +579,8 @@ fn parse_catalog(provider: &ProviderId, payload: &str) -> Result<Vec<ModelInfo>,
         };
         let pricing = match &entry.pricing {
             Some(p) => {
-                let input = p.prompt.as_ref().unwrap().parse::<f64>().ok();
-                let output = p.completion.as_ref().unwrap().parse::<f64>().ok();
+                let input = p.prompt.as_deref().and_then(|s| s.parse::<f64>().ok());
+                let output = p.completion.as_deref().and_then(|s| s.parse::<f64>().ok());
                 match (input, output) {
                     (Some(input), Some(output)) => Some(ModelPricing {
                         input_cost_per_token: input,

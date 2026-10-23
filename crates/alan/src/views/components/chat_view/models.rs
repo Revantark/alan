@@ -149,7 +149,7 @@ pub(crate) fn apply_model_provider(
             let model_id = agent.info().await.id;
             let mut extensions = agent.model_options().await.extensions;
             extensions.insert(OpenRouterOptions {
-                provider_order: provider_order.clone(),
+                only: provider_order.clone(),
             });
             agent
                 .set_extensions(extensions)

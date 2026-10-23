@@ -1,6 +1,6 @@
 use crate::{LlmError, LlmEvent, LlmRequest, Usage};
 
-/// One decoded SSE data frame from a provider stream.
+/// One decoded Chat Completions chunk, before stream metadata is accumulated.
 #[derive(Debug)]
 pub struct CodecChunk {
     pub model: Option<String>,
@@ -10,21 +10,27 @@ pub struct CodecChunk {
     pub events: Vec<LlmEvent>,
 }
 
-/// Translates between canonical [`LlmRequest`]s / [`LlmEvent`]s and a
-/// provider's wire format.
+/// Translates requests and events to and from an API's wire format.
 ///
-/// An API's default codec speaks the canonical protocol shape. Providers with
-/// extras implement this trait and attach their codec to the API (see
-/// [`ChatCompletionsApi::with_codec`](crate::ChatCompletionsApi::with_codec));
-/// provider-specific request options arrive inside
-/// [`LlmRequest::extensions`](crate::LlmRequest::extensions).
-///
-/// Wire request/response structs stay private to each codec: the API only
-/// needs a serialized body and decoded chunks.
+/// Codecs are shared across requests; each stream gets its own decoder.
+/// Provider-specific options arrive in [`LlmRequest::extensions`].
 pub trait LlmApiCodec: Send + Sync {
     /// Serialize the wire body for `request`.
     fn request(&self, request: &LlmRequest<'_>) -> Result<String, LlmError>;
 
-    /// Decode one SSE `data:` frame from the provider stream.
-    fn response(&self, data: &str) -> Result<CodecChunk, LlmError>;
+    /// Create a response decoder for one SSE stream.
+    fn decoder(&self) -> Box<dyn LlmStreamDecoder>;
+}
+
+/// Decodes SSE `data:` frames; owns protocol state and terminal-event handling.
+pub trait LlmStreamDecoder: Send {
+    /// Whether the terminal frame has been seen. No further frames are read
+    /// after this returns `true`.
+    fn done(&self) -> bool;
+
+    /// Translate one `data:` frame into events, in emission order.
+    fn frame(&mut self, data: &str) -> Result<Vec<LlmEvent>, LlmError>;
+
+    /// Settle the stream at end of input, or report a missing terminal frame.
+    fn finish(&mut self) -> Result<Vec<LlmEvent>, LlmError>;
 }

@@ -7,8 +7,8 @@ pub use codec::{
     stop_reason_for_finish_reason, usage_from_wire,
 };
 
-use super::stream::{StreamHandler, sse_events};
-use crate::codec::{CodecChunk, LlmApiCodec};
+use super::stream::sse_events;
+use crate::codec::{CodecChunk, LlmApiCodec, LlmStreamDecoder};
 use crate::{HttpClient, LlmApi, LlmError, LlmEvent, LlmRequest, LlmStream, StopReason, Usage};
 use async_trait::async_trait;
 use std::sync::Arc;
@@ -48,26 +48,29 @@ impl LlmApi for ChatCompletionsApi {
             .post_stream(&url, &body, request.credential, &[])
             .await?;
 
-        Ok(sse_events(
-            response.bytes_stream(),
-            ChatHandler::new(self.codec.clone()),
-        ))
+        Ok(sse_events(response.bytes_stream(), self.codec.decoder()))
     }
 }
 
-/// Translates canonical `/chat/completions` chunks into [`LlmEvent`]s.
-struct ChatHandler {
-    codec: Arc<dyn LlmApiCodec>,
+/// Accumulates Chat Completions metadata and requires a `[DONE]` frame.
+pub struct ChatCompletionsDecoder {
+    decode_chunk: fn(&str) -> Result<CodecChunk, LlmError>,
     model: Option<String>,
     stop_reason: Option<StopReason>,
     usage: Option<Usage>,
     done: bool,
 }
 
-impl ChatHandler {
-    fn new(codec: Arc<dyn LlmApiCodec>) -> Self {
+impl Default for ChatCompletionsDecoder {
+    fn default() -> Self {
+        Self::with_chunk_decoder(|data| DefaultChatCompletionsCodec.response(data))
+    }
+}
+
+impl ChatCompletionsDecoder {
+    pub fn with_chunk_decoder(decode_chunk: fn(&str) -> Result<CodecChunk, LlmError>) -> Self {
         Self {
-            codec,
+            decode_chunk,
             model: None,
             stop_reason: None,
             usage: None,
@@ -76,7 +79,7 @@ impl ChatHandler {
     }
 }
 
-impl StreamHandler for ChatHandler {
+impl LlmStreamDecoder for ChatCompletionsDecoder {
     fn done(&self) -> bool {
         self.done
     }
@@ -91,7 +94,7 @@ impl StreamHandler for ChatHandler {
             }]);
         }
 
-        let chunk: CodecChunk = self.codec.response(data)?;
+        let chunk = (self.decode_chunk)(data)?;
         if let Some(model) = chunk.model.clone() {
             self.model = Some(model);
         }
@@ -196,6 +199,30 @@ mod tests {
         assert!(server.await.unwrap().contains("\"stream\":true"));
     }
 
+    #[test]
+    fn default_codec_decoders_have_independent_metadata() {
+        let codec = DefaultChatCompletionsCodec;
+        let mut first = codec.decoder();
+        let mut second = codec.decoder();
+        first.frame(
+            r#"{"model":"first","choices":[{"finish_reason":"length"}],"usage":{"prompt_tokens":2,"completion_tokens":3}}"#,
+        ).unwrap();
+        let events = second.frame("[DONE]").unwrap();
+        assert!(matches!(
+            events.as_slice(),
+            [LlmEvent::Done {
+                stop_reason: StopReason::Stop,
+                model: None,
+                usage: None,
+            }]
+        ));
+        assert!(!first.done());
+        let events = first.frame("[DONE]").unwrap();
+        assert!(matches!(events.as_slice(), [LlmEvent::Done {
+            stop_reason: StopReason::Length, model: Some(model), usage: Some(usage),
+        }] if model == "first" && usage.output_tokens == 3));
+    }
+
     /// A custom codec replaces both directions: the body it serializes is
     /// sent, and the chunk it decodes drives the emitted events.
     #[tokio::test]
@@ -210,15 +237,17 @@ mod tests {
                 ))
             }
 
-            fn response(&self, _data: &str) -> Result<CodecChunk, LlmError> {
-                Ok(CodecChunk {
-                    model: Some("rewired".into()),
-                    finish_reason: Some("stop".into()),
-                    usage: None,
-                    events: vec![LlmEvent::TextDelta {
-                        text: "decoded by custom codec".into(),
-                    }],
-                })
+            fn decoder(&self) -> Box<dyn LlmStreamDecoder> {
+                Box::new(ChatCompletionsDecoder::with_chunk_decoder(|_data| {
+                    Ok(CodecChunk {
+                        model: Some("rewired".into()),
+                        finish_reason: Some("stop".into()),
+                        usage: None,
+                        events: vec![LlmEvent::TextDelta {
+                            text: "decoded by custom codec".into(),
+                        }],
+                    })
+                }))
             }
         }
 

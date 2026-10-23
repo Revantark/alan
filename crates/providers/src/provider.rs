@@ -4,7 +4,6 @@ use crate::catalog::{ApiId, ModelInfo, ProviderId, ServerToolInfo};
 use crate::model::ModelOptions;
 use async_trait::async_trait;
 use llm::LlmApi;
-use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use thiserror::Error;
 
@@ -67,8 +66,8 @@ pub trait Provider: Auth + Send + Sync {
 
     fn server_tools(&self) -> &[ServerToolInfo];
 
-    /// The LLM API implementations this provider can route to, keyed by API id.
-    fn apis(&self) -> &HashMap<ApiId, Arc<dyn LlmApi>>;
+    /// API bindings in preference order; [`bind_model`] uses the first entry.
+    fn apis(&self) -> &[(ApiId, Arc<dyn LlmApi>)];
 
     /// Refresh the provider's model catalog from its source, updating the
     /// catalog returned by [`Provider::models`]. Providers without a live
@@ -124,23 +123,20 @@ impl ProviderRegistry {
     }
 }
 
-/// Construct a [`Model`] bound to `model_id` from the provider's catalog,
-/// apis, and auth resolver.
+/// Bind `model_id` to the provider's first API and auth resolver.
 pub fn bind_model(
     provider: &dyn Provider,
     model_id: &str,
     options: ModelOptions,
 ) -> Result<Model, ProviderError> {
     let model_info = ModelInfo::new(model_id, provider.id());
-    let api =
-        provider
-            .apis()
-            .values()
-            .next()
-            .cloned()
-            .ok_or_else(|| ProviderError::MissingApi {
-                model: model_info.id.clone(),
-            })?;
+    let api = provider
+        .apis()
+        .first()
+        .map(|(_, api)| api.clone())
+        .ok_or_else(|| ProviderError::MissingApi {
+            model: model_info.id.clone(),
+        })?;
 
     let ModelOptions {
         server_tools,

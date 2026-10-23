@@ -1,37 +1,15 @@
 //! Shared SSE streaming machinery for the API clients.
 
 use super::sse::SseDecoder;
-use crate::{LlmError, LlmEvent, LlmStream};
+use crate::{LlmError, LlmEvent, LlmStream, LlmStreamDecoder};
 use futures_util::{Stream, StreamExt, stream};
 use serde::Deserialize;
 use std::collections::{BTreeMap, VecDeque};
 
-/// Interprets the `data:` frames of one provider SSE stream into
-/// [`LlmEvent`]s.
-///
-/// Implemented once per API; [`sse_events`] owns the shared plumbing (SSE
-/// decoding, event ordering, end-of-stream handling) so implementations only
-/// translate frames.
-pub(crate) trait StreamHandler: Send {
-    /// Whether the provider's terminal frame has been seen; once true, the
-    /// stream stops without reading further frames.
-    fn done(&self) -> bool;
-
-    /// Translate one `data:` frame into the events to emit, in order.
-    fn frame(&mut self, data: &str) -> Result<Vec<LlmEvent>, LlmError>;
-
-    /// Settle the stream at end of input, after the final frames were passed
-    /// to [`StreamHandler::frame`]: return the closing events, or an error
-    /// when the protocol requires a terminal frame that never arrived.
-    fn finish(&mut self) -> Result<Vec<LlmEvent>, LlmError>;
-}
-
-/// Decode `input` as an SSE body and emit the events [`StreamHandler`]
-/// translates its frames into.
-pub(crate) fn sse_events<S, H>(input: S, handler: H) -> LlmStream
+/// Decode SSE frames into LLM events.
+pub(crate) fn sse_events<S>(input: S, handler: Box<dyn LlmStreamDecoder>) -> LlmStream
 where
     S: Stream<Item = Result<bytes::Bytes, reqwest::Error>> + Unpin + Send + 'static,
-    H: StreamHandler + 'static,
 {
     let state = StreamState {
         input,
@@ -47,21 +25,18 @@ where
     Box::pin(output)
 }
 
-/// Decodes SSE frames, hands them to the handler, and buffers the resulting
-/// events until the consumer drains them.
-struct StreamState<S, H> {
+struct StreamState<S> {
     input: S,
     decoder: SseDecoder,
-    handler: H,
+    handler: Box<dyn LlmStreamDecoder>,
     pending: VecDeque<LlmEvent>,
-    /// Whether end of input was reached and [`StreamHandler::finish`] ran.
+    /// Whether end of input was reached and `finish` ran.
     finished: bool,
 }
 
-impl<S, H> StreamState<S, H>
+impl<S> StreamState<S>
 where
     S: Stream<Item = Result<bytes::Bytes, reqwest::Error>> + Unpin,
-    H: StreamHandler,
 {
     async fn next_event(&mut self) -> Result<Option<LlmEvent>, LlmError> {
         loop {
@@ -183,7 +158,7 @@ mod tests {
         done: bool,
     }
 
-    impl StreamHandler for Counting {
+    impl LlmStreamDecoder for Counting {
         fn done(&self) -> bool {
             self.done
         }
@@ -225,10 +200,10 @@ mod tests {
     ) -> Result<Vec<LlmEvent>, LlmError> {
         let mut events = sse_events(
             input(chunks),
-            Counting {
+            Box::new(Counting {
                 terminal: terminal.to_owned(),
                 done: false,
-            },
+            }),
         );
         let mut collected = Vec::new();
         while let Some(event) = events.next().await {

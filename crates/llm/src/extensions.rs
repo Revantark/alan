@@ -37,6 +37,12 @@ impl Extensions {
 /// `prompt_cache_key`, vanilla OpenAI-compatible APIs as `prompt_cache_key`.
 pub struct SessionId(pub String);
 
+/// OpenRouter routing options, passed through [`LlmRequest::extensions`](crate::LlmRequest::extensions).
+pub struct OpenRouterOptions {
+    /// Restrict routing to these providers; an empty list leaves routing unpinned.
+    pub only: Vec<String>,
+}
+
 /// Extra HTTP headers to send with a request, attached per request by the
 /// caller (for example a ChatGPT account id obtained from auth).
 pub struct Headers(pub Vec<(String, String)>);

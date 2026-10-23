@@ -1,9 +1,11 @@
 mod codec;
 
-use super::stream::{StreamHandler, ToolIndices, sse_events, stream_error};
+pub use codec::{BaseRequest, DefaultResponsesCodec, decode_usage};
+
+use super::stream::{ToolIndices, sse_events, stream_error};
 use crate::{
-    Headers, HttpClient, LlmApi, LlmError, LlmEvent, LlmRequest, LlmStream, SessionId, StopReason,
-    Usage,
+    Headers, HttpClient, LlmApi, LlmApiCodec, LlmError, LlmEvent, LlmRequest, LlmStream,
+    LlmStreamDecoder, SessionId, StopReason, Usage,
 };
 use async_trait::async_trait;
 use std::collections::HashSet;
@@ -11,15 +13,15 @@ use std::sync::Arc;
 
 const ENDPOINT: &str = "/responses";
 
-/// OpenAI Responses wire client for the ChatGPT subscription backend.
+/// OpenAI Responses wire client.
 ///
-/// Stateless: every request resends the full history. The bearer token
-/// arrives through [`LlmRequest`]'s `Credential::ApiKey`; backend headers are
-/// attached per instance with [`ResponsesApi::with_header`].
+/// Each request resends the full history. Use [`Self::with_codec`] for
+/// provider-specific wire formats.
 pub struct ResponsesApi {
     base_url: String,
     http: Arc<HttpClient>,
     headers: Vec<(String, String)>,
+    codec: Arc<dyn LlmApiCodec>,
 }
 
 impl ResponsesApi {
@@ -28,6 +30,7 @@ impl ResponsesApi {
             base_url: base_url.into(),
             http,
             headers: Vec::new(),
+            codec: Arc::new(codec::DefaultResponsesCodec),
         }
     }
 
@@ -36,12 +39,18 @@ impl ResponsesApi {
         self.headers.push((name.into(), value.into()));
         self
     }
+
+    /// Attach a codec that encodes requests and decodes this gateway's stream.
+    pub fn with_codec(mut self, codec: Arc<dyn LlmApiCodec>) -> Self {
+        self.codec = codec;
+        self
+    }
 }
 
 #[async_trait]
 impl LlmApi for ResponsesApi {
     async fn stream(&self, request: LlmRequest<'_>) -> Result<LlmStream, LlmError> {
-        let body = codec::serialize_request(&request)?;
+        let body = self.codec.request(&request)?;
         let url = format!("{}{}", self.base_url.trim_end_matches('/'), ENDPOINT);
         let mut headers = self.headers.clone();
         if let Some(Headers(extra)) = request.extensions.get::<Headers>() {
@@ -59,16 +68,13 @@ impl LlmApi for ResponsesApi {
             .post_stream(&url, &body, request.credential, &headers)
             .await?;
 
-        Ok(sse_events(
-            response.bytes_stream(),
-            ResponsesHandler::default(),
-        ))
+        Ok(sse_events(response.bytes_stream(), self.codec.decoder()))
     }
 }
 
-/// Translates Responses stream events into [`LlmEvent`]s.
-#[derive(Default)]
-struct ResponsesHandler {
+/// Decodes Responses events, tracking tool calls and stream completion.
+pub struct ResponsesDecoder {
+    decode_usage: fn(&serde_json::Value) -> Result<Usage, LlmError>,
     model: Option<String>,
     usage: Option<Usage>,
     done: bool,
@@ -78,7 +84,29 @@ struct ResponsesHandler {
     tool_indices: ToolIndices,
 }
 
-impl StreamHandler for ResponsesHandler {
+impl Default for ResponsesDecoder {
+    fn default() -> Self {
+        Self::with_usage_decoder(codec::decode_usage)
+    }
+}
+
+impl ResponsesDecoder {
+    /// Override usage mapping for both `Usage` and `Done` events.
+    pub fn with_usage_decoder(
+        decode_usage: fn(&serde_json::Value) -> Result<Usage, LlmError>,
+    ) -> Self {
+        Self {
+            decode_usage,
+            model: None,
+            usage: None,
+            done: false,
+            emitted_arguments: HashSet::new(),
+            tool_indices: ToolIndices::default(),
+        }
+    }
+}
+
+impl LlmStreamDecoder for ResponsesDecoder {
     fn done(&self) -> bool {
         self.done
     }
@@ -92,8 +120,6 @@ impl StreamHandler for ResponsesHandler {
     }
 
     fn finish(&mut self) -> Result<Vec<LlmEvent>, LlmError> {
-        // There is no [DONE] sentinel; the stream must end with a terminal
-        // event (`response.completed`, `.incomplete`, or `.failed`).
         if self.done {
             Ok(Vec::new())
         } else {
@@ -104,7 +130,7 @@ impl StreamHandler for ResponsesHandler {
     }
 }
 
-impl ResponsesHandler {
+impl ResponsesDecoder {
     fn handle_event(&mut self, event: codec::WireEvent) -> Result<Vec<LlmEvent>, LlmError> {
         let mut events = Vec::new();
         match event.kind.as_str() {
@@ -163,11 +189,11 @@ impl ResponsesHandler {
             "response.output_item.done" => self.handle_item_done(event, &mut events),
             "response.completed" => {
                 let response = event.response.unwrap_or_default();
-                self.complete(response, StopReason::Stop, &mut events);
+                self.complete(response, StopReason::Stop, &mut events)?;
             }
             "response.incomplete" => {
                 let response = event.response.unwrap_or_default();
-                self.complete(response, StopReason::Length, &mut events);
+                self.complete(response, StopReason::Length, &mut events)?;
             }
             "response.failed" => {
                 let response = event.response.unwrap_or_default();
@@ -238,11 +264,11 @@ impl ResponsesHandler {
         response: codec::WireResponse,
         fallback: StopReason,
         events: &mut Vec<LlmEvent>,
-    ) {
+    ) -> Result<(), LlmError> {
+        let usage = response.usage.as_ref().map(self.decode_usage).transpose()?;
         if response.model.is_some() {
             self.model = response.model;
         }
-        let usage = response.usage.map(|usage| codec::usage_from_wire(&usage));
         let stop_reason = if response.output.iter().any(|item| {
             item.get("type").and_then(serde_json::Value::as_str) == Some("function_call")
         }) {
@@ -263,6 +289,7 @@ impl ResponsesHandler {
             usage: self.usage.clone(),
             model: self.model.clone(),
         });
+        Ok(())
     }
 }
 
@@ -366,6 +393,146 @@ mod tests {
         builder
             .finish()
             .expect_err("stream without a terminal event must not complete")
+    }
+
+    #[tokio::test]
+    async fn with_codec_replaces_both_directions() {
+        struct GatewayCodec;
+
+        #[derive(Default)]
+        struct GatewayDecoder {
+            done: bool,
+        }
+
+        impl LlmApiCodec for GatewayCodec {
+            fn request(&self, request: &LlmRequest<'_>) -> Result<String, LlmError> {
+                let mut body = serde_json::to_value(BaseRequest::new(request)?)
+                    .map_err(LlmError::Serialization)?;
+                body["gateway"] = true.into();
+                serde_json::to_string(&body).map_err(LlmError::Serialization)
+            }
+
+            fn decoder(&self) -> Box<dyn LlmStreamDecoder> {
+                Box::new(GatewayDecoder::default())
+            }
+        }
+
+        impl LlmStreamDecoder for GatewayDecoder {
+            fn done(&self) -> bool {
+                self.done
+            }
+
+            fn frame(&mut self, data: &str) -> Result<Vec<LlmEvent>, LlmError> {
+                assert_eq!(data, "gateway-payload");
+                self.done = true;
+                Ok(vec![
+                    LlmEvent::TextDelta {
+                        text: "custom decoder".into(),
+                    },
+                    LlmEvent::Done {
+                        stop_reason: StopReason::Stop,
+                        usage: None,
+                        model: Some("gateway-model".into()),
+                    },
+                ])
+            }
+
+            fn finish(&mut self) -> Result<Vec<LlmEvent>, LlmError> {
+                assert!(self.done);
+                Ok(Vec::new())
+            }
+        }
+
+        let (url, server) = serve("data: gateway-payload\n\n").await;
+        let api =
+            ResponsesApi::new(url, Arc::new(HttpClient::new())).with_codec(Arc::new(GatewayCodec));
+        let messages = [Message::user("ping")];
+        let options = RequestOptions::default();
+        let credential = crate::Credential::ApiKey("token".into());
+        let response = collect(&api, user_request(&messages, &options, &credential)).await;
+        assert_eq!(response.text(), "custom decoder");
+        assert_eq!(response.model.as_deref(), Some("gateway-model"));
+        let sent = server.await.unwrap();
+        assert!(sent.contains("POST /responses"));
+        assert!(sent.contains("\"gateway\":true"));
+    }
+
+    #[test]
+    fn default_codec_decoders_have_independent_stream_state() {
+        let codec = DefaultResponsesCodec;
+        let mut first = codec.decoder();
+        let mut second = codec.decoder();
+        first.frame(
+            r#"{"type":"response.output_item.added","output_index":7,"item":{"type":"function_call","call_id":"a","name":"read"}}"#,
+        ).unwrap();
+        first.frame(
+            r#"{"type":"response.function_call_arguments.delta","output_index":7,"delta":"{}"}"#,
+        ).unwrap();
+        let events = second.frame(
+            r#"{"type":"response.output_item.added","output_index":2,"item":{"type":"function_call","call_id":"b","name":"write"}}"#,
+        ).unwrap();
+        assert!(matches!(
+            events.as_slice(),
+            [LlmEvent::ToolCallDelta { index: 0, .. }]
+        ));
+        let events = second.frame(
+            r#"{"type":"response.function_call_arguments.done","output_index":7,"arguments":"{}"}"#,
+        ).unwrap();
+        assert!(matches!(events.as_slice(), [LlmEvent::ToolCallDelta {
+            index: 1, arguments, ..
+        }] if arguments == "{}"));
+        first
+            .frame(r#"{"type":"response.completed","response":{"model":"first"}}"#)
+            .unwrap();
+        assert!(first.done());
+        assert!(!second.done());
+        assert!(second.finish().is_err());
+        let events = second
+            .frame(r#"{"type":"response.completed","response":{}}"#)
+            .unwrap();
+        assert!(matches!(
+            events.as_slice(),
+            [LlmEvent::Done {
+                model: None,
+                usage: None,
+                ..
+            }]
+        ));
+    }
+
+    #[test]
+    fn base_usage_decoder_errors_do_not_complete_the_stream() {
+        let mut decoder = DefaultResponsesCodec.decoder();
+        let error = decoder
+            .frame(
+                r#"{"type":"response.completed","response":{"usage":{"input_tokens":"invalid"}}}"#,
+            )
+            .unwrap_err();
+        assert!(matches!(error, LlmError::Serialization(_)));
+        assert!(!decoder.done());
+    }
+
+    #[test]
+    fn base_usage_decoder_ignores_provider_fields() {
+        let mut decoder = DefaultResponsesCodec.decoder();
+        let events = decoder.frame(
+            r#"{"type":"response.completed","response":{"usage":{"input_tokens":2,"output_tokens":3,"cost":0.0021,"cost_details":{"upstream_inference_cost":0.0019}}}}"#,
+        ).unwrap();
+        let [
+            LlmEvent::Usage { usage },
+            LlmEvent::Done {
+                usage: Some(done_usage),
+                ..
+            },
+        ] = events.as_slice()
+        else {
+            panic!("expected usage and completion events");
+        };
+        assert_eq!(usage, done_usage);
+        assert_eq!(usage.input_tokens, 2);
+        assert_eq!(usage.output_tokens, 3);
+        assert_eq!(usage.cost, None);
+        assert_eq!(usage.upstream_inference_cost, None);
     }
 
     #[tokio::test]

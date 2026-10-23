@@ -7,7 +7,7 @@ use llm::apis::chat_completions::{BaseRequest, BaseResponse, decode_stream_respo
 use llm::{ChatCompletionsApi, CodecChunk, HttpClient, LlmApi, LlmApiCodec, LlmError, LlmRequest};
 use reqwest::StatusCode;
 use serde::Deserialize;
-use std::{collections::HashMap, sync::Arc};
+use std::sync::Arc;
 
 const BASE_URL: &str = "https://api.deepseek.com";
 
@@ -75,6 +75,16 @@ impl LlmApiCodec for DeepSeekCodec {
         serde_json::to_string(&json).map_err(LlmError::Serialization)
     }
 
+    fn decoder(&self) -> Box<dyn llm::LlmStreamDecoder> {
+        Box::new(
+            llm::apis::chat_completions::ChatCompletionsDecoder::with_chunk_decoder(|data| {
+                DeepSeekCodec.response(data)
+            }),
+        )
+    }
+}
+
+impl DeepSeekCodec {
     fn response(&self, data: &str) -> Result<CodecChunk, LlmError> {
         let chunk: DeepSeekStreamChunk =
             serde_json::from_str(data).map_err(LlmError::Serialization)?;
@@ -115,7 +125,7 @@ struct DeepSeekStreamChunk {
 pub struct DeepSeekProvider {
     id: ProviderId,
     models: std::sync::RwLock<Vec<ModelInfo>>,
-    apis: HashMap<ApiId, Arc<dyn LlmApi>>,
+    apis: Vec<(ApiId, Arc<dyn LlmApi>)>,
     auth: Arc<dyn AuthResolver>,
     fetch_lock: tokio::sync::Mutex<()>,
 }
@@ -176,7 +186,7 @@ impl Provider for DeepSeekProvider {
         &[]
     }
 
-    fn apis(&self) -> &HashMap<ApiId, Arc<dyn LlmApi>> {
+    fn apis(&self) -> &[(ApiId, Arc<dyn LlmApi>)] {
         &self.apis
     }
 
@@ -278,7 +288,7 @@ impl DeepSeekBuilder {
         Ok(DeepSeekProvider {
             id: ProviderId::new("deepseek"),
             models: std::sync::RwLock::new(self.models),
-            apis: HashMap::from([(ApiId::ChatCompletions, api)]),
+            apis: vec![(ApiId::ChatCompletions, api)],
             auth,
             fetch_lock: tokio::sync::Mutex::new(()),
         })

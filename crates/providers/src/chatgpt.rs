@@ -22,7 +22,7 @@ use constants::{
     ACCOUNT_ID_CLAIM, AUTH_CLAIM_KEY, OPENAI_BETA, ORIGINATOR, PROTOCOL_VERSION, RESPONSES_BASE_URL,
 };
 use llm::{HttpClient, LlmApi, ResponsesApi};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use thiserror::Error;
 
@@ -281,7 +281,7 @@ impl ChatGptAuth {
 pub struct ChatGptProvider {
     id: ProviderId,
     models: Vec<ModelInfo>,
-    apis: HashMap<ApiId, Arc<dyn LlmApi>>,
+    apis: Vec<(ApiId, Arc<dyn LlmApi>)>,
     auth: Arc<ChatGptAuth>,
 }
 
@@ -342,7 +342,7 @@ impl ChatGptProviderBuilder {
         ChatGptProvider {
             id: ProviderId::new("chatgpt"),
             models: self.models,
-            apis: HashMap::from([(ApiId::OpenAiResponses, api)]),
+            apis: vec![(ApiId::OpenAiResponses, api)],
             auth: self.auth,
         }
     }
@@ -362,7 +362,7 @@ impl Provider for ChatGptProvider {
         &[]
     }
 
-    fn apis(&self) -> &HashMap<ApiId, Arc<dyn LlmApi>> {
+    fn apis(&self) -> &[(ApiId, Arc<dyn LlmApi>)] {
         &self.apis
     }
 }

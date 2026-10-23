@@ -1,4 +1,4 @@
-use crate::codec::{CodecChunk, LlmApiCodec};
+use crate::codec::{CodecChunk, LlmApiCodec, LlmStreamDecoder};
 use crate::{LlmError, LlmEvent, LlmRequest, Message, Role, StopReason, ToolSpec, Usage};
 use serde::{Deserialize, Serialize};
 
@@ -10,7 +10,14 @@ impl LlmApiCodec for DefaultChatCompletionsCodec {
         serde_json::to_string(&BaseRequest::new(request)).map_err(LlmError::Serialization)
     }
 
-    fn response(&self, data: &str) -> Result<CodecChunk, LlmError> {
+    fn decoder(&self) -> Box<dyn LlmStreamDecoder> {
+        Box::new(super::ChatCompletionsDecoder::default())
+    }
+}
+
+impl DefaultChatCompletionsCodec {
+    /// Decode one canonical Chat Completions JSON chunk.
+    pub fn response(&self, data: &str) -> Result<CodecChunk, LlmError> {
         let response: BaseResponse = serde_json::from_str(data).map_err(LlmError::Serialization)?;
         decode_stream_response(&response)
     }

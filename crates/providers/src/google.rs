@@ -5,7 +5,7 @@ use crate::{
 use async_trait::async_trait;
 use llm::{HttpClient, InteractionsApi, LlmApi};
 use reqwest::StatusCode;
-use std::{collections::HashMap, sync::Arc};
+use std::sync::Arc;
 
 const BASE_URL: &str = "https://generativelanguage.googleapis.com/v1beta";
 
@@ -13,7 +13,7 @@ pub struct GoogleProvider {
     id: ProviderId,
     models: std::sync::RwLock<Vec<ModelInfo>>,
     server_tools: Vec<ServerToolInfo>,
-    apis: HashMap<ApiId, Arc<dyn LlmApi>>,
+    apis: Vec<(ApiId, Arc<dyn LlmApi>)>,
     auth: Arc<dyn AuthResolver>,
 }
 
@@ -98,7 +98,7 @@ impl Provider for GoogleProvider {
         &self.server_tools
     }
 
-    fn apis(&self) -> &HashMap<ApiId, Arc<dyn LlmApi>> {
+    fn apis(&self) -> &[(ApiId, Arc<dyn LlmApi>)] {
         &self.apis
     }
 
@@ -181,7 +181,7 @@ impl GoogleBuilder {
             id: ProviderId::new("google"),
             models: std::sync::RwLock::new(self.models),
             server_tools: vec![],
-            apis: HashMap::from([(ApiId::Custom("interactions".to_string()), api)]),
+            apis: vec![(ApiId::Custom("interactions".to_string()), api)],
             auth,
         })
     }

@@ -157,9 +157,7 @@ impl Settings {
         let mut extensions = llm::Extensions::default();
         let order = self.provider_order(model);
         if !order.is_empty() {
-            extensions.insert(OpenRouterOptions {
-                provider_order: order,
-            });
+            extensions.insert(OpenRouterOptions { only: order });
         }
         extensions
     }

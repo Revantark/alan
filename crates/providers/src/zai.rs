@@ -5,7 +5,7 @@ use crate::{
 use async_trait::async_trait;
 use llm::{ChatCompletionsApi, HttpClient, LlmApi};
 use reqwest::StatusCode;
-use std::{collections::HashMap, sync::Arc};
+use std::sync::Arc;
 
 const BASE_URL: &str = "https://api.z.ai/api/paas/v4";
 
@@ -13,7 +13,7 @@ pub struct ZaiProvider {
     id: ProviderId,
     models: std::sync::RwLock<Vec<ModelInfo>>,
     server_tools: Vec<ServerToolInfo>,
-    apis: HashMap<ApiId, Arc<dyn LlmApi>>,
+    apis: Vec<(ApiId, Arc<dyn LlmApi>)>,
     auth: Arc<dyn AuthResolver>,
 }
 
@@ -125,7 +125,7 @@ impl Provider for ZaiProvider {
         &self.server_tools
     }
 
-    fn apis(&self) -> &HashMap<ApiId, Arc<dyn LlmApi>> {
+    fn apis(&self) -> &[(ApiId, Arc<dyn LlmApi>)] {
         &self.apis
     }
 
@@ -211,7 +211,7 @@ impl ZaiBuilder {
             id: ProviderId::new("zai"),
             models: std::sync::RwLock::new(self.models),
             server_tools: vec![],
-            apis: HashMap::from([(ApiId::ChatCompletions, api)]),
+            apis: vec![(ApiId::ChatCompletions, api)],
             auth,
         })
     }

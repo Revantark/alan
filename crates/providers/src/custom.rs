@@ -5,10 +5,9 @@ use crate::{
 use async_trait::async_trait;
 use llm::apis::chat_completions::{BaseRequest, DefaultChatCompletionsCodec};
 use llm::{
-    ChatCompletionsApi, CodecChunk, Credential as RequestCredential, HttpClient, LlmApi,
-    LlmApiCodec, LlmError, LlmRequest,
+    ChatCompletionsApi, Credential as RequestCredential, HttpClient, LlmApi, LlmApiCodec, LlmError,
+    LlmRequest,
 };
-use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
 /// Where servers report a model's context window. No field is standard, so
@@ -27,7 +26,7 @@ pub struct CustomProvider {
     api: ApiId,
     base_url: String,
     models: RwLock<Vec<ModelInfo>>,
-    apis: HashMap<ApiId, Arc<dyn LlmApi>>,
+    apis: Vec<(ApiId, Arc<dyn LlmApi>)>,
     auth: Arc<dyn AuthResolver>,
     fetch_lock: tokio::sync::Mutex<()>,
 }
@@ -55,7 +54,7 @@ impl CustomProvider {
                 provider: id.clone(),
                 credentials,
             }),
-            apis: HashMap::from([(api.clone(), client)]),
+            apis: vec![(api.clone(), client)],
             api,
             models: RwLock::new(models),
             fetch_lock: tokio::sync::Mutex::new(()),
@@ -82,8 +81,8 @@ impl LlmApiCodec for PlainChatCompletionsCodec {
         serde_json::to_string(&json).map_err(LlmError::Serialization)
     }
 
-    fn response(&self, data: &str) -> Result<CodecChunk, LlmError> {
-        DefaultChatCompletionsCodec.response(data)
+    fn decoder(&self) -> Box<dyn llm::LlmStreamDecoder> {
+        DefaultChatCompletionsCodec.decoder()
     }
 }
 
@@ -104,7 +103,7 @@ impl Provider for CustomProvider {
         &[]
     }
 
-    fn apis(&self) -> &HashMap<ApiId, Arc<dyn LlmApi>> {
+    fn apis(&self) -> &[(ApiId, Arc<dyn LlmApi>)] {
         &self.apis
     }
 

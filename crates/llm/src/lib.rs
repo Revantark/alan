@@ -15,10 +15,10 @@ pub mod apis;
 
 pub use api::LlmApi;
 pub use apis::{ChatCompletionsApi, InteractionsApi, ResponsesApi};
-pub use codec::{CodecChunk, LlmApiCodec};
+pub use codec::{CodecChunk, LlmApiCodec, LlmStreamDecoder};
 pub use error::LlmError;
 pub use event::{LlmEvent, LlmStream};
-pub use extensions::{Extensions, Headers, SessionId};
+pub use extensions::{Extensions, Headers, OpenRouterOptions, SessionId};
 pub use message::{ContentPart, ImageUrl, Message, Role};
 pub use request::{
     CompletionInput, Credential, LlmRequest, PromptCacheControl, PromptCacheControlType,

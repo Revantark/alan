@@ -1,5 +1,8 @@
 use crate::apis::stream::WireError;
-use crate::{ContentPart, LlmError, LlmRequest, Message, ReasoningEffort, Role, ToolSpec, Usage};
+use crate::{
+    ContentPart, LlmApiCodec, LlmError, LlmRequest, LlmStreamDecoder, Message, ReasoningEffort,
+    Role, ToolSpec, Usage,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
@@ -7,13 +10,27 @@ use std::collections::HashSet;
 /// can be replayed in later turns.
 pub(crate) const REASONING_INCLUDE: &str = "reasoning.encrypted_content";
 
-/// Request body for `POST {base}/responses`.
+/// Codec for the canonical `/responses` protocol.
+pub struct DefaultResponsesCodec;
+
+impl LlmApiCodec for DefaultResponsesCodec {
+    fn request(&self, request: &LlmRequest<'_>) -> Result<String, LlmError> {
+        serialize_request(request)
+    }
+
+    fn decoder(&self) -> Box<dyn LlmStreamDecoder> {
+        Box::new(super::ResponsesDecoder::default())
+    }
+}
+
+/// Canonical `POST {base}/responses` body. Providers whose gateway accepts
+/// extra fields embed it via `#[serde(flatten)]` and add their own.
 ///
 /// The backend requires stateless requests: `store` must be `false`,
 /// `previous_response_id`/`conversation` must be absent, and the full history
 /// is resent every turn.
 #[derive(Serialize)]
-struct Request<'a> {
+pub struct BaseRequest<'a> {
     model: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
     instructions: Option<String>,
@@ -26,6 +43,40 @@ struct Request<'a> {
     /// Omitted entirely when the effort is `None`.
     #[serde(skip_serializing_if = "Option::is_none")]
     reasoning: Option<ReasoningConfig>,
+}
+
+impl<'a> BaseRequest<'a> {
+    /// Build the request body, rejecting tool outputs without a matching
+    /// `call_id` in the history.
+    pub fn new(request: &'a LlmRequest<'a>) -> Result<Self, LlmError> {
+        let instructions = instructions(request.messages);
+        let call_ids: HashSet<&str> = request
+            .messages
+            .iter()
+            .filter_map(|message| message.tool_calls.as_ref())
+            .flatten()
+            .map(|call| call.id.as_str())
+            .collect();
+        let mut input = Vec::new();
+        for message in request.messages {
+            input.extend(message_items(message, &call_ids)?);
+        }
+        let tools = request
+            .tools
+            .iter()
+            .map(wire_tool)
+            .collect::<Result<Vec<_>, LlmError>>()?;
+        Ok(Self {
+            model: request.model_id,
+            instructions,
+            input,
+            tools,
+            stream: true,
+            store: false,
+            include: vec![REASONING_INCLUDE],
+            reasoning: reasoning_config(request.reasoning_effort),
+        })
+    }
 }
 
 #[derive(Serialize)]
@@ -58,7 +109,7 @@ pub(crate) struct WireResponse {
     #[serde(default)]
     pub(crate) model: Option<String>,
     #[serde(default)]
-    pub(crate) usage: Option<WireUsage>,
+    pub(crate) usage: Option<serde_json::Value>,
     #[serde(default)]
     pub(crate) output: Vec<serde_json::Value>,
     #[serde(default)]
@@ -87,45 +138,22 @@ struct OutputTokensDetails {
     reasoning_tokens: Option<u64>,
 }
 
-pub(crate) fn serialize_request(request: &LlmRequest<'_>) -> Result<String, LlmError> {
-    let instructions = instructions(request.messages);
-    // Tool outputs are paired with calls by `call_id`; an output without a
-    // matching earlier call is a caller bug and must surface, not be dropped.
-    let call_ids: HashSet<&str> = request
-        .messages
-        .iter()
-        .filter_map(|message| message.tool_calls.as_ref())
-        .flatten()
-        .map(|call| call.id.as_str())
-        .collect();
-    let mut input = Vec::new();
-    for message in request.messages {
-        input.extend(message_items(message, &call_ids)?);
-    }
-    let tools = request
-        .tools
-        .iter()
-        .map(wire_tool)
-        .collect::<Result<Vec<_>, LlmError>>()?;
-
-    let body = Request {
-        model: request.model_id,
-        instructions,
-        input,
-        tools,
-        stream: true,
-        store: false,
-        include: vec![REASONING_INCLUDE],
-        reasoning: reasoning_config(request.reasoning_effort),
-    };
-    serde_json::to_string(&body).map_err(LlmError::Serialization)
+fn serialize_request(request: &LlmRequest<'_>) -> Result<String, LlmError> {
+    serde_json::to_string(&BaseRequest::new(request)?).map_err(LlmError::Serialization)
 }
 
 pub(crate) fn deserialize_stream_event(body: &str) -> Result<WireEvent, LlmError> {
     serde_json::from_str(body).map_err(LlmError::Serialization)
 }
 
-pub(crate) fn usage_from_wire(usage: &WireUsage) -> Usage {
+/// Decode canonical Responses usage, ignoring provider-specific fields.
+pub fn decode_usage(value: &serde_json::Value) -> Result<Usage, LlmError> {
+    let usage: WireUsage =
+        serde_json::from_value(value.clone()).map_err(LlmError::Serialization)?;
+    Ok(usage_from_wire(&usage))
+}
+
+fn usage_from_wire(usage: &WireUsage) -> Usage {
     Usage {
         input_tokens: usage.input_tokens.unwrap_or(0),
         output_tokens: usage.output_tokens.unwrap_or(0),
@@ -302,11 +330,9 @@ fn wire_tool(tool: &ToolSpec) -> Result<serde_json::Value, LlmError> {
             "parameters": tool.parameters,
             "strict": false,
         })),
-        // The provider advertises no server tools.
-        ToolSpec::Server(tool) => Err(LlmError::InvalidResponse(format!(
-            "server tools are not supported by the ChatGPT provider: {}",
-            tool.kind
-        ))),
+        ToolSpec::Server(tool) => Ok(serde_json::json!({
+            "type": tool.kind,
+        })),
     }
 }
 
@@ -513,14 +539,15 @@ mod tests {
     }
 
     #[test]
-    fn server_tools_are_rejected() {
+    fn server_tools_serialize_as_typed_items() {
         let tools = [ToolSpec::Server(crate::ServerTool {
-            kind: "web_search".into(),
+            kind: "openrouter:web_search".into(),
         })];
         let messages = [Message::user("run it")];
-        let error = request_with(&messages, &tools, ReasoningEffort::None).unwrap_err();
+        let json = request_with(&messages, &tools, ReasoningEffort::None).unwrap();
+        let body: serde_json::Value = serde_json::from_str(&json).unwrap();
 
-        assert!(error.to_string().contains("web_search"));
+        assert_eq!(body["tools"][0]["type"], "openrouter:web_search");
     }
 
     #[test]
@@ -530,6 +557,46 @@ mod tests {
         let body: serde_json::Value = serde_json::from_str(&json).unwrap();
 
         assert_eq!(body["reasoning"]["effort"], "medium");
+    }
+
+    #[test]
+    fn default_codec_keeps_gateway_fields_out_of_the_body() {
+        // ChatGPT rejects OpenRouter-specific fields.
+        let mut extensions = crate::Extensions::default();
+        extensions.insert(crate::SessionId("s-1".into()));
+        extensions.insert(crate::OpenRouterOptions {
+            only: vec!["azure".into()],
+        });
+        let options = RequestOptions {
+            temperature: Some(0.7),
+            max_tokens: Some(256),
+            cache_control: Some(crate::PromptCacheControl::one_hour()),
+        };
+        let request = LlmRequest {
+            model_id: "gpt-test",
+            messages: &[Message::user("hi")],
+            tools: &[],
+            options: &options,
+            credential: None,
+            reasoning_effort: ReasoningEffort::None,
+            extensions,
+        };
+        let body: serde_json::Value =
+            serde_json::from_str(&DefaultResponsesCodec.request(&request).unwrap()).unwrap();
+
+        for field in [
+            "provider",
+            "session_id",
+            "prompt_cache_key",
+            "cache_control",
+            "temperature",
+            "max_output_tokens",
+        ] {
+            assert!(
+                body.get(field).is_none(),
+                "{field} must stay out of the canonical body"
+            );
+        }
     }
 
     #[test]

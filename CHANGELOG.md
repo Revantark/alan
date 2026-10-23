@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- `LlmApiCodec` implementations now create a per-stream `LlmStreamDecoder` instead of decoding shared stateless chunks through `response`; existing provider codecs delegate to reusable base decoders.
+- `OpenRouterOptions` (exposed as `providers::OpenRouterOptions`) carries its provider pin list as `only` instead of `provider_order`.
+- `Provider::apis` returns API bindings in preference order; `bind_model` uses the first entry as the default, without a separate `default_api` override.
+- OpenRouter now uses Responses API.
+
 ## 0.1.9 - 2026-10-21
 
 ### Added
