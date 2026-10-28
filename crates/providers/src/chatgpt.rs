@@ -15,7 +15,7 @@
 use crate::oauth::{self, OAuthConfig, Tokens, unix_now};
 use crate::{
     ApiId, Auth, AuthError, AuthMethod, AuthResolver, Credential, CredentialStore, ModelInfo,
-    Provider, ProviderError, ProviderId, Resolved, ServerToolInfo,
+    Provider, ProviderError, ProviderId, Resolved,
 };
 use async_trait::async_trait;
 use constants::{
@@ -25,6 +25,7 @@ use llm::{HttpClient, LlmApi, ResponsesApi};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use thiserror::Error;
+use tools::ProviderTool;
 
 pub fn oauth_config() -> OAuthConfig {
     OAuthConfig {
@@ -358,7 +359,7 @@ impl Provider for ChatGptProvider {
         self.models.clone()
     }
 
-    fn server_tools(&self) -> &[ServerToolInfo] {
+    fn tools(&self) -> &[ProviderTool] {
         &[]
     }
 

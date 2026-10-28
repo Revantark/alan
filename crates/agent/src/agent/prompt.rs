@@ -8,7 +8,7 @@ use crate::{AgentError, AgentStream};
 use futures_util::StreamExt;
 use llm::{
     CompletionInput, LlmEvent, LlmResponse, LlmResponseBuilder, Message, PromptCacheControl,
-    RequestOptions, ToolSpec, Usage,
+    RequestOptions, Usage,
 };
 use providers::{Model, ModelError};
 use std::sync::Arc;
@@ -238,11 +238,7 @@ pub(super) async fn stream_round(
     context: &mut AgentContext,
     cx: &mut PromptCx<'_>,
 ) -> Result<(LlmResponse, Option<Usage>), AgentError> {
-    let tools: Vec<_> = context
-        .tools
-        .iter()
-        .map(|tool| ToolSpec::Function(tool.definition.clone()))
-        .collect();
+    let tools: Vec<_> = context.tools.iter().map(|tool| tool.spec()).collect();
 
     let messages = build_messages(context);
     let mut extensions = llm::Extensions::default();

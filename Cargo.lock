@@ -1782,6 +1782,7 @@ dependencies = [
  "sha2",
  "thiserror",
  "tokio",
+ "tools",
  "tracing",
  "uuid",
 ]

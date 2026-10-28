@@ -242,7 +242,7 @@ fn input_image(url: &str) -> serde_json::Value {
 }
 
 /// Assistant turns replay as: reasoning items (verbatim, original position),
-/// then function calls, then the text message. Reasoning entries that are not
+/// then the text message, then function calls. Reasoning entries that are not
 /// Responses reasoning items (e.g. summaries captured from other providers)
 /// are skipped; the recorded `encrypted_content` is preserved untouched.
 fn assistant_items(message: &Message) -> Vec<serde_json::Value> {
@@ -264,19 +264,19 @@ fn assistant_items(message: &Message) -> Vec<serde_json::Value> {
         items.clear();
     }
 
+    if let Some(text) = text {
+        items.push(serde_json::json!({
+            "type": "message",
+            "role": "assistant",
+            "content": [{ "type": "output_text", "text": text }],
+        }));
+    }
     for call in calls {
         items.push(serde_json::json!({
             "type": "function_call",
             "call_id": call.id,
             "name": call.name,
             "arguments": call.arguments,
-        }));
-    }
-    if let Some(text) = text {
-        items.push(serde_json::json!({
-            "type": "message",
-            "role": "assistant",
-            "content": [{ "type": "output_text", "text": text }],
         }));
     }
     items
@@ -295,10 +295,29 @@ fn tool_output_item(
             "tool result references unknown tool call {call_id}"
         )));
     }
+    // Responses accepts a string or structured input content for tool output.
+    // Keep plain-text results unchanged; image results must carry their bytes
+    // (or URL) rather than the agent's display-only placeholder.
+    let output = match message
+        .content_parts
+        .as_deref()
+        .filter(|parts| !parts.is_empty())
+    {
+        Some(parts) => serde_json::Value::Array(
+            parts
+                .iter()
+                .map(|part| match part {
+                    ContentPart::Text { text } => input_text(text),
+                    ContentPart::Image { image_url } => input_image(&image_url.url),
+                })
+                .collect(),
+        ),
+        None => serde_json::Value::String(message.content.clone().unwrap_or_default()),
+    };
     Ok(serde_json::json!({
         "type": "function_call_output",
         "call_id": call_id,
-        "output": message.content.clone().unwrap_or_default(),
+        "output": output,
     }))
 }
 
@@ -512,6 +531,112 @@ mod tests {
         assert_eq!(input[2]["type"], "function_call_output");
         assert_eq!(input[2]["call_id"], "call_1");
         assert_eq!(input[2]["output"], "output");
+    }
+
+    #[test]
+    fn tool_results_with_parts_preserve_text_and_images() {
+        let data_uri = "data:image/png;base64,iVBORw0KGgo=";
+        let text = ContentPart::Text {
+            text: "Screenshot from the read tool".into(),
+        };
+        let image = ContentPart::Image {
+            image_url: crate::ImageUrl {
+                url: data_uri.into(),
+            },
+        };
+        let remote_image = ContentPart::Image {
+            image_url: crate::ImageUrl {
+                url: "https://example.invalid/a.png".into(),
+            },
+        };
+        for (parts, expected) in [
+            (
+                vec![image.clone()],
+                serde_json::json!([{"type": "input_image", "image_url": data_uri}]),
+            ),
+            (
+                vec![text.clone(), image, remote_image],
+                serde_json::json!([
+                    {"type": "input_text", "text": "Screenshot from the read tool"},
+                    {"type": "input_image", "image_url": data_uri},
+                    {"type": "input_image", "image_url": "https://example.invalid/a.png"},
+                ]),
+            ),
+            (
+                vec![text],
+                serde_json::json!([{"type": "input_text", "text": "Screenshot from the read tool"}]),
+            ),
+        ] {
+            let messages = [
+                Message::assistant_with_tool_calls_and_reasoning(
+                    None,
+                    vec![ToolCall {
+                        id: "call_image".into(),
+                        name: "read".into(),
+                        arguments: "{}".into(),
+                        ..Default::default()
+                    }],
+                    None,
+                    Vec::new(),
+                ),
+                Message::tool_result_with_parts(parts, "call_image"),
+            ];
+            let body = body_for(&messages);
+            assert_eq!(
+                body["input"][1],
+                serde_json::json!({
+                    "type": "function_call_output",
+                    "call_id": "call_image",
+                    "output": expected,
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn empty_tool_result_parts_fall_back_to_plain_text() {
+        let call_ids = HashSet::from(["call_1"]);
+        for content in [Some("output".to_owned()), None] {
+            let message = Message {
+                content: content.clone(),
+                content_parts: Some(Vec::new()),
+                ..Message::tool_result("", "call_1")
+            };
+            let item = tool_output_item(&message, &call_ids).unwrap();
+            assert_eq!(item["output"], content.unwrap_or_default());
+        }
+    }
+
+    /// A tool-calling assistant turn with text must keep the function call
+    /// immediately adjacent to its output, so the assistant message goes first.
+    /// DeepSeek otherwise reports "No tool output found for tool call".
+    #[test]
+    fn assistant_text_precedes_calls_keeping_outputs_adjacent() {
+        let messages = [
+            Message::user("run it"),
+            Message::assistant_with_tool_calls_and_reasoning(
+                Some("Let me check.".into()),
+                vec![ToolCall {
+                    id: "call_1".into(),
+                    name: "bash".into(),
+                    arguments: "{}".into(),
+                    signature: None,
+                }],
+                None,
+                Vec::new(),
+            ),
+            Message::tool_result("output", "call_1"),
+        ];
+        let body = body_for(&messages);
+        let input = body["input"].as_array().unwrap();
+
+        assert_eq!(input.len(), 4);
+        assert_eq!(input[1]["type"], "message");
+        assert_eq!(input[1]["role"], "assistant");
+        assert_eq!(input[2]["type"], "function_call");
+        assert_eq!(input[2]["call_id"], "call_1");
+        assert_eq!(input[3]["type"], "function_call_output");
+        assert_eq!(input[3]["call_id"], "call_1");
     }
 
     #[test]

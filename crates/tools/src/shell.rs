@@ -202,6 +202,8 @@ mod tests {
     #[test]
     fn parse_kind_maps_static_tools_by_name() {
         assert_eq!(parse_kind(&call("read", "{}")), ToolKind::Read);
+        assert_eq!(parse_kind(&call("web_search", "{}")), ToolKind::Network);
+        assert_eq!(parse_kind(&call("web_fetch", "{}")), ToolKind::Network);
         assert_eq!(parse_kind(&call("write", "{}")), ToolKind::Write);
         assert_eq!(parse_kind(&call("edit", "{}")), ToolKind::Write);
     }

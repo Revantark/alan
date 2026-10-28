@@ -1,18 +1,18 @@
 use crate::{
     ApiId, ApiKeyAuth, Auth, AuthError, AuthResolver, CredentialAuth, ModelInfo, ModelPricing,
-    Provider, ProviderError, ProviderId, ServerToolInfo,
+    Provider, ProviderError, ProviderId,
 };
 use async_trait::async_trait;
 use llm::{ChatCompletionsApi, HttpClient, LlmApi};
 use reqwest::StatusCode;
 use std::sync::Arc;
+use tools::ProviderTool;
 
 const BASE_URL: &str = "https://api.z.ai/api/paas/v4";
 
 pub struct ZaiProvider {
     id: ProviderId,
     models: std::sync::RwLock<Vec<ModelInfo>>,
-    server_tools: Vec<ServerToolInfo>,
     apis: Vec<(ApiId, Arc<dyn LlmApi>)>,
     auth: Arc<dyn AuthResolver>,
 }
@@ -121,8 +121,8 @@ impl Provider for ZaiProvider {
             .clone()
     }
 
-    fn server_tools(&self) -> &[ServerToolInfo] {
-        &self.server_tools
+    fn tools(&self) -> &[ProviderTool] {
+        &[]
     }
 
     fn apis(&self) -> &[(ApiId, Arc<dyn LlmApi>)] {
@@ -210,7 +210,6 @@ impl ZaiBuilder {
         Ok(ZaiProvider {
             id: ProviderId::new("zai"),
             models: std::sync::RwLock::new(self.models),
-            server_tools: vec![],
             apis: vec![(ApiId::ChatCompletions, api)],
             auth,
         })

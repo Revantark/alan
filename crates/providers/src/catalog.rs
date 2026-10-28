@@ -4,12 +4,6 @@ use llm::ReasoningEffort;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct ServerToolInfo {
-    pub id: String,
-    pub description: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ProviderId(pub String);
 
 impl ProviderId {

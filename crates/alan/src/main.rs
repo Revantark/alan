@@ -10,11 +10,11 @@ use crate::core::custom_providers::{self, CustomProviderStore};
 use crate::core::permissions::AlanPermissionManager;
 use crate::core::permissions::ToolPolicy;
 use crate::core::permissions_store;
-use crate::core::server_tools::server_tools;
 use crate::core::settings::patch_from_profile;
 use crate::core::settings::{
     DEFAULT_MODEL, DEFAULT_PROVIDER, PatchSettings, Settings, SettingsStore,
 };
+use crate::core::tool_selection::select_tools;
 use crate::core::update::current_version;
 use crate::core::{ChatController, SlashCommand};
 use crate::keymap::AlanKeyMapper;
@@ -83,12 +83,18 @@ async fn main() -> anyhow::Result<()> {
     let session_manager = Arc::new(SessionManager::new(sessions_path()?));
     let resumed_session = load_resumed_session(&session_manager).await?;
     let model = select_model(&registry, &settings, resumed_session.as_ref())?;
+    let model_tools = select_tools(
+        &registry,
+        &model.info().provider,
+        settings.web_fetch == Some(true),
+        settings.web_search == Some(true),
+    );
 
     let current_dir = std::env::current_dir()?;
 
     if let Some(prompt) = parse_prompt_flag()? {
         let agent = Arc::new(build_agent(
-            model,
+            Agent::builder(model).with_model_tools(model_tools),
             current_dir,
             session_manager,
             resumed_session,
@@ -119,7 +125,7 @@ async fn main() -> anyhow::Result<()> {
     let was_resumed = resumed_session.is_some();
 
     let agent = build_agent(
-        model,
+        Agent::builder(model).with_model_tools(model_tools),
         current_dir,
         session_manager,
         resumed_session,
@@ -241,11 +247,6 @@ fn select_model(
         .get(&ProviderId::new(provider_id))
         .ok_or_else(|| anyhow::anyhow!("Provider not found: {provider_id}"))?;
     let options = ModelOptions {
-        server_tools: server_tools(
-            provider.server_tools(),
-            settings.web_fetch == Some(true),
-            settings.web_search == Some(true),
-        ),
         reasoning_effort: settings.reasoning.unwrap_or_default(),
         extensions: settings.extensions(&model_id),
     };
@@ -268,14 +269,14 @@ fn build_tool_policy(
 }
 
 fn build_agent(
-    model: providers::Model,
+    builder: agent::AgentBuilder,
     current_dir: PathBuf,
     session_manager: Arc<SessionManager>,
     resumed_session: Option<agent::Session>,
     is_blank: bool,
     permission_manager: Arc<dyn ToolPermissionManager>,
 ) -> anyhow::Result<Agent> {
-    let mut builder = Agent::builder(model)
+    let mut builder = builder
         .with_directory(current_dir)
         .with_tools(default_tools())
         .session_manager(session_manager)
@@ -298,11 +299,11 @@ fn build_env_patch_settings(persisted_model: Option<String>) -> anyhow::Result<P
     if let Some(model) = std::env::var_os("ALAN_MODEL") {
         patch.model = Some(model.to_string_lossy().into_owned());
     }
-    if std::env::var_os("ALAN_OPENROUTER_WEB_FETCH").is_some() {
-        patch.web_fetch = Some(parse_bool_env("ALAN_OPENROUTER_WEB_FETCH")?);
+    if let Some(web_fetch) = web_flag_env("ALAN_WEB_FETCH", "ALAN_OPENROUTER_WEB_FETCH")? {
+        patch.web_fetch = Some(web_fetch);
     }
-    if std::env::var_os("ALAN_OPENROUTER_WEB_SEARCH").is_some() {
-        patch.web_search = Some(parse_bool_env("ALAN_OPENROUTER_WEB_SEARCH")?);
+    if let Some(web_search) = web_flag_env("ALAN_WEB_SEARCH", "ALAN_OPENROUTER_WEB_SEARCH")? {
+        patch.web_search = Some(web_search);
     }
     if let Some(effort) = std::env::var_os("ALAN_REASONING_EFFORT") {
         patch.reasoning = Some(parse_reasoning_effort(&effort)?);
@@ -347,10 +348,21 @@ fn parse_provider_order(value: &std::ffi::OsStr) -> anyhow::Result<Vec<String>> 
     Ok(order)
 }
 
-fn parse_bool_env(name: &str) -> anyhow::Result<bool> {
-    let Some(value) = std::env::var_os(name) else {
-        return Ok(false);
-    };
+/// Read a boolean web-tool flag from `name`, falling back to the deprecated
+/// `legacy` name. The new name wins when both are set; using only the legacy
+/// name logs a deprecation warning.
+fn web_flag_env(name: &str, legacy: &str) -> anyhow::Result<Option<bool>> {
+    if let Some(value) = std::env::var_os(name) {
+        return parse_bool(name, &value).map(Some);
+    }
+    if let Some(value) = std::env::var_os(legacy) {
+        tracing::warn!(%legacy, replaced_by = %name, "environment variable renamed");
+        return parse_bool(legacy, &value).map(Some);
+    }
+    Ok(None)
+}
+
+fn parse_bool(name: &str, value: &std::ffi::OsStr) -> anyhow::Result<bool> {
     match value.to_string_lossy().trim().to_ascii_lowercase().as_str() {
         "1" | "true" | "yes" | "on" => Ok(true),
         "0" | "false" | "no" | "off" => Ok(false),
@@ -377,4 +389,32 @@ fn configured_session_id() -> anyhow::Result<Option<String>> {
         return Err(anyhow::anyhow!("ALAN_SESSION must not be empty"));
     }
     Ok(Some(id))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::ffi::OsStr;
+
+    #[test]
+    fn parse_bool_accepts_known_spellings_and_rejects_others() {
+        for (value, expected) in [
+            ("1", true),
+            ("true", true),
+            ("YES", true),
+            ("On", true),
+            ("0", false),
+            ("false", false),
+            (" no ", false),
+            ("OFF", false),
+        ] {
+            assert_eq!(
+                parse_bool("ALAN_WEB_FETCH", OsStr::new(value)).unwrap(),
+                expected,
+                "value {value:?}"
+            );
+        }
+        let error = parse_bool("ALAN_WEB_FETCH", OsStr::new("maybe")).unwrap_err();
+        assert!(error.to_string().contains("ALAN_WEB_FETCH"));
+    }
 }

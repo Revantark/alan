@@ -1,30 +1,14 @@
-use llm::ToolDefinition;
-use std::sync::Arc;
 use tools::{
-    BashExecutor, FileEditExecutor, FileReadExecutor, FileWriteExecutor, ToolExecutor,
-    bash_definition, file_edit_definition, file_read_definition, file_write_definition,
+    BashExecutor, FileEditExecutor, FileReadExecutor, FileWriteExecutor, bash_definition,
+    file_edit_definition, file_read_definition, file_write_definition,
 };
 
-pub struct AgentTool {
-    pub definition: ToolDefinition,
-    pub executor: Arc<dyn ToolExecutor>,
-    pub read_only: bool,
-}
-
-impl AgentTool {
-    pub fn new(definition: ToolDefinition, executor: impl ToolExecutor + 'static) -> Self {
-        Self {
-            definition,
-            executor: Arc::new(executor),
-            read_only: false,
-        }
-    }
-
-    pub fn read_only(mut self) -> Self {
-        self.read_only = true;
-        self
-    }
-}
+/// A tool the agent carries.
+///
+/// This is the unified [`tools::ProviderTool`]: local tools the agent runs and
+/// server tools the provider runs share one type. See that type for the
+/// server/local distinction.
+pub use tools::ProviderTool as AgentTool;
 
 pub fn default_tools() -> Vec<AgentTool> {
     vec![

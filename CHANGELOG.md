@@ -7,12 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- DeepSeek web fetch and search tools, enabled through web settings or profiles and subject to local tool permissions.
+
 ### Changed
 
 - `LlmApiCodec` implementations now create a per-stream `LlmStreamDecoder` instead of decoding shared stateless chunks through `response`; existing provider codecs delegate to reusable base decoders.
 - `OpenRouterOptions` (exposed as `providers::OpenRouterOptions`) carries its provider pin list as `only` instead of `provider_order`.
 - `Provider::apis` returns API bindings in preference order; `bind_model` uses the first entry as the default, without a separate `default_api` override.
 - OpenRouter now uses Responses API.
+- DeepSeek now uses Responses API by default, with reasoning history preserved across tool rounds.
+- `ALAN_WEB_FETCH` and `ALAN_WEB_SEARCH` control web tools for OpenRouter and DeepSeek; the deprecated `ALAN_OPENROUTER_WEB_FETCH` and `ALAN_OPENROUTER_WEB_SEARCH` aliases still work, with the new names taking precedence.
+- Provider tools now share a unified catalog for server- and client-executed tools; model and profile switches replace model-scoped tools while preserving built-in tools.
+
+### Fixed
+
+- Responses API tool outputs preserve image data and mixed text/image content instead of dropping images returned by tools such as `read`.
+- Responses API history places assistant text before function calls so tool outputs remain adjacent to their calls, avoiding DeepSeek's "No tool output found for tool call" error.
 
 ## 0.1.9 - 2026-10-21
 

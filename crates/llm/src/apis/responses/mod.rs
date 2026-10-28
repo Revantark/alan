@@ -540,7 +540,7 @@ mod tests {
         let body = concat!(
             "data: {\"type\":\"response.created\",\"response\":{\"model\":\"gpt-served\"}}\n\n",
             "data: {\"type\":\"response.output_text.delta\",\"delta\":\"hel\"}\n\n",
-            "data: {\"type\":\"response.reasoning_summary_text.delta\",\"delta\":\"thinking\"}\n\n",
+            "event: response.reasoning_text.delta\ndata: {\"type\":\"response.reasoning_text.delta\",\"delta\":\"thinking\"}\n\n",
             "data: {\"type\":\"response.output_text.delta\",\"delta\":\"lo\"}\n\n",
             "data: {\"type\":\"response.completed\",\"response\":{\"model\":\"gpt-served\",\"usage\":{\"input_tokens\":2,\"output_tokens\":3,\"input_tokens_details\":{\"cached_tokens\":1},\"output_tokens_details\":{\"reasoning_tokens\":7}}}}\n\n",
         );

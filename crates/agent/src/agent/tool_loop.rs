@@ -153,10 +153,12 @@ async fn handle_tool_calls(
         // always sent to the model (for a stable cache prefix), so this
         // runtime block is what actually prevents non-read-only tools from
         // running outside Normal mode.
-        if mode != Mode::Normal && !context.tools[tool_index].read_only && call.name != "bash" {
+        if mode != Mode::Normal && !context.tools[tool_index].is_read_only() && call.name != "bash"
+        {
             return Err(AgentError::ToolNotFound(call.name.clone()));
         }
 
+        let executor = context.tools[tool_index].executor();
         let result = {
             tokio::select! {
                 biased;
@@ -165,7 +167,7 @@ async fn handle_tool_calls(
                     changed.map_err(|_| AgentError::Aborted)?;
                     return Err(AgentError::Aborted);
                 }
-                result = context.tools[tool_index].executor.execute(&call) => result,
+                result = executor.execute(&call) => result,
             }
         };
 

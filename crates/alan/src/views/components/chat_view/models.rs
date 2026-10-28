@@ -2,8 +2,8 @@
 //! `/provider`, and the model picker overlays.
 
 use crate::core::SlashCommand;
-use crate::core::server_tools::server_tools;
 use crate::core::settings::{self, PatchSettings, Settings};
+use crate::core::tool_selection::select_tools;
 use crate::root::AlanAction;
 use alan_tui::TaskError;
 use alan_tui::context::Context;
@@ -78,20 +78,22 @@ fn open_model_picker(
                     let settings = settings::get_settings()
                         .await
                         .map_err(|e| TaskError(e.into()))?;
-                    let options = switch_options(
-                        &providers,
-                        &settings,
-                        &model_info,
-                        agent.model_options().await,
-                    );
+                    let options =
+                        switch_options(&settings, &model_info, agent.model_options().await);
 
                     let model = bind_model_info(&providers, &model_info, options)?;
                     let name = model_info.name.clone();
                     let max_context = model_info.context_length;
                     let reasoning_effort = model.reasoning_effort();
 
+                    let tools = select_tools(
+                        &providers,
+                        &model_info.provider,
+                        settings.web_fetch == Some(true),
+                        settings.web_search == Some(true),
+                    );
                     agent
-                        .set_model(model)
+                        .set_model(model, Some(tools))
                         .await
                         .map_err(|e| TaskError(e.into()))?;
                     persist_model(&model_info.id, &model_info.provider)
@@ -312,9 +314,18 @@ fn rebind_model(
             if info.provider != provider {
                 return Ok(());
             }
+            let settings = settings::get_settings()
+                .await
+                .map_err(|e| TaskError(e.into()))?;
             let model = bind_model_info(&providers, &info, agent.model_options().await)?;
+            let tools = select_tools(
+                &providers,
+                &info.provider,
+                settings.web_fetch == Some(true),
+                settings.web_search == Some(true),
+            );
             agent
-                .set_model(model)
+                .set_model(model, Some(tools))
                 .await
                 .map_err(|e| TaskError(e.into()))
         },
@@ -410,35 +421,15 @@ fn model_labels(models: &[ModelInfo]) -> Vec<String> {
         .collect()
 }
 
-pub(crate) fn server_tools_for_provider(
-    providers: &ProviderRegistry,
-    provider_id: &ProviderId,
-    web_fetch: bool,
-    web_search: bool,
-) -> Vec<llm::ServerTool> {
-    providers
-        .get(provider_id)
-        .map_or_else(Vec::new, |provider| {
-            server_tools(provider.server_tools(), web_fetch, web_search)
-        })
-}
-
 /// Options for binding `info` after a model switch: the session's reasoning
-/// effort carries over, while everything provider-specific is recomputed for
-/// the target provider from settings.
+/// effort carries over, while provider-specific extensions are recomputed from
+/// settings. Enabled tools are recomputed separately via `select_tools`.
 pub(crate) fn switch_options(
-    providers: &ProviderRegistry,
     settings: &Settings,
     info: &ModelInfo,
     base: ModelOptions,
 ) -> ModelOptions {
     ModelOptions {
-        server_tools: server_tools_for_provider(
-            providers,
-            &info.provider,
-            settings.web_fetch == Some(true),
-            settings.web_search == Some(true),
-        ),
         reasoning_effort: base.reasoning_effort,
         extensions: settings.extensions(&info.id),
     }
@@ -488,95 +479,27 @@ mod tests {
         assert_eq!(without_grok, ["llama"]);
     }
 
-    fn server_tool(kind: &str) -> llm::ServerTool {
-        llm::ServerTool {
-            kind: kind.to_owned(),
-        }
-    }
-
-    fn web_enabled() -> Settings {
-        Settings {
-            web_fetch: Some(true),
-            web_search: Some(true),
-            ..Settings::default()
-        }
-    }
-
-    /// A switch must not carry the previous model's server tools into a
-    /// provider that never advertised them.
+    /// A switch carries the session's reasoning effort over and recomputes
+    /// provider-specific extensions from settings. Enabled tools are computed
+    /// separately via `select_tools` (see `core::tool_selection`).
     #[test]
-    fn switch_options_drops_foreign_server_tools() {
-        let registry = ProviderRegistry::new([]);
-        registry.insert(provider("deepseek", &["deepseek-flash"]));
+    fn switch_options_carries_reasoning_and_uses_settings_extensions() {
+        let settings = Settings {
+            reasoning: Some(llm::ReasoningEffort::Low),
+            ..Settings::default()
+        };
         let base = ModelOptions {
-            server_tools: vec![
-                server_tool("openrouter:web_fetch"),
-                server_tool("openrouter:web_search"),
-            ],
             reasoning_effort: llm::ReasoningEffort::High,
             ..ModelOptions::default()
         };
 
         let options = switch_options(
-            &registry,
-            &web_enabled(),
-            &ModelInfo::new("deepseek-flash", ProviderId::new("deepseek")),
+            &settings,
+            &ModelInfo::new("openai/gpt-4o-mini", ProviderId::new("openrouter")),
             base,
         );
 
-        assert!(options.server_tools.is_empty());
-        // The session's reasoning effort still carries over.
+        // The session's reasoning effort wins over the setting.
         assert_eq!(options.reasoning_effort, llm::ReasoningEffort::High);
-    }
-
-    /// Switching back to a provider that advertises the tools re-enables them
-    /// from settings instead of inheriting the previous model's empty list.
-    #[test]
-    fn switch_options_rebuilds_server_tools_from_settings() {
-        let store: Arc<dyn providers::CredentialStore> =
-            Arc::new(providers::InMemoryCredentialStore::new());
-        let openrouter: Arc<dyn providers::Provider> = Arc::new(
-            providers::OpenRouterProvider::from_store(store)
-                .build()
-                .unwrap(),
-        );
-        let registry = ProviderRegistry::new([openrouter]);
-
-        let options = switch_options(
-            &registry,
-            &web_enabled(),
-            &ModelInfo::new("openai/gpt-4o-mini", ProviderId::new("openrouter")),
-            ModelOptions::default(),
-        );
-
-        assert_eq!(
-            options.server_tools,
-            vec![
-                server_tool("openrouter:web_fetch"),
-                server_tool("openrouter:web_search"),
-            ]
-        );
-    }
-
-    /// Disabled settings stay empty even on a provider that advertises them.
-    #[test]
-    fn switch_options_honours_disabled_settings() {
-        let store: Arc<dyn providers::CredentialStore> =
-            Arc::new(providers::InMemoryCredentialStore::new());
-        let openrouter: Arc<dyn providers::Provider> = Arc::new(
-            providers::OpenRouterProvider::from_store(store)
-                .build()
-                .unwrap(),
-        );
-        let registry = ProviderRegistry::new([openrouter]);
-
-        let options = switch_options(
-            &registry,
-            &Settings::default(),
-            &ModelInfo::new("openai/gpt-4o-mini", ProviderId::new("openrouter")),
-            ModelOptions::default(),
-        );
-
-        assert!(options.server_tools.is_empty());
     }
 }

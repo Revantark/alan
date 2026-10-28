@@ -6,8 +6,8 @@
 //!
 //! Supported environment variables:
 //!   - ALAN_MODEL
-//!   - ALAN_OPENROUTER_WEB_FETCH
-//!   - ALAN_OPENROUTER_WEB_SEARCH
+//!   - ALAN_WEB_FETCH (legacy alias: ALAN_OPENROUTER_WEB_FETCH)
+//!   - ALAN_WEB_SEARCH (legacy alias: ALAN_OPENROUTER_WEB_SEARCH)
 //!   - ALAN_REASONING_EFFORT
 //!   - ALAN_OR_MODEL_PROVIDER
 //!   - ALAN_PROVIDER

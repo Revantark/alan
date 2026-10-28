@@ -17,7 +17,7 @@ pub use deepseek::{DeepSeekBuilder, DeepSeekProvider};
 pub use auth::{
     ApiKeyAuth, AuthError, AuthMethod, AuthResolver, AuthResult, CredentialAuth, Resolved,
 };
-pub use catalog::{ApiId, ModelCapabilities, ModelInfo, ModelPricing, ProviderId, ServerToolInfo};
+pub use catalog::{ApiId, ModelCapabilities, ModelInfo, ModelPricing, ProviderId};
 pub use chatgpt::{
     ChatGptAuth, ChatGptError, ChatGptProvider, ChatGptProviderBuilder, account_id_from_token,
     constants,
@@ -35,4 +35,5 @@ pub use oauth::{
 };
 pub use openrouter::{OpenRouterBuilder, OpenRouterProvider, Options as OpenRouterOptions};
 pub use provider::{Auth, Provider, ProviderError, ProviderRegistry, bind_model};
+pub use tools::{Capability, ProviderTool};
 pub use zai::{ZaiBuilder, ZaiProvider};

@@ -1,11 +1,12 @@
 use crate::Model;
 use crate::auth::AuthResolver;
-use crate::catalog::{ApiId, ModelInfo, ProviderId, ServerToolInfo};
+use crate::catalog::{ApiId, ModelInfo, ProviderId};
 use crate::model::ModelOptions;
 use async_trait::async_trait;
 use llm::LlmApi;
 use std::sync::{Arc, RwLock};
 use thiserror::Error;
+use tools::ProviderTool;
 
 #[derive(Debug, Error)]
 pub enum ProviderError {
@@ -64,7 +65,9 @@ pub trait Provider: Auth + Send + Sync {
 
     fn models(&self) -> Vec<ModelInfo>;
 
-    fn server_tools(&self) -> &[ServerToolInfo];
+    /// Every tool this provider offers, server- and client-executed alike.
+    /// The application selects which are enabled via [`tools::Capability`].
+    fn tools(&self) -> &[ProviderTool];
 
     /// API bindings in preference order; [`bind_model`] uses the first entry.
     fn apis(&self) -> &[(ApiId, Arc<dyn LlmApi>)];
@@ -139,17 +142,11 @@ pub fn bind_model(
         })?;
 
     let ModelOptions {
-        server_tools,
         reasoning_effort,
         extensions,
     } = options;
 
     let options = ModelOptions {
-        server_tools: crate::model::supported_server_tools(
-            server_tools,
-            provider.server_tools(),
-            &model_info.provider,
-        ),
         reasoning_effort,
         extensions,
     };

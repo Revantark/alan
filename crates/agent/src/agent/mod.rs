@@ -106,6 +106,7 @@ impl Agent {
             model,
             system_prompt: None,
             tools: Vec::new(),
+            model_tools: Vec::new(),
             max_tool_rounds: 200,
             session_manager: None,
             resumed_session: None,
@@ -333,11 +334,15 @@ impl Agent {
         }
     }
 
-    /// Replace the bound model. The next prompt uses the new model;
-    /// the reported model info is updated to match. Fails only if
-    /// another prompt currently holds the model lock (i.e. a run is
-    /// streaming), in which case the agent is left untouched.
-    pub async fn set_model(&self, model: Model) -> Result<(), AgentError> {
+    /// Replace the bound model, optionally replacing its model-scoped tools at
+    /// the same time. Pass `Some(tools)` on a model switch so runs cannot use
+    /// stale executors; pass `None` to keep the current tools. The next prompt
+    /// uses the new model and the reported model info is updated to match.
+    pub async fn set_model(
+        &self,
+        model: Model,
+        tools: Option<Vec<crate::AgentTool>>,
+    ) -> Result<(), AgentError> {
         let mut current = self.model.try_lock().map_err(|_| {
             AgentError::Model(providers::ModelError::Llm(llm::LlmError::Configuration(
                 "agent is busy: cannot switch models mid-run".into(),
@@ -345,6 +350,9 @@ impl Agent {
         })?;
         let info = model.info().clone();
         let reasoning = model.reasoning_effort();
+        if let Some(tools) = tools {
+            self.context.lock().await.replace_model_tools(tools);
+        }
         *current = model;
         *self.model_info.lock().await = info.clone();
         self.reasoning

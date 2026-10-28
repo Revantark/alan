@@ -69,6 +69,7 @@ pub struct AgentBuilder {
     pub(super) model: Model,
     pub(super) system_prompt: Option<String>,
     pub(super) tools: Vec<AgentTool>,
+    pub(super) model_tools: Vec<AgentTool>,
     pub(super) max_tool_rounds: usize,
     pub(super) session_manager: Option<Arc<SessionManager>>,
     pub(super) resumed_session: Option<Session>,
@@ -106,8 +107,10 @@ impl AgentBuilder {
         self
     }
 
-    pub fn tool(self, tool: AgentTool) -> Self {
-        self.with_tools([tool])
+    /// Model specific tools like web tools are only supported by few providers.
+    pub fn with_model_tools(mut self, tools: Vec<AgentTool>) -> Self {
+        self.model_tools = tools;
+        self
     }
 
     pub fn max_tool_rounds(mut self, rounds: usize) -> Self {
@@ -158,6 +161,7 @@ impl AgentBuilder {
         }
 
         let mut context = AgentContext::new(self.system_prompt, self.tools);
+        context.replace_model_tools(self.model_tools);
         context.hydrate(messages, usage);
 
         let info = self.model.info().clone();

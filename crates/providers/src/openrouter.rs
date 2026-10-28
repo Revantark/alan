@@ -1,6 +1,6 @@
 use crate::{
     ApiId, ApiKeyAuth, Auth, AuthError, AuthResolver, CredentialAuth, ModelInfo, ModelPricing,
-    Provider, ProviderError, ProviderId, ServerToolInfo,
+    Provider, ProviderError, ProviderId,
 };
 use async_trait::async_trait;
 use llm::apis::chat_completions::{BaseRequest, BaseResponse, WireUsage, decode_stream_response};
@@ -12,6 +12,7 @@ use llm::{
 use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use tools::{Capability, ProviderTool};
 
 const BASE_URL: &str = "https://openrouter.ai/api/v1";
 
@@ -367,7 +368,7 @@ mod codec_tests {
 pub struct OpenRouterProvider {
     id: ProviderId,
     models: std::sync::RwLock<Vec<ModelInfo>>,
-    server_tools: Vec<ServerToolInfo>,
+    tools: Vec<ProviderTool>,
     apis: Vec<(ApiId, Arc<dyn LlmApi>)>,
     auth: Arc<dyn AuthResolver>,
     fetch_lock: tokio::sync::Mutex<()>,
@@ -426,8 +427,8 @@ impl Provider for OpenRouterProvider {
             .clone()
     }
 
-    fn server_tools(&self) -> &[ServerToolInfo] {
-        &self.server_tools
+    fn tools(&self) -> &[ProviderTool] {
+        &self.tools
     }
 
     fn apis(&self) -> &[(ApiId, Arc<dyn LlmApi>)] {
@@ -550,15 +551,11 @@ impl OpenRouterBuilder {
         Ok(OpenRouterProvider {
             id: ProviderId::new("openrouter"),
             models: std::sync::RwLock::new(self.models),
-            server_tools: vec![
-                ServerToolInfo {
-                    id: "openrouter:web_fetch".into(),
-                    description: "Fetch a web page".into(),
-                },
-                ServerToolInfo {
-                    id: "openrouter:web_search".into(),
-                    description: "Search the web".into(),
-                },
+            tools: vec![
+                ProviderTool::server("openrouter:web_fetch", "Fetch a web page")
+                    .with_capability(Capability::WebFetch),
+                ProviderTool::server("openrouter:web_search", "Search the web")
+                    .with_capability(Capability::WebSearch),
             ],
             apis,
             auth,

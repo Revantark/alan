@@ -13,8 +13,9 @@ sha2 = { workspace = true }
 thiserror = { workspace = true }
 reqwest = { workspace = true }
 tokio = { workspace = true, features = ["sync", "rt", "net", "time"] }
+tools = { path = "../tools" }
 tracing = { workspace = true }
 uuid = { workspace = true }
 
 [dev-dependencies]
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["test-util"] }

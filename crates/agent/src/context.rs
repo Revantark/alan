@@ -183,23 +183,39 @@ pub struct AgentContext {
     pub usage: Usage,
     pub tools: Vec<AgentTool>,
     pub tool_indexes: HashMap<String, usize>,
+    base_tool_count: usize,
 }
 
 impl AgentContext {
     pub fn new(system_prompt: Option<String>, tools: Vec<AgentTool>) -> Self {
         let mut tool_indexes = HashMap::with_capacity(tools.len());
         for (index, tool) in tools.iter().enumerate() {
-            tool_indexes
-                .entry(tool.definition.name.clone())
-                .or_insert(index);
+            tool_indexes.entry(tool.id().to_owned()).or_insert(index);
         }
 
         Self {
             system_prompt,
             messages: Vec::new(),
             usage: Usage::default(),
+            base_tool_count: tools.len(),
             tools,
             tool_indexes,
+        }
+    }
+
+    pub(crate) fn replace_model_tools(&mut self, tools: Vec<AgentTool>) {
+        self.tools.truncate(self.base_tool_count);
+        // Base tools win name collisions, matching construction-time indexing.
+        for tool in tools {
+            if !self.tools.iter().any(|base| base.id() == tool.id()) {
+                self.tools.push(tool);
+            }
+        }
+        self.tool_indexes.clear();
+        for (index, tool) in self.tools.iter().enumerate() {
+            self.tool_indexes
+                .entry(tool.id().to_owned())
+                .or_insert(index);
         }
     }
 

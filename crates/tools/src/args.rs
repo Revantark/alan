@@ -29,6 +29,7 @@ pub fn parse_kind(call: &ToolCall) -> ToolKind {
     match call.name.as_str() {
         "read" => ToolKind::Read,
         "write" | "edit" => ToolKind::Write,
+        "web_search" | "web_fetch" => ToolKind::Network,
         "bash" => parse(call)
             .and_then(|a| tool_kind(&a))
             .unwrap_or(ToolKind::Unknown),

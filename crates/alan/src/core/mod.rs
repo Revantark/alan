@@ -9,10 +9,10 @@ pub mod paths;
 pub mod permissions;
 pub mod permissions_store;
 pub mod profile;
-pub mod server_tools;
 pub mod settings;
 pub mod skills;
 pub mod store;
+pub mod tool_selection;
 pub mod update;
 
 pub use action::ImageAttachment;

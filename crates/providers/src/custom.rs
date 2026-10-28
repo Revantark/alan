@@ -1,6 +1,6 @@
 use crate::{
     ApiId, Auth, AuthError, AuthMethod, AuthResolver, AuthResult, Credential, CredentialStore,
-    ModelInfo, Provider, ProviderError, ProviderId, Resolved, ServerToolInfo,
+    ModelInfo, Provider, ProviderError, ProviderId, Resolved,
 };
 use async_trait::async_trait;
 use llm::apis::chat_completions::{BaseRequest, DefaultChatCompletionsCodec};
@@ -9,6 +9,7 @@ use llm::{
     LlmRequest,
 };
 use std::sync::{Arc, RwLock};
+use tools::ProviderTool;
 
 /// Where servers report a model's context window. No field is standard, so
 /// the first one holding a positive integer wins.
@@ -99,7 +100,7 @@ impl Provider for CustomProvider {
             .clone()
     }
 
-    fn server_tools(&self) -> &[ServerToolInfo] {
+    fn tools(&self) -> &[ProviderTool] {
         &[]
     }
 

@@ -4,6 +4,7 @@
 use crate::core::SlashCommand;
 use crate::core::profile::{self, Profile, ProfileStore};
 use crate::core::settings::{self, PatchSettings};
+use crate::core::tool_selection::select_tools;
 use crate::root::AlanAction;
 use crate::views::components::{SearchListEvent, SearchListOverlay};
 use alan_tui::TaskError;
@@ -12,7 +13,7 @@ use providers::ProviderId;
 use std::sync::Arc;
 
 use super::ChatView;
-use super::models::{all_models, bind_model_info, fetch_all_models, server_tools_for_provider};
+use super::models::{all_models, bind_model_info, fetch_all_models};
 
 #[derive(Clone, Copy)]
 pub(crate) enum ProfileOperation {
@@ -188,12 +189,6 @@ fn apply_profile(
             let settings = settings::get_settings().await.map_err(super::to_task)?;
             options.extensions = settings.extensions(&profile.model);
             options.reasoning_effort = profile.reasoning;
-            options.server_tools = server_tools_for_provider(
-                &providers,
-                &ProviderId::new(profile.provider.clone()),
-                profile.web_fetch,
-                profile.web_search,
-            );
 
             let profile_model = resolve_profile_model(&providers, &profile).await?;
 
@@ -202,8 +197,14 @@ fn apply_profile(
             let reasoning = model.reasoning_effort();
             let model_name = profile_model.name.clone();
             let max_context = profile_model.context_length;
+            let tools = select_tools(
+                &providers,
+                &profile_model.provider,
+                profile.web_fetch,
+                profile.web_search,
+            );
             agent
-                .set_model(model)
+                .set_model(model, Some(tools))
                 .await
                 .map_err(|error| TaskError(error.into()))?;
 

@@ -575,7 +575,7 @@ async fn abort_cancels_an_in_flight_tool_execution() {
     let dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let a = Arc::new(
         Agent::builder(model_with_api(api.clone()))
-            .tool(AgentTool::new(
+            .with_tools(vec![AgentTool::new(
                 llm::ToolDefinition {
                     name: "wait".into(),
                     description: "Wait indefinitely".into(),
@@ -585,7 +585,7 @@ async fn abort_cancels_an_in_flight_tool_execution() {
                     started: started.clone(),
                     dropped: dropped.clone(),
                 },
-            ))
+            )])
             .build()
             .unwrap(),
     );
@@ -675,7 +675,7 @@ async fn permission_manager_denial_blocks_the_tool_and_is_reported() {
             calls: AtomicUsize::new(0),
         })))
         .session_manager(manager)
-        .with_tools([bash_tool()])
+        .with_model_tools(vec![bash_tool()])
         .permission_manager(pm.clone())
         .build()
         .unwrap(),
@@ -2021,14 +2021,14 @@ async fn tool_call_finished_event_carries_only_the_output_tail() {
         Agent::builder(model_with_api(Arc::new(LongOutputApi {
             calls: AtomicUsize::new(0),
         })))
-        .tool(AgentTool::new(
+        .with_tools(vec![AgentTool::new(
             llm::ToolDefinition {
                 name: "long".into(),
                 description: "Produce a long output".into(),
                 parameters: serde_json::json!({"type": "object"}),
             },
             LongOutputExecutor,
-        ))
+        )])
         .build()
         .unwrap(),
     );
@@ -2069,10 +2069,99 @@ async fn tool_call_finished_event_carries_only_the_output_tail() {
 }
 
 #[tokio::test]
+async fn model_tools_switch_atomically_and_preserve_base_tools() {
+    let a = Agent::builder(model())
+        .with_tools(crate::default_tools())
+        .with_model_tools(vec![AgentTool::new(
+            tools::bash_definition(),
+            tools::BashExecutor,
+        )])
+        .build()
+        .unwrap();
+    assert_eq!(
+        a.context.lock().await.tools.len(),
+        4,
+        "base tools win collisions"
+    );
+    let mut definition = tools::bash_definition();
+    definition.name = "web_search".into();
+    let scoped = || vec![AgentTool::new(definition.clone(), tools::BashExecutor).read_only()];
+    let lock = a.model.lock().await;
+    assert!(a.set_model(model(), Some(scoped())).await.is_err());
+    assert_eq!(a.context.lock().await.tools.len(), 4);
+    drop(lock);
+    a.set_model(model(), Some(scoped())).await.unwrap();
+    assert_eq!(a.context.lock().await.tool_indexes["web_search"], 4);
+    a.set_model(model(), None).await.unwrap();
+    assert_eq!(
+        a.context.lock().await.tools.len(),
+        5,
+        "a None-tools switch preserves tools"
+    );
+    a.set_model(model(), Some(Vec::new())).await.unwrap();
+    let context = a.context.lock().await;
+    assert_eq!(context.tools.len(), 4);
+    assert!(!context.tool_indexes.contains_key("web_search"));
+    assert_eq!(context.tool_indexes["bash"], 3);
+}
+
+/// Server tools must reach the provider as typed server items while local tools
+/// go as functions, regardless of which layer produced them.
+#[tokio::test]
+async fn server_and_local_tools_are_sent_with_the_right_spec() {
+    struct SpecCheckingApi;
+    #[async_trait]
+    impl LlmApi for SpecCheckingApi {
+        async fn stream(&self, request: llm::LlmRequest<'_>) -> Result<llm::LlmStream, LlmError> {
+            let specs: Vec<String> = request
+                .tools
+                .iter()
+                .map(|tool| match tool {
+                    llm::ToolSpec::Function(definition) => format!("function:{}", definition.name),
+                    llm::ToolSpec::Server(server) => format!("server:{}", server.kind),
+                })
+                .collect();
+            assert!(
+                specs.contains(&"server:openrouter:web_search".to_owned()),
+                "{specs:?}"
+            );
+            assert!(specs.contains(&"function:bash".to_owned()), "{specs:?}");
+            Ok(Box::pin(futures_util::stream::iter([
+                Ok(LlmEvent::TextDelta { text: "ok".into() }),
+                Ok(LlmEvent::Done {
+                    stop_reason: StopReason::Stop,
+                    usage: None,
+                    model: Some(request.model_id.to_owned()),
+                }),
+            ])))
+        }
+    }
+
+    let agent = Arc::new(
+        Agent::builder(model_with_api(Arc::new(SpecCheckingApi)))
+            .with_tools(crate::default_tools())
+            .with_model_tools(vec![AgentTool::server(
+                "openrouter:web_search",
+                "Search the web",
+            )])
+            .build()
+            .unwrap(),
+    );
+
+    let response = agent
+        .ask(agent.prompt().content("hi"))
+        .unwrap()
+        .into_response()
+        .await
+        .unwrap();
+    assert_eq!(response.text(), "ok");
+}
+
+#[tokio::test]
 async fn set_model_updates_info() {
     let a = agent(model());
     let new_model = model_with_api(Arc::new(FakeApi));
-    a.set_model(new_model).await.unwrap();
+    a.set_model(new_model, None).await.unwrap();
     assert_eq!(a.info().await.id, "test");
 }
 
@@ -2080,7 +2169,7 @@ async fn set_model_updates_info() {
 async fn set_model_switches_next_prompt() {
     let a = agent(model());
     let new_model = model_with_api(Arc::new(FakeApi));
-    a.set_model(new_model).await.unwrap();
+    a.set_model(new_model, None).await.unwrap();
     let response = a
         .ask(a.prompt().content("hello"))
         .unwrap()
@@ -2094,10 +2183,10 @@ async fn set_model_switches_next_prompt() {
 async fn set_model_fails_while_prompt_runs() {
     let a = agent(model());
     let lock = a.model.lock().await;
-    let result = a.set_model(model()).await;
+    let result = a.set_model(model(), None).await;
     assert!(matches!(result, Err(AgentError::Model(_))));
     drop(lock);
-    a.set_model(model()).await.unwrap();
+    a.set_model(model(), None).await.unwrap();
 }
 
 #[tokio::test]
@@ -2129,7 +2218,7 @@ async fn set_model_persists_switch_in_session() {
     );
 
     let new_model = model_with_api(Arc::new(FakeApi));
-    a.set_model(new_model).await.unwrap();
+    a.set_model(new_model, None).await.unwrap();
 
     let loaded = manager
         .get_session(&session_id, &root)

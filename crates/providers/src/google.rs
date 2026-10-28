@@ -1,18 +1,18 @@
 use crate::{
     ApiId, ApiKeyAuth, Auth, AuthError, AuthResolver, CredentialAuth, ModelInfo, ModelPricing,
-    Provider, ProviderError, ProviderId, ServerToolInfo,
+    Provider, ProviderError, ProviderId,
 };
 use async_trait::async_trait;
 use llm::{HttpClient, InteractionsApi, LlmApi};
 use reqwest::StatusCode;
 use std::sync::Arc;
+use tools::ProviderTool;
 
 const BASE_URL: &str = "https://generativelanguage.googleapis.com/v1beta";
 
 pub struct GoogleProvider {
     id: ProviderId,
     models: std::sync::RwLock<Vec<ModelInfo>>,
-    server_tools: Vec<ServerToolInfo>,
     apis: Vec<(ApiId, Arc<dyn LlmApi>)>,
     auth: Arc<dyn AuthResolver>,
 }
@@ -94,8 +94,8 @@ impl Provider for GoogleProvider {
             .clone()
     }
 
-    fn server_tools(&self) -> &[ServerToolInfo] {
-        &self.server_tools
+    fn tools(&self) -> &[ProviderTool] {
+        &[]
     }
 
     fn apis(&self) -> &[(ApiId, Arc<dyn LlmApi>)] {
@@ -180,7 +180,6 @@ impl GoogleBuilder {
         Ok(GoogleProvider {
             id: ProviderId::new("google"),
             models: std::sync::RwLock::new(self.models),
-            server_tools: vec![],
             apis: vec![(ApiId::Custom("interactions".to_string()), api)],
             auth,
         })

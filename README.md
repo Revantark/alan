@@ -186,13 +186,15 @@ Settings variables override `settings.json` for that run without changing it. St
 | `ALAN_MODEL` | Model id for that provider, e.g. `ALAN_MODEL=openai/gpt-4o-mini alan`. |
 | `ALAN_PROFILE` | Select a saved profile by name for this run without changing `settings.json`. |
 | `ALAN_REASONING_EFFORT` | `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max`. |
-| `ALAN_OPENROUTER_WEB_FETCH` | Turn OpenRouter's web fetch tool on or off: `true`/`false`, `1`/`0`, `yes`/`no`, `on`/`off`. |
-| `ALAN_OPENROUTER_WEB_SEARCH` | Turn OpenRouter's web search tool on or off, same values. |
+| `ALAN_WEB_FETCH` | Turn web fetch on or off for OpenRouter or DeepSeek: `true`/`false`, `1`/`0`, `yes`/`no`, `on`/`off`. |
+| `ALAN_WEB_SEARCH` | Turn web search on or off for OpenRouter or DeepSeek, same values. |
 | `ALAN_OR_MODEL_PROVIDER` | Comma-separated OpenRouter provider order for the selected model, e.g. `deepseek,xiaomi/fp8`. |
 | `ALAN_SESSION` | Resume a saved session by id. Alan prints the exact command when it exits. |
 | `ALAN_LOG` | Log filter in `tracing` `EnvFilter` syntax. Falls back to `RUST_LOG`. |
 | `ALAN_LOG_DIR` | Log directory, default `~/.alan/logs`. |
 | `OPENROUTER_API_KEY`, `DEEPSEEK_API_KEY`, `ZAI_API_KEY` | API key for that provider, used when `/login` has not saved one. |
+
+The old `ALAN_OPENROUTER_WEB_FETCH` / `ALAN_OPENROUTER_WEB_SEARCH` names still work as deprecated aliases of `ALAN_WEB_FETCH` / `ALAN_WEB_SEARCH`, which take precedence when both are set.
 
 ### Flags
 
