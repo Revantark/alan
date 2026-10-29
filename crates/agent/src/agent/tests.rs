@@ -629,7 +629,7 @@ async fn abort_cancels_an_in_flight_tool_execution() {
     assert!(matches!(&messages[1], AgentMessage::Assistant(_)));
     assert!(
         matches!(&messages[2], AgentMessage::ToolResult { tool_call_id, content, .. }
-            if tool_call_id == "call-blocking" && content == "tool execution cancelled"),
+            if tool_call_id == "call-blocking" && content == "tool execution cancelled by user"),
         "the orphaned call must be answered so the next request is valid"
     );
 }
