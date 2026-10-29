@@ -6,6 +6,7 @@ use crate::context::AgentMessage;
 use crate::session::dir::pwd_key;
 use llm::{ReasoningEffort, Usage};
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 fn normalize(pwd: PathBuf) -> Result<PathBuf, SessionError> {
     let dir = pwd.clone();
@@ -148,6 +149,78 @@ impl SessionManager {
         }
 
         Ok(session)
+    }
+
+    /// The most recently written session for `pwd`, or `None` when the
+    /// directory has no saved session yet.
+    pub async fn latest_session(&self, pwd: &Path) -> Result<Option<Session>, SessionError> {
+        let normalized = normalize(pwd.to_path_buf())?;
+        let dir = self.root.join(pwd_key(&normalized));
+        let mut entries = match tokio::fs::read_dir(&dir).await {
+            Ok(entries) => entries,
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(source) => {
+                return Err(SessionError::Store(StoreError::ReadDir {
+                    path: dir,
+                    source,
+                }));
+            }
+        };
+
+        let mut latest: Option<(SystemTime, String)> = None;
+        loop {
+            let entry = entries.next_entry().await.map_err(|source| {
+                SessionError::Store(StoreError::ReadDir {
+                    path: dir.clone(),
+                    source,
+                })
+            })?;
+            let Some(entry) = entry else { break };
+            let path = entry.path();
+            if path.extension().and_then(|extension| extension.to_str()) != Some(JSONL_EXTENSION) {
+                continue;
+            }
+            // A hand-placed or legacy file whose stem is not a valid id cannot
+            // be loaded, so it must not shadow a session that can be.
+            let Some(id) = path.file_stem().and_then(|stem| stem.to_str()) else {
+                continue;
+            };
+
+            if validate_session_id(id).is_err() {
+                continue;
+            }
+
+            let metadata = entry.metadata().await.map_err(|source| {
+                SessionError::Store(StoreError::Metadata {
+                    path: path.clone(),
+                    source,
+                })
+            })?;
+
+            let modified = metadata.modified().map_err(|source| {
+                SessionError::Store(StoreError::Metadata {
+                    path: path.clone(),
+                    source,
+                })
+            })?;
+
+            // Ties break on the id so equally recent files still order
+            // deterministically instead of following `read_dir` order.
+            let is_newer = match &latest {
+                Some((latest_modified, latest_id)) => {
+                    (modified, id) > (*latest_modified, latest_id.as_str())
+                }
+                None => true,
+            };
+            if is_newer {
+                latest = Some((modified, id.to_owned()));
+            }
+        }
+
+        match latest {
+            Some((_, id)) => self.get_session(&id, &normalized).await.map(Some),
+            None => Ok(None),
+        }
     }
 
     /// Create a new session whose messages are `messages[..up_to]`. The new
@@ -1023,5 +1096,105 @@ mod tests {
             set_permissions(&self.root, true).await?;
             Ok(JsonlStore::create(&path, &header).await?)
         }
+    }
+
+    #[tokio::test]
+    async fn latest_session_is_none_without_a_saved_session() {
+        let root = temp_root("latest-none");
+        let manager = SessionManager::new(&root);
+        assert!(
+            manager
+                .latest_session(Path::new("/tmp/none"))
+                .await
+                .expect("latest")
+                .is_none()
+        );
+        cleanup(&root);
+    }
+
+    /// The most recently written session wins, even when another session
+    /// with a later header timestamp exists.
+    #[tokio::test]
+    async fn latest_session_picks_the_most_recently_written_file() {
+        let root = temp_root("latest-write");
+        let manager = SessionManager::new(&root);
+        let pwd = Path::new("/tmp/latest");
+        let older = make_session(&manager, pwd, "o", "m").await;
+        let newer = make_session(&manager, pwd, "o", "m").await;
+        append_user(&manager, &older, "first").await;
+        append_user(&manager, &newer, "second").await;
+
+        // Set mtimes explicitly: two appends in quick succession can land in
+        // the same filesystem timestamp tick.
+        set_modified(&root, pwd, &older.id, 1_000);
+        set_modified(&root, pwd, &newer.id, 2_000);
+
+        let latest = manager
+            .latest_session(pwd)
+            .await
+            .expect("latest")
+            .expect("a session");
+        assert_eq!(latest.id, newer.id, "expected the most recently written");
+
+        set_modified(&root, pwd, &older.id, 3_000);
+        let latest = manager
+            .latest_session(pwd)
+            .await
+            .expect("latest")
+            .expect("a session");
+        assert_eq!(latest.id, older.id, "expected the most recently written");
+        cleanup(&root);
+    }
+
+    fn set_modified(root: &Path, pwd: &Path, id: &str, secs: u64) {
+        let path = root
+            .join(pwd_key(pwd))
+            .join(format!("{id}.{JSONL_EXTENSION}"));
+        let file = std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .expect("open session file");
+        file.set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs))
+            .expect("set mtime");
+    }
+
+    #[tokio::test]
+    async fn latest_session_ignores_other_directories_and_non_session_files() {
+        let root = temp_root("latest-scope");
+        let manager = SessionManager::new(&root);
+        let pwd = Path::new("/tmp/here");
+        let here = make_session(&manager, pwd, "o", "m").await;
+        make_session(&manager, Path::new("/tmp/elsewhere"), "o", "m").await;
+
+        let key_dir = root.join(pwd_key(Path::new("/tmp/here")));
+        std::fs::write(key_dir.join("notes.txt"), "not a session").expect("write notes");
+        std::fs::write(key_dir.join("not_a_valid_id.jsonl"), "{}").expect("write stray jsonl");
+
+        let latest = manager
+            .latest_session(pwd)
+            .await
+            .expect("latest")
+            .expect("a session");
+        assert_eq!(latest.id, here.id);
+        cleanup(&root);
+    }
+
+    #[tokio::test]
+    async fn latest_session_loads_the_full_history() {
+        let root = temp_root("latest-history");
+        let manager = SessionManager::new(&root);
+        let pwd = Path::new("/tmp/history");
+        let session = make_session(&manager, pwd, "o", "m").await;
+        append_user(&manager, &session, "first").await;
+        append_assistant(&manager, &session).await;
+
+        let latest = manager
+            .latest_session(pwd)
+            .await
+            .expect("latest")
+            .expect("a session");
+        assert_eq!(latest.messages.len(), 2);
+        assert_eq!(latest.provider, "o");
+        cleanup(&root);
     }
 }

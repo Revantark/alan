@@ -45,6 +45,12 @@ pub enum StoreError {
         #[source]
         source: std::io::Error,
     },
+    #[error("failed to read metadata for {}: {source}", path.display())]
+    Metadata {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
     #[error("failed to set permissions on {}: {source}", path.display())]
     SetPermissions {
         path: PathBuf,

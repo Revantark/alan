@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - DeepSeek web fetch and search tools, enabled through web settings or profiles and subject to local tool permissions.
+- `-c` / `--continue` resumes the most recent session for the current directory, as an alternative to `ALAN_SESSION`.
 
 ### Changed
 

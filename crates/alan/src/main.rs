@@ -37,6 +37,7 @@ use std::time::Duration;
 async fn main() -> anyhow::Result<()> {
     let is_blank = has_flag("--blank");
     let is_save = has_flag("--save");
+    let is_continue = has_flag("--continue") || has_flag("-c");
 
     if has_flag("--version") {
         println!("alan-init {}", current_version());
@@ -81,7 +82,7 @@ async fn main() -> anyhow::Result<()> {
         tracing::warn!(%error, "failed to load custom providers");
     }
     let session_manager = Arc::new(SessionManager::new(sessions_path()?));
-    let resumed_session = load_resumed_session(&session_manager).await?;
+    let resumed_session = load_resumed_session(&session_manager, is_continue).await?;
     let model = select_model(&registry, &settings, resumed_session.as_ref())?;
     let model_tools = select_tools(
         &registry,
@@ -218,13 +219,33 @@ fn build_providers(
     ])
 }
 
+/// The session to resume: `--continue`/`-c` resumes the latest session for the
+/// current directory, while `ALAN_SESSION` names one explicitly. Naming both
+/// is rejected rather than silently preferring one.
 async fn load_resumed_session(
     session_manager: &SessionManager,
+    is_continue: bool,
 ) -> anyhow::Result<Option<agent::Session>> {
-    let Some(session_id) = configured_session_id()? else {
+    let configured = configured_session_id()?;
+    if is_continue && configured.is_some() {
+        return Err(anyhow::anyhow!(
+            "--continue and ALAN_SESSION both choose a session; set only one"
+        ));
+    }
+
+    let cwd = std::env::current_dir()?;
+    if is_continue {
+        return match session_manager.latest_session(&cwd).await? {
+            Some(session) => Ok(Some(session)),
+            None => Err(anyhow::anyhow!(
+                "no saved session to continue in {}",
+                cwd.display()
+            )),
+        };
+    }
+    let Some(session_id) = configured else {
         return Ok(None);
     };
-    let cwd = std::env::current_dir()?;
     Ok(Some(session_manager.get_session(&session_id, &cwd).await?))
 }
 

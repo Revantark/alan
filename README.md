@@ -198,9 +198,12 @@ The old `ALAN_OPENROUTER_WEB_FETCH` / `ALAN_OPENROUTER_WEB_SEARCH` names still w
 
 ### Flags
 
+- `-c`, `--continue` — resume the most recent session for the current directory.
 - `--save` — write the settings environment variables above into `settings.json`.
 - `--blank` — start without Alan's default system prompt.
 - `--version` — print the installed version.
+
+`-c` and `ALAN_SESSION` both pick a session, so setting both is an error.
 
 ## Skills
 
