@@ -24,6 +24,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Cancelling a run mid-tool (Ctrl+C) no longer persists an assistant tool call without a matching tool result. The aborted round now records a `"tool execution cancelled"` result for each unanswered call, so the next request is valid instead of being rejected with HTTP 400.
 - Responses API tool outputs preserve image data and mixed text/image content instead of dropping images returned by tools such as `read`.
 - Responses API history places assistant text before function calls so tool outputs remain adjacent to their calls, avoiding DeepSeek's "No tool output found for tool call" error.
 

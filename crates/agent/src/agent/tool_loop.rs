@@ -101,8 +101,11 @@ async fn handle_tool_calls(
     cx: &mut PromptCx<'_>,
     mode: Mode,
 ) -> Result<(), AgentError> {
-    for call in calls {
-        cx.check_cancelled()?;
+    for (index, call) in calls.iter().enumerate() {
+        if cx.check_cancelled().is_err() {
+            append_cancelled_results(agent, context, &calls[index..]).await?;
+            return Err(AgentError::Aborted);
+        }
 
         let call_id = call.id.clone();
 
@@ -123,7 +126,7 @@ async fn handle_tool_calls(
             .copied()
             .ok_or_else(|| AgentError::ToolNotFound(call.name.clone()))?;
 
-        let decision = agent.pm.authorize(&call).await;
+        let decision = agent.pm.authorize(call).await;
 
         if decision == Permission::Denied {
             let denial = format!("permission denied for tool \"{}\" by user", call.name);
@@ -165,9 +168,10 @@ async fn handle_tool_calls(
                 changed = cx.cancellation.changed() => {
                     report_cancelled_tool_call(cx.events, &call_id).await;
                     changed.map_err(|_| AgentError::Aborted)?;
+                    append_cancelled_results(agent, context, &calls[index..]).await?;
                     return Err(AgentError::Aborted);
                 }
-                result = executor.execute(&call) => result,
+                result = executor.execute(call) => result,
             }
         };
 
@@ -226,9 +230,36 @@ async fn handle_tool_calls(
             }
         }
 
-        cx.check_cancelled()?;
+        if cx.check_cancelled().is_err() {
+            append_cancelled_results(agent, context, &calls[index + 1..]).await?;
+            return Err(AgentError::Aborted);
+        }
     }
 
+    Ok(())
+}
+
+/// Persist a placeholder tool result for each declared call that was cancelled
+/// before it could produce real output. An aborted round otherwise leaves an
+/// assistant turn whose tool calls have no matching outputs, which every
+/// Responses/Chat Completions backend rejects on the next request (HTTP 400).
+async fn append_cancelled_results(
+    agent: &Agent,
+    context: &mut AgentContext,
+    cancelled: &[llm::ToolCall],
+) -> Result<(), AgentError> {
+    for call in cancelled {
+        super::persistence::append_context_message(
+            agent,
+            context,
+            AgentMessage::ToolResult {
+                tool_call_id: call.id.clone(),
+                content: "tool execution cancelled by user".into(),
+                content_parts: vec![],
+            },
+        )
+        .await?;
+    }
     Ok(())
 }
 

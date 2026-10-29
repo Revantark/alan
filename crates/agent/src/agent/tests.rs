@@ -621,8 +621,137 @@ async fn abort_cancels_an_in_flight_tool_execution() {
     assert_eq!(api.calls.load(Ordering::SeqCst), 1);
 
     let messages = a.messages().await;
-    assert_eq!(messages.len(), 2, "no tool result should be recorded");
+    assert_eq!(
+        messages.len(),
+        3,
+        "a cancelled tool result must be recorded"
+    );
     assert!(matches!(&messages[1], AgentMessage::Assistant(_)));
+    assert!(
+        matches!(&messages[2], AgentMessage::ToolResult { tool_call_id, content, .. }
+            if tool_call_id == "call-blocking" && content == "tool execution cancelled"),
+        "the orphaned call must be answered so the next request is valid"
+    );
+}
+
+/// Records the messages of every request so a test can prove the history sent
+/// to the provider has no dangling tool call after an abort.
+struct RecordingToolApi {
+    calls: AtomicUsize,
+    seen: std::sync::Mutex<Vec<Vec<llm::Message>>>,
+}
+
+#[async_trait]
+impl LlmApi for RecordingToolApi {
+    async fn stream(&self, request: llm::LlmRequest<'_>) -> Result<llm::LlmStream, LlmError> {
+        self.seen.lock().unwrap().push(request.messages.to_vec());
+        if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+            return Ok(Box::pin(futures_util::stream::iter([
+                Ok(LlmEvent::ToolCallDelta {
+                    index: 0,
+                    id: Some("call-blocking".into()),
+                    name: Some("wait".into()),
+                    arguments: "{}".into(),
+                    signature: None,
+                }),
+                Ok(LlmEvent::Done {
+                    stop_reason: StopReason::ToolUse,
+                    usage: None,
+                    model: Some(request.model_id.to_owned()),
+                }),
+            ])));
+        }
+        Ok(Box::pin(futures_util::stream::iter([
+            Ok(LlmEvent::TextDelta {
+                text: "done".into(),
+            }),
+            Ok(LlmEvent::Done {
+                stop_reason: StopReason::Stop,
+                usage: None,
+                model: Some(request.model_id.to_owned()),
+            }),
+        ])))
+    }
+}
+
+/// Regression: cancelling mid-tool used to persist the assistant turn's tool
+/// call without any matching output, so the next request was rejected by the
+/// provider with HTTP 400.
+#[tokio::test]
+async fn aborted_tool_round_leaves_no_orphaned_call_in_the_next_request() {
+    let api = Arc::new(RecordingToolApi {
+        calls: AtomicUsize::new(0),
+        seen: std::sync::Mutex::new(Vec::new()),
+    });
+    let started = Arc::new(tokio::sync::Notify::new());
+    let dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let a = Arc::new(
+        Agent::builder(model_with_api(api.clone()))
+            .with_tools(vec![AgentTool::new(
+                llm::ToolDefinition {
+                    name: "wait".into(),
+                    description: "Wait indefinitely".into(),
+                    parameters: serde_json::json!({"type": "object"}),
+                },
+                BlockingToolExecutor {
+                    started: started.clone(),
+                    dropped: dropped.clone(),
+                },
+            )])
+            .build()
+            .unwrap(),
+    );
+
+    let mut stream = a.ask(a.prompt().content("run the wait tool")).unwrap();
+    assert!(matches!(
+        stream.recv().await,
+        Some(Ok(AgentEvent::ToolCallStarted { name, .. })) if name == "wait"
+    ));
+    tokio::time::timeout(std::time::Duration::from_secs(5), started.notified())
+        .await
+        .expect("tool should start");
+
+    stream.abort();
+    loop {
+        match tokio::time::timeout(std::time::Duration::from_secs(5), stream.recv()).await {
+            Ok(Some(Err(AgentError::Aborted))) => break,
+            Ok(Some(_)) => continue,
+            other => panic!("expected abort, got {other:?}"),
+        }
+    }
+    drop(stream);
+    assert!(dropped.load(Ordering::SeqCst));
+
+    a.ask(a.prompt().content("next"))
+        .unwrap()
+        .into_response()
+        .await
+        .unwrap();
+
+    let seen = api.seen.lock().unwrap();
+    let second = seen.last().expect("second request recorded");
+    let call_ids: std::collections::HashSet<_> = second
+        .iter()
+        .filter(|m| m.role == llm::Role::Assistant)
+        .filter_map(|m| m.tool_calls.as_ref())
+        .flatten()
+        .map(|call| call.id.clone())
+        .collect();
+    let output_ids: std::collections::HashSet<_> = second
+        .iter()
+        .filter(|m| m.role == llm::Role::Tool)
+        .filter_map(|m| m.tool_call_id.clone())
+        .collect();
+    assert!(
+        !call_ids.is_empty(),
+        "the aborted call must still be in history"
+    );
+    for id in &call_ids {
+        assert!(
+            output_ids.contains(id),
+            "tool call {id} has no matching output in the next request"
+        );
+    }
 }
 
 struct ToolCallingApi {
