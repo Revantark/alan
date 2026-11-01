@@ -11,6 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - DeepSeek web fetch and search tools, enabled through web settings or profiles and subject to local tool permissions.
 - `-c` / `--continue` resumes the most recent session for the current directory, as an alternative to `ALAN_SESSION`.
+- Custom providers added with `/provider` can speak the OpenAI Responses API as well as Chat Completions; the form's API row switches between them with the left and right arrow keys.
 
 ### Changed
 

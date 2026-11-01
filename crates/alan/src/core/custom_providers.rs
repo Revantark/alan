@@ -1,7 +1,7 @@
 //! Providers added with `/provider add`: any server that speaks Chat
-//! Completions. Each is a name, a base URL and an API standard in
-//! `providers.json`. Its key, if any, lives in `auth.json` under the same
-//! name so `/login` can change it.
+//! Completions or the OpenAI Responses API. Each is a name, a base URL and an
+//! API standard in `providers.json`. Its key, if any, lives in `auth.json`
+//! under the same name so `/login` can change it.
 
 use anyhow::Result;
 use providers::{

@@ -112,7 +112,7 @@ impl SlashCommand {
             Self::ToolSlip => "approve a command family once, allow its siblings",
             Self::ToolStrict => "allow only exact commands already approved",
             Self::Profile => "save and switch named model profiles",
-            Self::Provider => "add, edit or remove your own Chat Completions server",
+            Self::Provider => "add, edit or remove your own Chat Completions or Responses server",
             Self::Quit => "abort and quit",
         }
     }

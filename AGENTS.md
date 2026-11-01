@@ -73,7 +73,9 @@ replaces that built-in.
 `core::custom_providers::CustomProviderStore` keeps a custom provider's name,
 URL and API standard (`ApiId`) in `<data dir>/providers.json` and its key in
 `auth.json`. `/provider` saves there first, then registers a
-`providers::CustomProvider`. Only `ApiId::ChatCompletions` is implemented.
+`providers::CustomProvider`. `ApiId::ChatCompletions` and
+`ApiId::OpenAiResponses` are implemented; the overlay's API row switches
+between them with the left and right arrow keys.
 
 Optional model override:
 

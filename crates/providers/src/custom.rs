@@ -6,7 +6,7 @@ use async_trait::async_trait;
 use llm::apis::chat_completions::{BaseRequest, DefaultChatCompletionsCodec};
 use llm::{
     ChatCompletionsApi, Credential as RequestCredential, HttpClient, LlmApi, LlmApiCodec, LlmError,
-    LlmRequest,
+    LlmRequest, ResponsesApi,
 };
 use std::sync::{Arc, RwLock};
 use tools::ProviderTool;
@@ -21,7 +21,7 @@ const CONTEXT_FIELDS: [&str; 4] = [
 ];
 
 /// A provider the user adds at runtime: any server that speaks Chat
-/// Completions, known by a name and a base URL.
+/// Completions or the OpenAI Responses API, known by a name and a base URL.
 pub struct CustomProvider {
     id: ProviderId,
     api: ApiId,
@@ -48,6 +48,10 @@ impl CustomProvider {
                 ChatCompletionsApi::new(base_url.clone(), Arc::new(HttpClient::new()))
                     .with_codec(Arc::new(PlainChatCompletionsCodec)),
             ),
+            ApiId::OpenAiResponses => Arc::new(ResponsesApi::new(
+                base_url.clone(),
+                Arc::new(HttpClient::new()),
+            )),
             other => return Err(ProviderError::UnsupportedApi(other.clone())),
         };
         Ok(Self {
@@ -184,7 +188,9 @@ pub async fn fetch_catalog(
     api_key: Option<&str>,
 ) -> Result<Vec<ModelInfo>, ProviderError> {
     match api {
-        ApiId::ChatCompletions => fetch_chat_completions_catalog(provider, base_url, api_key).await,
+        ApiId::ChatCompletions | ApiId::OpenAiResponses => {
+            fetch_chat_completions_catalog(provider, base_url, api_key).await
+        }
         other => Err(ProviderError::UnsupportedApi(other.clone())),
     }
 }
@@ -455,12 +461,12 @@ mod tests {
         ));
 
         // "not a url" would fail as "invalid URL" if a request were attempted.
-        let error = fetch_catalog(&id(), &ApiId::OpenAiResponses, "not a url", None)
+        let error = fetch_catalog(&id(), &ApiId::AnthropicMessages, "not a url", None)
             .await
             .unwrap_err();
         assert!(matches!(
             error,
-            ProviderError::UnsupportedApi(ApiId::OpenAiResponses)
+            ProviderError::UnsupportedApi(ApiId::AnthropicMessages)
         ));
     }
 

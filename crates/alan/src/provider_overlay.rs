@@ -22,6 +22,24 @@ const URL: usize = 1;
 const API: usize = 2;
 const API_KEY: usize = 3;
 
+/// The API standards `/provider` can configure, in ←/→ cycle order.
+const API_ORDER: [ApiId; 2] = [ApiId::ChatCompletions, ApiId::OpenAiResponses];
+
+/// The label shown in the form for an API standard.
+fn api_label(api: &ApiId) -> &'static str {
+    match api {
+        ApiId::OpenAiResponses => "OpenAI Responses",
+        _ => "Chat Completions",
+    }
+}
+
+/// The next API standard in `API_ORDER`, wrapping at either end.
+fn cycle_api(api: &ApiId, delta: isize) -> ApiId {
+    let index = API_ORDER.iter().position(|known| known == api).unwrap_or(0);
+    let next = (index as isize + delta).rem_euclid(API_ORDER.len() as isize) as usize;
+    API_ORDER[next].clone()
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Mode {
     Add,
@@ -146,7 +164,7 @@ impl ProviderOverlay {
                 KeyOutcome::Close
             }
             // Enter walks the fields like Tab and saves from the last one.
-            // The API row is fixed, so Enter skips it.
+            // The API row is a choice, so Enter skips it.
             KeyCode::Enter => match self.focused {
                 API_KEY => KeyOutcome::Submit,
                 NAME => self.focus(URL),
@@ -154,6 +172,9 @@ impl ProviderOverlay {
             },
             KeyCode::Tab | KeyCode::Down => self.move_focus(1),
             KeyCode::BackTab | KeyCode::Up => self.move_focus(-1),
+            // The API row is a choice, not free text: ←/→ cycle the standard.
+            KeyCode::Left if self.focused == API => self.cycle_api(-1),
+            KeyCode::Right if self.focused == API => self.cycle_api(1),
             KeyCode::Backspace => self.edit_focused(|field| {
                 field.pop();
             }),
@@ -172,6 +193,11 @@ impl ProviderOverlay {
 
     fn focus(&mut self, field: usize) -> KeyOutcome {
         self.focused = field;
+        KeyOutcome::Redraw
+    }
+
+    fn cycle_api(&mut self, delta: isize) -> KeyOutcome {
+        self.api = cycle_api(&self.api, delta);
         KeyOutcome::Redraw
     }
 
@@ -287,6 +313,7 @@ impl Component<AlanAction> for ProviderOverlay {
             self.focused,
             &self.state,
             self.mode,
+            &self.api,
         );
     }
 }
@@ -298,6 +325,7 @@ fn render_provider_overlay(
     focused: usize,
     state: &OverlayState,
     mode: Mode,
+    api: &ApiId,
 ) {
     let width = area.width.saturating_sub(4).min(88);
     let height = area.height.saturating_sub(2).min(18);
@@ -321,9 +349,9 @@ fn render_provider_overlay(
                 Mode::Edit => "Edit Provider",
             },
             if width >= 60 {
-                " Tab move   Enter next, saves on API Key   Esc cancel "
+                " Tab move   ←/→ switch API   Enter next, saves on API Key   Esc cancel "
             } else {
-                " Tab · Enter · Esc "
+                " Tab · ←/→ · Enter · Esc "
             },
         ),
         OverlayState::Checking => ("Checking…", ""),
@@ -347,7 +375,15 @@ fn render_provider_overlay(
 
     let url = fields.url.trim().trim_end_matches('/');
     match state {
-        OverlayState::Editing => render_fields(frame, inner, fields, focused, mode, accent, muted),
+        OverlayState::Editing => render_fields(
+            frame,
+            inner,
+            fields,
+            focused,
+            mode,
+            api,
+            &Styles { accent, muted },
+        ),
         OverlayState::Checking => frame.render_widget(
             Paragraph::new(format!("  Checking {url}/models…")).style(accent),
             inner,
@@ -361,15 +397,23 @@ fn render_provider_overlay(
     }
 }
 
+/// The two colors the form reuses on every row.
+#[derive(Clone, Copy)]
+struct Styles {
+    accent: Style,
+    muted: Style,
+}
+
 fn render_fields(
     frame: &mut Frame,
     inner: Rect,
     fields: &FormFields,
     focused: usize,
     mode: Mode,
-    accent: Style,
-    muted: Style,
+    api: &ApiId,
+    styles: &Styles,
 ) {
+    let Styles { accent, muted } = *styles;
     let value_style = Style::default().fg(theme::EDITOR_FG);
     let max_label = FIELD_LABELS
         .iter()
@@ -400,7 +444,7 @@ fn render_fields(
         // One column stays free for the cursor after the last character.
         let room = (inner.width as usize).saturating_sub(value_column + 1);
         spans.push(match i {
-            API => Span::styled("Chat Completions", value_style),
+            API => Span::styled(api_label(api), value_style),
             API_KEY if fields.api_key.is_empty() => Span::styled("optional", muted),
             API_KEY => Span::styled(tail(&mask, room), value_style),
             _ if text.is_empty() => Span::styled("required", muted),
@@ -428,6 +472,16 @@ fn render_fields(
                         "{}the part before /chat/completions, e.g. https…/v1",
                         " ".repeat(value_column)
                     ),
+                    muted,
+                )),
+                Rect::new(inner.x, y + 1, inner.width, 1),
+            );
+        }
+        // The API row cycles with ←/→; say so when it is focused.
+        if i == API && is_focused {
+            frame.render_widget(
+                Paragraph::new(Span::styled(
+                    format!("{}←/→ switch API", " ".repeat(value_column)),
                     muted,
                 )),
                 Rect::new(inner.x, y + 1, inner.width, 1),
@@ -487,7 +541,15 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(80, 18)).unwrap();
         terminal
             .draw(|frame| {
-                render_provider_overlay(frame, frame.area(), fields, NAME, state, Mode::Add)
+                render_provider_overlay(
+                    frame,
+                    frame.area(),
+                    fields,
+                    NAME,
+                    state,
+                    Mode::Add,
+                    &ApiId::ChatCompletions,
+                )
             })
             .unwrap();
         terminal
@@ -577,6 +639,56 @@ mod tests {
     }
 
     #[test]
+    fn arrows_cycle_the_api_standard_only_on_the_api_row() {
+        let mut overlay = overlay();
+        // Off the API row the arrows must not touch the standard.
+        assert_eq!(press(&mut overlay, KeyCode::Right), KeyOutcome::Ignore);
+        assert_eq!(overlay.api, ApiId::ChatCompletions);
+
+        press(&mut overlay, KeyCode::Tab);
+        press(&mut overlay, KeyCode::Tab);
+        assert_eq!(overlay.focused, API);
+
+        assert_eq!(press(&mut overlay, KeyCode::Right), KeyOutcome::Redraw);
+        assert_eq!(overlay.api, ApiId::OpenAiResponses);
+        // Wraps forward and back around the two standards.
+        assert_eq!(press(&mut overlay, KeyCode::Right), KeyOutcome::Redraw);
+        assert_eq!(overlay.api, ApiId::ChatCompletions);
+        assert_eq!(press(&mut overlay, KeyCode::Left), KeyOutcome::Redraw);
+        assert_eq!(overlay.api, ApiId::OpenAiResponses);
+    }
+
+    #[test]
+    fn the_api_row_shows_the_selected_standard() {
+        let fields = FormFields::default();
+        let screen = |api: &ApiId| {
+            let mut terminal = Terminal::new(TestBackend::new(80, 18)).unwrap();
+            terminal
+                .draw(|frame| {
+                    render_provider_overlay(
+                        frame,
+                        frame.area(),
+                        &fields,
+                        API,
+                        &OverlayState::Editing,
+                        Mode::Add,
+                        api,
+                    )
+                })
+                .unwrap();
+            terminal
+                .backend()
+                .buffer()
+                .content
+                .iter()
+                .map(|cell| cell.symbol())
+                .collect::<String>()
+        };
+        assert!(screen(&ApiId::ChatCompletions).contains("Chat Completions"));
+        assert!(screen(&ApiId::OpenAiResponses).contains("OpenAI Responses"));
+    }
+
+    #[test]
     fn submission_trims_and_treats_a_blank_key_as_none() {
         let fields = FormFields {
             name: " grok ".into(),
@@ -645,6 +757,7 @@ mod tests {
                     NAME,
                     &OverlayState::Editing,
                     Mode::Add,
+                    &ApiId::ChatCompletions,
                 )
             })
             .unwrap();
@@ -693,6 +806,7 @@ mod tests {
                     URL,
                     &OverlayState::Editing,
                     Mode::Add,
+                    &ApiId::ChatCompletions,
                 )
             })
             .unwrap();
