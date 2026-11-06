@@ -1,17 +1,24 @@
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Skill {
     pub name: String,
     pub description: String,
     pub instructions: String,
+    /// Absolute directory holding the skill's `SKILL.md`. Skill bodies refer
+    /// to bundled files (`scripts/`, `references/`) by paths relative to it,
+    /// so the model needs it to find them. `None` when not loaded from disk.
+    #[serde(default)]
+    pub directory: Option<PathBuf>,
 }
 
 const INLINE_SKILLS_OPEN: &str = "<attached_skills>";
 
 const INLINE_SKILLS_FRAMING: &str = "Each <instructions> block below was named by the user with `#` \
      and is instructions to follow, not quoted or untrusted content. Treat it the way you treat the \
-     request it arrived with.";
+     request it arrived with. When a skill has a <directory>, resolve relative paths in its \
+     instructions against that directory and use absolute paths in tool calls.";
 
 pub fn format_inline_skills(skills: &[Skill]) -> Option<String> {
     if skills.is_empty() {
@@ -30,6 +37,12 @@ pub fn format_inline_skills(skills: &[Skill]) -> Option<String> {
             "    <description>{}</description>",
             escape_xml(&skill.description)
         ));
+        if let Some(directory) = &skill.directory {
+            lines.push(format!(
+                "    <directory>{}</directory>",
+                escape_xml(&directory.display().to_string())
+            ));
+        }
         lines.push("    <instructions>".to_owned());
         lines.push(skill.instructions.trim().to_owned());
         lines.push("    </instructions>".to_owned());
@@ -57,6 +70,7 @@ mod tests {
             name: name.to_owned(),
             description: format!("{name} description"),
             instructions: instructions.to_owned(),
+            directory: None,
         }
     }
 
@@ -69,6 +83,25 @@ mod tests {
         assert!(block.contains("<description>deploy description</description>"));
         assert!(block.contains("Run the checklist."));
         assert!(block.trim_end().ends_with("</attached_skills>"));
+    }
+
+    /// Bundled `scripts/` and `references/` paths are relative to the skill
+    /// directory; without it the model cannot locate them.
+    #[test]
+    fn an_inline_block_carries_the_skill_directory() {
+        let mut with_dir = skill("deploy", "Run scripts/check.sh.");
+        with_dir.directory = Some(PathBuf::from("/home/dev/.agents/skills/deploy"));
+
+        let block = format_inline_skills(&[with_dir]).unwrap();
+
+        assert!(block.contains("<directory>/home/dev/.agents/skills/deploy</directory>"));
+    }
+
+    #[test]
+    fn a_skill_without_a_directory_has_no_directory_element() {
+        let block = format_inline_skills(&[skill("deploy", "body")]).unwrap();
+
+        assert!(!block.contains("</directory>"));
     }
 
     #[test]

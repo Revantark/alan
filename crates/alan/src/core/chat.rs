@@ -571,6 +571,7 @@ mod tests {
             name: "deploy".into(),
             description: "d".into(),
             instructions: "i".into(),
+            directory: None,
         }])
         .unwrap();
         let body = format!("{skills}\n\n/tmp/project\n\nPlan mode is on");

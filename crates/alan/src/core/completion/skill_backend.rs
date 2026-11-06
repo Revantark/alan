@@ -64,6 +64,7 @@ mod tests {
             name: name.to_owned(),
             description: description.to_owned(),
             instructions: String::new(),
+            directory: None,
         }
     }
 

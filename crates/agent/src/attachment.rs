@@ -44,6 +44,7 @@ mod tests {
             name: name.to_owned(),
             description: format!("{name} description"),
             instructions: instructions.to_owned(),
+            directory: None,
         }
     }
 

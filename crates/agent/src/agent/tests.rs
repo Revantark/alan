@@ -181,6 +181,7 @@ fn skill(name: &str, instructions: &str) -> Skill {
         name: name.to_owned(),
         description: format!("{name} description"),
         instructions: instructions.to_owned(),
+        directory: None,
     }
 }
 

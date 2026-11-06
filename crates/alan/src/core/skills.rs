@@ -5,9 +5,12 @@
 //! authoritative and is what a `#name` token resolves against; the
 //! frontmatter `name:` is not read at all.
 //!
-//! Roots are scanned project first, so `<cwd>/.alan/skills` shadows
+//! Roots are scanned project first, so project skills shadow
 //! `<data dir>/skills`, which in turn shadows the cross-tool
-//! `<home>/.agents/skills`. The whole catalog is loaded once at startup.
+//! `<home>/.agents/skills`. Project skills come from `.alan/skills` and the
+//! cross-tool `.agents/skills` in every directory from the working directory
+//! up to the repository root, nearest first. The whole catalog is loaded once
+//! at startup.
 //!
 //! Only the frontmatter `description` is interpreted, and it is parsed by hand
 //! rather than with a YAML dependency: the field is either an inline value or
@@ -27,16 +30,53 @@ const MAX_DESCRIPTION: usize = 1_024;
 /// Directory holding skills inside a root.
 const SKILLS_DIR: &str = "skills";
 
-/// Home-relative directory holding skills shared between agent tools.
+/// Directory holding Alan's own config inside a project.
+const ALAN_DIR: &str = ".alan";
+
+/// Directory holding skills shared between agent tools, both inside a
+/// project and under the home directory.
 const SHARED_DIR: &str = ".agents";
+
+/// The file that makes a directory a skill.
+const SKILL_FILE: &str = "SKILL.md";
+
+/// The line that opens and closes a frontmatter block.
+const FRONTMATTER_DELIMITER: &str = "---";
 
 /// The only frontmatter key Alan reads. It is the text the user chooses the
 /// skill from, so a skill without one is not usable.
 const DESCRIPTION_KEY: &str = "description";
 
-/// The project-local skills root for `cwd`: `<cwd>/.alan/skills`.
-pub fn project_root(cwd: &Path) -> PathBuf {
-    cwd.join(".alan").join(SKILLS_DIR)
+/// The project skills roots for `cwd`, nearest first.
+///
+/// Every directory from `cwd` up to the repository root contributes
+/// `.alan/skills` then `.agents/skills`, so a monorepo package can carry its
+/// own skills and still see the repository's. Outside a repository only `cwd`
+/// is scanned: walking further would pick up skills from unrelated parents.
+pub fn project_roots(cwd: &Path) -> Vec<PathBuf> {
+    project_dirs(cwd)
+        .into_iter()
+        .flat_map(|dir| {
+            [
+                dir.join(ALAN_DIR).join(SKILLS_DIR),
+                dir.join(SHARED_DIR).join(SKILLS_DIR),
+            ]
+        })
+        .collect()
+}
+
+/// `cwd` and its ancestors up to the nearest one holding `.git`, or just
+/// `cwd` when no ancestor does. `.git` may be a file in a worktree or
+/// submodule, so only its existence is checked.
+fn project_dirs(cwd: &Path) -> Vec<PathBuf> {
+    let mut dirs: Vec<PathBuf> = Vec::new();
+    for dir in cwd.ancestors() {
+        dirs.push(dir.to_path_buf());
+        if dir.join(".git").exists() {
+            return dirs;
+        }
+    }
+    vec![cwd.to_path_buf()]
 }
 
 /// The personal skills root: `<data dir>/skills`.
@@ -86,6 +126,10 @@ pub fn load_all(roots: &[PathBuf]) -> Vec<Skill> {
             let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
                 continue;
             };
+
+            if !path.join(SKILL_FILE).is_file() {
+                continue;
+            }
             if seen.iter().any(|seen| seen == name) {
                 tracing::debug!(name, path = %path.display(), "skill name already loaded, skipping");
                 continue;
@@ -107,10 +151,13 @@ pub fn load_all(roots: &[PathBuf]) -> Vec<Skill> {
 
 /// Load one `<dir>/SKILL.md`.
 ///
+/// The directory is kept absolute so relative paths in the body
+/// (`scripts/`, `references/`) can be resolved against it.
+///
 /// A skill with no usable description cannot be chosen from the popup, so it
 /// is rejected rather than attached blindly.
 fn load_one(dir: &Path, name: &str) -> Result<Skill, String> {
-    let path = dir.join("SKILL.md");
+    let path = dir.join(SKILL_FILE);
     let raw = std::fs::read_to_string(&path).map_err(|error| error.to_string())?;
     let description = description_of(&raw)
         .filter(|value| !value.trim().is_empty())
@@ -128,6 +175,7 @@ fn load_one(dir: &Path, name: &str) -> Result<Skill, String> {
         name: name.to_owned(),
         description: truncate(&collapse_whitespace(&description), MAX_DESCRIPTION),
         instructions: instructions.to_owned(),
+        directory: Some(std::path::absolute(dir).unwrap_or_else(|_| dir.to_path_buf())),
     })
 }
 
@@ -237,9 +285,22 @@ fn description_of(raw: &str) -> Option<String> {
 /// `---`, or the block never closes. A half-written header is treated as no
 /// header rather than guessed at.
 fn frontmatter_and_body(raw: &str) -> Option<(&str, &str)> {
-    let rest = raw.strip_prefix("---\n")?;
-    let end = rest.find("\n---\n")?;
-    Some((&rest[..end], &rest[end + "\n---\n".len()..]))
+    let raw = raw.strip_prefix('\u{feff}').unwrap_or(raw);
+    let mut lines = raw.split_inclusive('\n');
+    let opening = lines.next()?;
+    if opening.trim_end() != FRONTMATTER_DELIMITER {
+        return None;
+    }
+
+    let start = opening.len();
+    let mut end = start;
+    for line in lines {
+        if line.trim_end() == FRONTMATTER_DELIMITER {
+            return Some((&raw[start..end], &raw[end + line.len()..]));
+        }
+        end += line.len();
+    }
+    None
 }
 
 /// Strip one layer of matching quotes.
@@ -373,6 +434,63 @@ mod tests {
     }
 
     #[test]
+    fn crlf_line_endings_are_accepted() {
+        let raw = "---\r\ndescription: Use when shipping\r\n---\r\nbody\r\n";
+
+        assert_eq!(description_of(raw).unwrap(), "Use when shipping");
+        assert_eq!(body_of(raw).trim(), "body");
+    }
+
+    #[test]
+    fn a_byte_order_mark_is_ignored() {
+        let raw = "\u{feff}---\ndescription: Use when shipping\n---\nbody\n";
+
+        assert_eq!(description_of(raw).unwrap(), "Use when shipping");
+        assert_eq!(body_of(raw).trim(), "body");
+    }
+
+    #[test]
+    fn trailing_spaces_on_delimiters_are_ignored() {
+        let raw = "---  \ndescription: Use when shipping\n--- \t\nbody\n";
+
+        assert_eq!(description_of(raw).unwrap(), "Use when shipping");
+        assert_eq!(body_of(raw).trim(), "body");
+    }
+
+    #[test]
+    fn a_closing_delimiter_at_end_of_file_is_accepted() {
+        let raw = "---\ndescription: Use when shipping\n---";
+
+        assert_eq!(description_of(raw).unwrap(), "Use when shipping");
+        assert_eq!(body_of(raw), "");
+    }
+
+    #[test]
+    fn an_empty_frontmatter_is_a_frontmatter() {
+        assert_eq!(
+            frontmatter_and_body("---\n---\nbody\n"),
+            Some(("", "body\n"))
+        );
+    }
+
+    /// A `---` inside the body (a Markdown rule) must not end the header early
+    /// or be mistaken for it.
+    #[test]
+    fn only_the_first_closing_delimiter_ends_the_frontmatter() {
+        let raw = "---\ndescription: d\n---\nintro\n---\nmore\n";
+
+        assert_eq!(body_of(raw), "intro\n---\nmore\n");
+    }
+
+    #[test]
+    fn a_description_containing_a_colon_is_kept_whole() {
+        assert_eq!(
+            description_of_block("description: Use when: the user ships\n").unwrap(),
+            "Use when: the user ships"
+        );
+    }
+
+    #[test]
     fn load_all_reads_description_and_body() {
         let root = temp_root("load");
         write_skill(
@@ -387,6 +505,7 @@ mod tests {
         assert_eq!(skills[0].name, "deploy");
         assert_eq!(skills[0].description, "Use when shipping");
         assert_eq!(skills[0].instructions, "Run the release checklist.");
+        assert_eq!(skills[0].directory, Some(root.join("deploy")));
 
         std::fs::remove_dir_all(&root).ok();
     }
@@ -440,6 +559,116 @@ mod tests {
         assert_eq!(skills[0].name, "good");
 
         std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn entries_without_a_skill_file_are_ignored() {
+        let root = temp_root("non-skills");
+        write_skill(&root, "good", &skill_file("Use when shipping", "body"));
+        std::fs::write(root.join("README.md"), "not a skill").unwrap();
+        std::fs::create_dir_all(root.join("notes")).unwrap();
+
+        let skills = load_all(std::slice::from_ref(&root));
+
+        assert_eq!(skills.len(), 1);
+        assert_eq!(skills[0].name, "good");
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn project_roots_walk_up_to_the_repository_root() {
+        let repo = temp_root("repo");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        let package = repo.join("crates").join("pkg");
+        std::fs::create_dir_all(&package).unwrap();
+
+        let roots = project_roots(&package);
+
+        assert_eq!(
+            roots,
+            vec![
+                package.join(".alan/skills"),
+                package.join(".agents/skills"),
+                repo.join("crates/.alan/skills"),
+                repo.join("crates/.agents/skills"),
+                repo.join(".alan/skills"),
+                repo.join(".agents/skills"),
+            ]
+        );
+
+        std::fs::remove_dir_all(&repo).ok();
+    }
+
+    /// A worktree or submodule has a `.git` file, not a directory.
+    #[test]
+    fn a_git_file_marks_the_repository_root() {
+        let repo = temp_root("worktree");
+        std::fs::write(repo.join(".git"), "gitdir: /elsewhere\n").unwrap();
+        let sub = repo.join("sub");
+        std::fs::create_dir_all(&sub).unwrap();
+
+        let roots = project_roots(&sub);
+
+        assert_eq!(roots.last(), Some(&repo.join(".agents/skills")));
+        assert_eq!(roots.len(), 4);
+
+        std::fs::remove_dir_all(&repo).ok();
+    }
+
+    #[test]
+    fn outside_a_repository_only_the_working_directory_is_scanned() {
+        let dir = temp_root("no-repo");
+
+        // The temp dir must not sit inside a repository for this to hold.
+        if dir.ancestors().any(|d| d.join(".git").exists()) {
+            return;
+        }
+
+        assert_eq!(
+            project_roots(&dir),
+            vec![dir.join(".alan/skills"), dir.join(".agents/skills")]
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Nearer project skills shadow ones further up, and `.alan` shadows
+    /// `.agents` in the same directory.
+    #[test]
+    fn nearer_project_skills_shadow_farther_ones() {
+        let repo = temp_root("shadow-repo");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        let package = repo.join("pkg");
+        write_skill(
+            &package.join(".agents/skills"),
+            "deploy",
+            &skill_file("package agents", "b"),
+        );
+        write_skill(
+            &package.join(".alan/skills"),
+            "deploy",
+            &skill_file("package alan", "b"),
+        );
+        write_skill(
+            &repo.join(".agents/skills"),
+            "deploy",
+            &skill_file("repo", "b"),
+        );
+        write_skill(
+            &repo.join(".agents/skills"),
+            "review",
+            &skill_file("repo review", "b"),
+        );
+
+        let skills = load_all(&project_roots(&package));
+
+        assert_eq!(skills.len(), 2);
+        let deploy = skills.iter().find(|s| s.name == "deploy").unwrap();
+        assert_eq!(deploy.description, "package alan");
+        assert!(skills.iter().any(|s| s.name == "review"));
+
+        std::fs::remove_dir_all(&repo).ok();
     }
 
     #[test]
@@ -528,11 +757,13 @@ mod tests {
                 name: "deploy".into(),
                 description: "Use when shipping".into(),
                 instructions: "release checklist".into(),
+                directory: None,
             },
             Skill {
                 name: "review".into(),
                 description: "Use when reviewing".into(),
                 instructions: "review rules".into(),
+                directory: None,
             },
         ]
     }

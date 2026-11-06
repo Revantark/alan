@@ -182,11 +182,19 @@ When converting assistant messages to LLM messages, omit `tool_calls` when list 
 
 ## Skills
 
-Skills load from `<project>/.alan/skills/<name>/SKILL.md`,
-`<data dir>/skills/<name>/SKILL.md`, and
-`<home>/.agents/skills/<name>/SKILL.md`, in that order, so an earlier
-root shadows a later one of the same name. Typing `#name` in the prompt
-attaches that skill's body to the message.
+Skills load from, in order:
+
+1. `.alan/skills/<name>/SKILL.md` then `.agents/skills/<name>/SKILL.md` in
+   every directory from the working directory up to the repository root
+   (the nearest ancestor holding `.git`), nearest first. Outside a
+   repository only the working directory is scanned.
+2. `<data dir>/skills/<name>/SKILL.md`.
+3. `<home>/.agents/skills/<name>/SKILL.md`.
+
+An earlier root shadows a later one of the same name. Only directories
+holding a `SKILL.md` count; other entries are ignored. Typing `#name` in the
+prompt attaches that skill's body, plus its absolute directory so relative
+`scripts/` and `references/` paths resolve, to the message.
 
 Discovery lives in `core::skills`; the `agent` crate only formats skills
 it is given and never reads from disk. `core::completion::SkillCompleterBackend`
@@ -195,7 +203,9 @@ catalog loads once at startup.
 
 `core::skills::description_of` parses frontmatter by hand rather than with
 a YAML dependency; only `description` is interpreted, and a skill with none
-is rejected. A body over `MAX_INSTRUCTIONS` (25,000 chars) is rejected
+is rejected. The frontmatter reader tolerates a BOM, CRLF endings, trailing
+spaces on `---`, and a closing `---` at end of file. A body over
+`MAX_INSTRUCTIONS` (50,000 chars) is rejected
 whole — partial instructions would be followed as if complete — and the
 skip is `tracing::warn!`-logged.
 

@@ -898,6 +898,7 @@ mod tests {
                     name: (*name).to_owned(),
                     description: String::new(),
                     instructions: String::new(),
+                    directory: None,
                 })
                 .collect(),
         );
