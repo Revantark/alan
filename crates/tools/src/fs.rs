@@ -342,10 +342,11 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn tool_call(path: &Path, extra_args: &str) -> ToolCall {
+        let path_json = serde_json::to_string(&path.to_string_lossy()).unwrap();
         let arguments = if extra_args.is_empty() {
-            format!(r#"{{"path":"{}"}}"#, path.display())
+            format!(r#"{{"path":{path_json}}}"#)
         } else {
-            format!(r#"{{"path":"{}",{extra_args}}}"#, path.display())
+            format!(r#"{{"path":{path_json},{extra_args}}}"#)
         };
 
         ToolCall {

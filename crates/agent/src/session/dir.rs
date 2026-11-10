@@ -21,8 +21,12 @@ pub(crate) fn normalize_pwd(pwd: PathBuf) -> Result<PathBuf, std::io::Error> {
     if let Ok(canonical) = pwd.canonicalize() {
         return Ok(canonical);
     }
+    #[cfg(windows)]
+    let is_abs = pwd.is_absolute() || pwd.has_root();
+    #[cfg(not(windows))]
+    let is_abs = pwd.is_absolute();
 
-    let absolute = if pwd.is_absolute() {
+    let absolute = if is_abs {
         pwd
     } else {
         std::env::current_dir()?.join(pwd)
@@ -73,14 +77,28 @@ mod tests {
 
     #[test]
     fn normalize_resolves_dots_and_parent_dirs_lexically() {
-        assert_eq!(
-            normalize_components(PathBuf::from("/tmp/./project/../project/src")),
-            PathBuf::from("/tmp/project/src")
-        );
-        assert_eq!(
-            normalize_pwd(PathBuf::from("/tmp/./p/../p")).expect("normalize"),
-            PathBuf::from("/tmp/p")
-        );
+        #[cfg(not(windows))]
+        {
+            assert_eq!(
+                normalize_components(PathBuf::from("/tmp/./project/../project/src")),
+                PathBuf::from("/tmp/project/src")
+            );
+            assert_eq!(
+                normalize_pwd(PathBuf::from("/tmp/./p/../p")).expect("normalize"),
+                PathBuf::from("/tmp/p")
+            );
+        }
+        #[cfg(windows)]
+        {
+            assert_eq!(
+                normalize_components(PathBuf::from(r"\tmp\.\project\..\project\src")),
+                PathBuf::from(r"\tmp\project\src")
+            );
+            assert_eq!(
+                normalize_pwd(PathBuf::from(r"\tmp\.\p\..\p")).expect("normalize"),
+                PathBuf::from(r"\tmp\p")
+            );
+        }
     }
 
     #[test]

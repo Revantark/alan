@@ -8,6 +8,9 @@ use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::process::Command;
 
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
+
 const DEFAULT_TIMEOUT_SECONDS: u64 = 30;
 const MAX_TIMEOUT_SECONDS: u64 = 30 * 60;
 const MAX_OUTPUT_BYTES: usize = 512 * 1000;
@@ -79,16 +82,32 @@ impl ToolExecutor for BashExecutor {
         let requested_timeout = optional_u64(&args, "timeout_seconds", DEFAULT_TIMEOUT_SECONDS)?;
         let timeout_seconds = effective_timeout(requested_timeout);
 
-        let mut child = Command::new("sh")
-            .arg("-c")
-            .arg(&command)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            // Own process group so aborts/timeouts can signal the whole
-            // command tree, not only the `sh` wrapper.
-            .process_group(0)
-            .kill_on_drop(true)
+        #[cfg(unix)]
+        let mut cmd = {
+            let mut c = Command::new("sh");
+            c.arg("-c")
+                .arg(&command)
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .process_group(0)
+                .kill_on_drop(true);
+            c
+        };
+
+        #[cfg(windows)]
+        let mut cmd = {
+            let mut c = Command::new("cmd.exe");
+            c.arg("/C")
+                .arg(&command)
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .kill_on_drop(true);
+            c
+        };
+
+        let mut child = cmd
             .spawn()
             .map_err(|error| ToolError(format!("failed to execute command: {error}")))?;
 
@@ -180,7 +199,16 @@ fn kill_process_group(pid: Option<u32>) {
     if let Some(pid) = pid {
         // SAFETY: `execute` starts the shell with `.process_group(0)`, making
         // its PID the process-group ID. A negative PID targets that group.
-        unsafe { libc::kill(-(pid as i32), libc::SIGKILL) };
+        #[cfg(unix)]
+        unsafe {
+            libc::kill(-(pid as i32), libc::SIGKILL)
+        };
+        #[cfg(windows)]
+        {
+            let _ = std::process::Command::new("taskkill")
+                .args(["/PID", &pid.to_string(), "/T", "/F"])
+                .output();
+        }
     }
 }
 

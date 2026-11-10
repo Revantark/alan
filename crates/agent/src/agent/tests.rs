@@ -1361,7 +1361,11 @@ async fn reset_session_with_empty_seed_is_just_a_reset() {
 async fn provider_is_not_called_if_session_creation_fails() {
     let _root =
         std::env::temp_dir().join(format!("alan-plan3-fail-create-{}", uuid::Uuid::new_v4()));
-    let manager = Arc::new(SessionManager::new("/proc/self/mem/unwritable-dir"));
+    #[cfg(unix)]
+    let unwritable = "/proc/self/mem/unwritable-dir";
+    #[cfg(windows)]
+    let unwritable = r"\\.\NUL\unwritable-dir";
+    let manager = Arc::new(SessionManager::new(unwritable));
     let a = agent_with_manager(model(), manager);
 
     let result = a
