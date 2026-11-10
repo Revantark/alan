@@ -9,6 +9,7 @@ use std::path::PathBuf;
 pub fn alan_home() -> Result<PathBuf> {
     let home = std::env::var_os("ALAN_HOME")
         .or_else(|| std::env::var_os("HOME"))
+        .or_else(|| std::env::var_os("USERPROFILE"))
         .ok_or_else(|| anyhow::anyhow!("cannot determine Alan home directory"))?;
 
     Ok(PathBuf::from(home))

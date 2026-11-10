@@ -94,8 +94,12 @@ impl AgentBuilder {
     /// "Current project dir" line appended to it.
     pub fn with_directory(mut self, absolute_path: impl Into<PathBuf>) -> Self {
         let path = absolute_path.into();
+        #[cfg(not(windows))]
+        let is_abs = path.is_absolute();
+        #[cfg(windows)]
+        let is_abs = path.is_absolute() || path.has_root();
         assert!(
-            path.is_absolute(),
+            is_abs,
             "with_directory requires an absolute path, got {path:?}"
         );
         self.working_directory = Some(path);

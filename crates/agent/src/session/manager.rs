@@ -502,7 +502,8 @@ mod tests {
     }
 
     fn session_file(root: &Path, pwd: &str, id: &str) -> PathBuf {
-        root.join(pwd_key(Path::new(pwd)))
+        let normalized = normalize(PathBuf::from(pwd)).expect("normalize pwd");
+        root.join(pwd_key(&normalized))
             .join(format!("{id}.{JSONL_EXTENSION}"))
     }
 
@@ -522,7 +523,8 @@ mod tests {
             .await
             .expect("create session");
 
-        let pwd_dir = root.join(pwd_key(Path::new("/tmp/project")));
+        let normalized = normalize(PathBuf::from("/tmp/project")).expect("normalize");
+        let pwd_dir = root.join(pwd_key(&normalized));
         assert!(pwd_dir.is_dir(), "pwd-specific directory exists");
         let entries: Vec<_> = std::fs::read_dir(&pwd_dir).expect("read pwd dir").collect();
         assert_eq!(entries.len(), 1, "exactly one file after create");
@@ -741,7 +743,7 @@ mod tests {
 
         // Simulate a second create racing onto the same id: the exclusive
         // file creation must refuse rather than truncate the existing file.
-        let mut collision = Session::new(pwd, "o", "m", ReasoningEffort::None, None, None);
+        let mut collision = Session::new(&session.pwd, "o", "m", ReasoningEffort::None, None, None);
         collision.id = session.id.clone();
         collision.created_at_ms = 123_456;
         collision.updated_at_ms = 123_456;
@@ -804,7 +806,10 @@ mod tests {
             .expect("create");
         let path = session_file(&root, pwd, &session.id);
         let content = std::fs::read_to_string(&path).unwrap();
-        std::fs::write(&path, content.replace(pwd, "/elsewhere")).unwrap();
+        let target_pwd = serde_json::to_string(&session.pwd).unwrap();
+        let replacement = serde_json::to_string(&PathBuf::from("/elsewhere")).unwrap();
+        let content = content.replace(&target_pwd, &replacement);
+        std::fs::write(&path, content).unwrap();
         let err = manager
             .get_session(&session.id, Path::new(pwd))
             .await
@@ -1147,8 +1152,9 @@ mod tests {
     }
 
     fn set_modified(root: &Path, pwd: &Path, id: &str, secs: u64) {
+        let normalized = normalize(pwd.to_path_buf()).expect("normalize pwd");
         let path = root
-            .join(pwd_key(pwd))
+            .join(pwd_key(&normalized))
             .join(format!("{id}.{JSONL_EXTENSION}"));
         let file = std::fs::File::options()
             .write(true)
@@ -1166,7 +1172,8 @@ mod tests {
         let here = make_session(&manager, pwd, "o", "m").await;
         make_session(&manager, Path::new("/tmp/elsewhere"), "o", "m").await;
 
-        let key_dir = root.join(pwd_key(Path::new("/tmp/here")));
+        let normalized = normalize(pwd.to_path_buf()).expect("normalize pwd");
+        let key_dir = root.join(pwd_key(&normalized));
         std::fs::write(key_dir.join("notes.txt"), "not a session").expect("write notes");
         std::fs::write(key_dir.join("not_a_valid_id.jsonl"), "{}").expect("write stray jsonl");
 

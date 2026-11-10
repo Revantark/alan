@@ -47,7 +47,27 @@ alan
 
 ### Windows
 
-Not supported yet.
+**Via PowerShell installer (recommended):**
+
+Runs on both x86_64 and ARM64 Windows (detects architecture automatically):
+
+```powershell
+irm [https://github.com/Revantark/alan/releases/latest/download/alan-installer.ps1](https://github.com/Revantark/alan/releases/latest/download/alan-installer.ps1) | iex
+```
+
+> **Note:** If prompted about your `PATH`, ensure `%USERPROFILE%\.cargo\bin` (or `%USERPROFILE%\.alan\bin`) is included in your user environment variables, then restart your terminal and run `alan`.
+
+**Via Cargo:**
+
+```cmd
+cargo install alan
+```
+
+Or from source inside the repository:
+
+```cmd
+cargo install --path crates/alan
+```
 
 ### Updating
 
